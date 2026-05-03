@@ -50,6 +50,7 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Auto-open hook | `~/.claude/hooks/auto-open-doc.sh` | Opens any spec/plan/grill HTML you write |
 | Doc renderer | `~/docs/superpowers/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
 | Grill renderer | `~/docs/superpowers/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
+| Live-render | `~/docs/superpowers/_lib/live-render.{css,js}` | Chat-like DOM morph on file changes — no full reload, scroll and rendered Mermaid diagrams are preserved |
 | Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss}/SKILL.md` | Claude invokes these on demand |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
 

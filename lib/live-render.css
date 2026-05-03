@@ -1,0 +1,33 @@
+/* Live-render — chat-like fade-in for newly morphed sections.
+ *
+ * Loaded idempotently by doc.js / grill.js. The `.lr-fresh` class is
+ * applied during morph for ~320ms, then stripped. Keep keyframes light
+ * (opacity + tiny translateY) — anything heavier flickers Mermaid SVGs
+ * that share viewport space with the freshly-inserted node.
+ */
+
+@keyframes lr-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.lr-fresh {
+  animation: lr-fade-in 300ms ease-out both;
+  /* Avoid creating a stacking context once the animation is done so it
+   * doesn't trap z-index issues with the .doc-action bar. The class is
+   * stripped via setTimeout, so this scopes only to the fade window. */
+  will-change: opacity, transform;
+}
+
+/* Respect user motion preferences — fall back to instant swap. */
+@media (prefers-reduced-motion: reduce) {
+  .lr-fresh {
+    animation: none;
+  }
+}

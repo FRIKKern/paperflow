@@ -174,7 +174,7 @@ fi
 
 # ─── 6. Shared renderers in ~/docs/superpowers/_lib/ ────────────────
 log "Renderers"
-for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js; do
+for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js live-render.css live-render.js; do
     cp "$REPO/lib/$f" "$HOME/docs/superpowers/_lib/$f"
     ok "$f"
 done
