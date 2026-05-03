@@ -10,6 +10,7 @@ When Claude writes a spec or plan, you usually want to see it, react to it, and 
 - The **bridge** routes the click back into your originating terminal tab via AppleScript / iTerm / tmux, so you see the prompt land where you're already working.
 - A **grill workflow**: critique any plan, get a structured form of pointed questions with rationale + recommendation + per-question diagrams, and submit answers as a single message back to Claude.
 - A **UserPromptSubmit hook** re-injects your standing principles every turn — so Claude doesn't drift even at 60% context.
+- **Click any Mermaid diagram to zoom** — pan + scroll-zoom in a full-screen modal.
 
 ---
 
