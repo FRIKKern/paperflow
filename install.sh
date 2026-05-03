@@ -29,6 +29,33 @@ LABEL_PREFIX="${LABEL_PREFIX:-dev.${USER_NAME}}"
 LR_LABEL="${LABEL_PREFIX}.docs-livereload"
 BR_LABEL="${LABEL_PREFIX}.claude-bridge"
 
+# ─── 0. Pre-flight ─────────────────────────────────────────────────
+log "Pre-flight"
+
+# Node 22+ — check (but locate the real binary later in step 2)
+_PREFLIGHT_NODE_OK=0
+if [ -d "$HOME/.nvm/versions/node" ] && ls -d "$HOME/.nvm/versions/node"/v22.*/bin/node >/dev/null 2>&1; then
+    _PREFLIGHT_NODE_OK=1
+elif command -v node >/dev/null 2>&1; then
+    _NV="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+    [ "${_NV:-0}" -ge 22 ] && _PREFLIGHT_NODE_OK=1
+fi
+if [ "$_PREFLIGHT_NODE_OK" -ne 1 ]; then
+    err "Node 22 or later is required. Install with one of:"
+    printf '      brew install node           (simplest)\n'
+    printf '      brew install nvm && nvm install 22\n\n'
+    printf '    Then re-run: bash install.sh\n'
+    exit 1
+fi
+
+# jq — required for settings.json merge
+if ! command -v jq >/dev/null 2>&1; then
+    err "jq is required. Install with: brew install jq"
+    exit 1
+fi
+
+ok "ready"
+
 # ─── 1. Directories ────────────────────────────────────────────────
 log "Directories"
 mkdir -p "$HOME/docs/superpowers/specs" \
@@ -56,7 +83,10 @@ if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
     if [ "${NV:-0}" -ge 22 ]; then NODE_BIN="$(command -v node)"; fi
 fi
 if [ -z "$NODE_BIN" ]; then
-    err "Node.js v22+ not found. Install via nvm (\`nvm install 22\`) or Homebrew, then re-run."
+    err "Node 22 or later is required. Install with one of:"
+    printf '      brew install node           (simplest)\n'
+    printf '      brew install nvm && nvm install 22\n\n'
+    printf '    Then re-run: bash install.sh\n'
     exit 1
 fi
 NODE_BIN_DIR="$(dirname "$NODE_BIN")"

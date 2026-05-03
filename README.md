@@ -57,38 +57,45 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 ## Install
 
 ```bash
-git clone git@github.com:FRIKKern/paperflow.git ~/Documents/GitHub/paperflow
-bash ~/Documents/GitHub/paperflow/install.sh
+curl -fsSL https://raw.githubusercontent.com/FRIKKern/paperflow/main/scripts/quickstart.sh | bash
 ```
 
-Verify:
+Takes about a minute. Sets up two LaunchAgents, two hooks, three skills, and the article-style renderers.
 
-```bash
-curl -s http://127.0.0.1:8765/    # docs-livereload (returns directory listing)
-curl -s http://127.0.0.1:8766/    # claude-bridge (returns "claude-bridge ok")
-```
+### What happens
 
-In any **already-running** Claude Code session, run `/hooks` once (or restart) so the hooks are picked up. New sessions get them on startup automatically.
+| Step | What | Where |
+|---|---|---|
+| 1 | live-server starts on port 8765 | `~/Library/LaunchAgents/dev.<user>.docs-livereload.plist` |
+| 2 | claude-bridge starts on port 8766 | `~/Library/LaunchAgents/dev.<user>.claude-bridge.plist` |
+| 3 | Hooks wire into Claude Code | `~/.claude/hooks/`, `~/.claude/settings.json` |
+| 4 | Skills + renderers install | `~/.claude/skills/`, `~/docs/superpowers/_lib/` |
 
-### Pre-requisites
+### Pre-reqs
 
 | Need | Install |
 |---|---|
-| macOS 12+ | (you're on a Mac) |
-| Node 22+ | `brew install nvm && nvm install 22` (or `brew install node`) |
+| Node 22+ | `brew install node` |
 | `jq` | `brew install jq` |
-| Xcode CLI tools | `xcode-select --install` |
-| Claude Code | <https://claude.com/code> |
+| Xcode CLI | `xcode-select --install` |
 
-`install.sh` checks Node and bails clearly if it's missing. Everything else is built into macOS.
-
-### Customize the LaunchAgent label
-
-By default, plists are labeled `dev.<your-username>.docs-livereload` and `dev.<your-username>.claude-bridge`. To change the namespace:
+### Verify
 
 ```bash
-LABEL_PREFIX=dev.youralias bash install.sh
+curl -s http://127.0.0.1:8766/    # → claude-bridge ok
 ```
+
+### First steps
+
+After install, ask Claude Code:
+
+- "Write a spec for a CLI tool that watches a directory and rsyncs to S3."
+- After the spec auto-opens, click **Grill the spec** — answer the form, send back.
+- Click **Create plan from this spec**, then **Build this plan**.
+
+In any **already-running** Claude Code session, run `/hooks` once (or restart) so hooks are picked up.
+
+For deeper details — `LABEL_PREFIX` overrides, manual install, the full install table, uninstall — see [INSTALL.md](./INSTALL.md).
 
 ---
 
@@ -225,13 +232,7 @@ Skills sit on top of the infrastructure (LaunchAgents, hooks, renderers). They t
 bash ~/Documents/GitHub/paperflow/uninstall.sh
 ```
 
-Removes the LaunchAgents, hooks, settings entries, renderers, skill, and helper. **Does not** delete `~/.claude/CLAUDE.md` (your edits) or any specs/plans/grills you've written.
-
-To also remove the npm global `live-server`:
-
-```bash
-npm uninstall -g live-server
-```
+Removes the LaunchAgents, hooks, settings entries, renderers, skills, and helper. Leaves your `~/.claude/CLAUDE.md` and any docs you've written. See [INSTALL.md](./INSTALL.md) for the full breakdown.
 
 ---
 
