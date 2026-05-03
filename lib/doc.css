@@ -36,6 +36,31 @@
   flex-wrap: wrap;
 }
 
+.doc-reply {
+  width: 100%;
+  margin: 0 0 .9rem;
+  font-family: var(--serif, "Iowan Old Style", Georgia, serif);
+  font-size: 1rem;
+  line-height: 1.5;
+  padding: .75rem .9rem;
+  border: 1px solid var(--doc-rule);
+  border-radius: 4px;
+  background: #fafaf7;
+  resize: vertical;
+  box-sizing: border-box;
+  min-height: 5rem;
+  color: var(--doc-fg, #1a1a1a);
+}
+.doc-reply:focus {
+  outline: none;
+  border-color: var(--doc-accent);
+  background: #fff;
+}
+.doc-reply::placeholder {
+  color: var(--doc-muted);
+  font-style: italic;
+}
+
 .doc-btn {
   font-family: var(--doc-sans);
   font-size: 1rem;

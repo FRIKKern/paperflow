@@ -49,7 +49,7 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Auto-open hook | `~/.claude/hooks/auto-open-doc.sh` | Opens any spec/plan/grill HTML you write |
 | Doc renderer | `~/docs/superpowers/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
 | Grill renderer | `~/docs/superpowers/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
-| Grill skill | `~/.claude/skills/grill-plan/SKILL.md` | Tells Claude how to write a grill |
+| Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss}/SKILL.md` | Claude invokes these on demand |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
 
 ---
@@ -128,6 +128,7 @@ Each artifact gets a different button set automatically based on its URL path:
 | `/specs/` | Create plan from this spec | Grill the spec |
 | `/plans/` | Build this plan | Grill the plan |
 | `/grills/` | Send answers (rendered by `grill.js`) | — |
+| `/notes/` | Reply (textarea → terminal) | Make this a spec |
 
 ---
 
@@ -186,6 +187,18 @@ Grills are HTML forms that Claude generates via the `grill-plan` skill. Each que
 The renderer pre-selects Claude's recommendation, shows a "★ Claude's pick: ..." callout, and gives every non-open question an *Or write your own answer* override. See `examples/openclaw-grill.html`.
 
 ---
+
+## Skills
+
+Three Claude Code skills ship with paperflow. Claude invokes them on demand based on what you ask for.
+
+| Skill | Trigger phrases | What it does |
+|---|---|---|
+| `paperflow-install` | "install paperflow" · "the bridge isn't running" · first-time setup | Clones repo if missing, runs `install.sh`, reports the green/red status table. Idempotent. |
+| `discuss` | "discuss X" · "explain in depth" · "compare" · "deep-dive" — or whenever a long-form answer would otherwise be a wall of terminal text | Writes the discussion as an HTML article to `~/docs/superpowers/notes/`, auto-opens it, ends with a Reply textarea so you can respond inline. Keeps the chat reply terse. |
+| `grill-plan` | "grill this" · button click on a spec/plan | Reads the doc, generates 8–15 pointed questions across categories with rationale + recommendation + per-question Mermaid diagrams. Renders as an HTML form. |
+
+Skills sit on top of the infrastructure (LaunchAgents, hooks, renderers). They tell Claude *when* to invoke the workflow and *how* to write the artifact.
 
 ## Examples
 

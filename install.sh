@@ -34,11 +34,14 @@ log "Directories"
 mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/docs/superpowers/plans" \
          "$HOME/docs/superpowers/grills" \
+         "$HOME/docs/superpowers/notes" \
          "$HOME/docs/superpowers/_lib" \
          "$HOME/.local/bin" \
          "$HOME/.local/log" \
          "$HOME/.claude/hooks" \
          "$HOME/.claude/skills/grill-plan" \
+         "$HOME/.claude/skills/paperflow-install" \
+         "$HOME/.claude/skills/discuss" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -177,10 +180,17 @@ else
     ok "merged PostToolUse"
 fi
 
-# ─── 9. grill-plan skill ────────────────────────────────────────────
-log "Skill: grill-plan"
-cp "$REPO/skills/grill-plan/SKILL.md" "$HOME/.claude/skills/grill-plan/SKILL.md"
-ok "installed"
+# ─── 9. Skills ──────────────────────────────────────────────────────
+log "Skills"
+for s in grill-plan paperflow-install discuss; do
+    if [ -f "$REPO/skills/$s/SKILL.md" ]; then
+        mkdir -p "$HOME/.claude/skills/$s"
+        cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
+        ok "$s"
+    else
+        err "$s : missing template"
+    fi
+done
 
 # ─── 10. terminal-target helper at ~/.local/bin/paperflow-target ───
 log "Helper: paperflow-target"
@@ -217,8 +227,10 @@ log "Status"
     [ -x "$HOME/.claude/hooks/auto-open-doc.sh" ]      && ok "open hook     : executable" || err "open hook     : missing"
     [ -f "$HOME/docs/superpowers/_lib/doc.js" ]        && ok "doc renderer  : present"    || err "doc renderer  : missing"
     [ -f "$HOME/docs/superpowers/_lib/grill.js" ]      && ok "grill render. : present"    || err "grill render. : missing"
-    [ -f "$HOME/.claude/skills/grill-plan/SKILL.md" ]  && ok "grill skill   : present"    || err "grill skill   : missing"
-    [ -x "$HOME/.local/bin/paperflow-target" ]         && ok "target helper : executable" || err "target helper : missing"
+    [ -f "$HOME/.claude/skills/grill-plan/SKILL.md" ]         && ok "grill skill   : present"    || err "grill skill   : missing"
+    [ -f "$HOME/.claude/skills/paperflow-install/SKILL.md" ]  && ok "install skill : present"    || err "install skill : missing"
+    [ -f "$HOME/.claude/skills/discuss/SKILL.md" ]            && ok "discuss skill : present"    || err "discuss skill : missing"
+    [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \
