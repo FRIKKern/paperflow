@@ -64,3 +64,11 @@ Default to delegating non-trivial work to subagents (Task / Agent tool, appropri
 **Default subagent_type:** `general-purpose` for most work. `Explore` for read-only codebase searches. `Plan` for architectural design. Specialized agents when their description fits.
 
 **Brief subagents like a smart colleague:** explain the goal, what's already known, what artifact to produce. Cap response length when relevant.
+
+# Missions
+
+When starting any non-trivial multi-artifact piece of work (will span multiple specs / plans / grills / changelogs), run `mission-create` first. It writes an HTML + JSON pair to `~/docs/superpowers/missions/` and marks the mission active in `~/.paperflow/active-mission`.
+
+When context is filling up, before any big handoff, or before invoking `mission-continue`, run `mission-snapshot`. It refreshes the active mission's HTML + JSON sidecar with the current artifacts, progress, decisions, open questions, and a fresh `resume_prompt`.
+
+Use `mission-continue` to spawn a fresh Claude Code session in a new tab with the full mission context (it calls snapshot first, then invokes `~/.local/bin/paperflow-continue <slug>`). The launcher detects tmux / iTerm / Apple Terminal and runs `claude --dangerously-skip-permissions <resume_prompt>` in the new tab. Phase 1 only — kitty / WezTerm / Ghostty fall back to opening a new Apple Terminal window.

@@ -64,7 +64,9 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/docs/superpowers/notes" \
          "$HOME/docs/superpowers/captures" \
          "$HOME/docs/superpowers/changelog" \
+         "$HOME/docs/superpowers/missions" \
          "$HOME/docs/superpowers/_lib" \
+         "$HOME/.paperflow" \
          "$HOME/.local/bin" \
          "$HOME/.local/log" \
          "$HOME/.claude/hooks" \
@@ -73,6 +75,9 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/.claude/skills/discuss" \
          "$HOME/.claude/skills/pre-flight-capture" \
          "$HOME/.claude/skills/write-changelog" \
+         "$HOME/.claude/skills/mission-create" \
+         "$HOME/.claude/skills/mission-snapshot" \
+         "$HOME/.claude/skills/mission-continue" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -216,7 +221,7 @@ fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog; do
+for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog mission-create mission-snapshot mission-continue; do
     if [ -f "$REPO/skills/$s/SKILL.md" ]; then
         mkdir -p "$HOME/.claude/skills/$s"
         cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -231,6 +236,12 @@ log "Helper: paperflow-target"
 cp "$REPO/bin/get-terminal-target.sh" "$HOME/.local/bin/paperflow-target"
 chmod +x "$HOME/.local/bin/paperflow-target"
 ok "installed at ~/.local/bin/paperflow-target"
+
+# ─── 10b. mission launcher at ~/.local/bin/paperflow-continue ──────
+log "Helper: paperflow-continue"
+cp "$REPO/bin/paperflow-continue" "$HOME/.local/bin/paperflow-continue"
+chmod +x "$HOME/.local/bin/paperflow-continue"
+ok "installed at ~/.local/bin/paperflow-continue"
 
 # ─── 11. CLAUDE.md (only if missing) ────────────────────────────────
 log "~/.claude/CLAUDE.md"
@@ -266,7 +277,11 @@ log "Status"
     [ -f "$HOME/.claude/skills/discuss/SKILL.md" ]            && ok "discuss skill : present"    || err "discuss skill : missing"
     [ -f "$HOME/.claude/skills/pre-flight-capture/SKILL.md" ] && ok "pre-flight    : present"    || err "pre-flight    : missing"
     [ -f "$HOME/.claude/skills/write-changelog/SKILL.md" ]    && ok "changelog skill: present"   || err "changelog skill: missing"
+    [ -f "$HOME/.claude/skills/mission-create/SKILL.md" ]     && ok "mission-create : present"    || err "mission-create : missing"
+    [ -f "$HOME/.claude/skills/mission-snapshot/SKILL.md" ]   && ok "mission-snap.  : present"    || err "mission-snap.  : missing"
+    [ -f "$HOME/.claude/skills/mission-continue/SKILL.md" ]   && ok "mission-cont.  : present"    || err "mission-cont.  : missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
+    [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \

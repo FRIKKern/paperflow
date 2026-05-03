@@ -297,6 +297,56 @@ The `pre-flight-capture` skill itself does not write its own CLI tool — it bri
 
 ---
 
+## Missions
+
+A **mission** groups related artifacts (specs, plans, grills, notes, changelogs) under a single vision so a fresh Claude Code session can pick up where the previous one left off — perfectly. One active mission at a time, tracked in `~/.paperflow/active-mission`.
+
+```mermaid
+flowchart LR
+    Start["You: 'start a mission<br/>for paperflow v2'"]
+    Create["mission-create<br/>writes html + json"]
+    Work["You + Claude work:<br/>specs, plans, grills,<br/>changelogs accumulate"]
+    Snap["mission-snapshot<br/>refreshes state"]
+    Cont["mission-continue<br/>→ paperflow-continue &lt;slug&gt;"]
+    NewTab["New terminal tab:<br/>claude --dangerously-<br/>skip-permissions<br/>&lt;resume_prompt&gt;"]
+    Fresh["Fresh Claude session<br/>reads mission.html<br/>and continues"]
+
+    Start --> Create --> Work --> Snap --> Cont --> NewTab --> Fresh
+    Work -.->|context fills up| Snap
+```
+
+Each mission gets a paired HTML + JSON file in `~/docs/superpowers/missions/`:
+
+| File | Role |
+|---|---|
+| `<date>-<slug>.html` | Article-style hub: vision, artifacts, progress, decisions, open questions, mission map |
+| `<date>-<slug>.json` | Machine-readable sidecar with `resume_prompt` — the launcher consumes this |
+
+**Trigger phrases:**
+
+| Skill | Phrases |
+|---|---|
+| `mission-create` | "start a mission" · "new mission for X" · "let's begin a project to do Y" |
+| `mission-snapshot` | "snapshot the mission" · "save current state" · "checkpoint this work" |
+| `mission-continue` | "continue this mission in a new tab" · "spawn fresh Claude with this context" · button click on the mission HTML |
+
+**Launcher:** `~/.local/bin/paperflow-continue <slug>` reads the JSON, builds `cd ~ && claude --dangerously-skip-permissions <resume_prompt>`, and opens it in a new tab via tmux / iTerm / Apple Terminal (in that detection order; falls back to a new Apple Terminal window for other terminals).
+
+**Storage shape:**
+
+```
+~/docs/superpowers/missions/
+├── 2026-05-02-paperflow-v2.html
+└── 2026-05-02-paperflow-v2.json
+
+~/.paperflow/
+└── active-mission         # one line: "2026-05-02-paperflow-v2"
+```
+
+The mission HTML auto-opens via the same hook as specs/plans, and `doc.js` injects two buttons: **Continue** (primary, runs the launcher) and **Snapshot** (secondary, refreshes state).
+
+---
+
 ## Examples
 
 [`examples/openclaw-spec.html`](./examples/openclaw-spec.html) and [`examples/openclaw-grill.html`](./examples/openclaw-grill.html) are real artifacts — open them in a browser via the live-reload server (after install) to see the typography and interactions in context.

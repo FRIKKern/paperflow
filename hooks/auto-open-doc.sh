@@ -13,7 +13,7 @@ FILE_PATH="$(printf '%s' "$PAYLOAD" | /usr/bin/env jq -r '.tool_input.file_path 
 [ -n "$FILE_PATH" ] || exit 0
 
 case "$FILE_PATH" in
-  */docs/superpowers/specs/*.html|*/docs/superpowers/plans/*.html|*/docs/superpowers/grills/*.html|*/docs/superpowers/notes/*.html|*/docs/superpowers/changelog/*.html)
+  */docs/superpowers/specs/*.html|*/docs/superpowers/plans/*.html|*/docs/superpowers/grills/*.html|*/docs/superpowers/notes/*.html|*/docs/superpowers/changelog/*.html|*/docs/superpowers/missions/*.html)
     REL="${FILE_PATH#*/docs/}"
     /usr/bin/open "http://localhost:8765/$REL" >/dev/null 2>&1 || true
     ;;
