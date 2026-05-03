@@ -1,0 +1,66 @@
+/* Shared action bar for spec / plan HTML docs.
+ * Loaded via <script src="/superpowers/_lib/doc.js"></script>.
+ * Page can override --accent etc. via :root before this loads. */
+
+:root {
+  --doc-accent: var(--accent, #a23925);
+  --doc-paper: var(--paper, #ffffff);
+  --doc-rule: var(--rule, #e6e2d8);
+  --doc-muted: var(--muted, #6a6a6a);
+  --doc-sans: var(--sans, -apple-system, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif);
+}
+
+.doc-action {
+  margin: 3rem auto 2rem;
+  max-width: 680px;
+  padding: 1.5rem;
+  background: var(--doc-paper);
+  border: 1px solid var(--doc-rule);
+  border-radius: 6px;
+  text-align: center;
+}
+
+.doc-action-label {
+  font-family: var(--doc-sans);
+  font-size: .82rem;
+  color: var(--doc-muted);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  margin-bottom: .9rem;
+}
+
+.doc-action-row {
+  display: flex;
+  gap: .6rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.doc-btn {
+  font-family: var(--doc-sans);
+  font-size: 1rem;
+  font-weight: 600;
+  border: 0;
+  border-radius: 6px;
+  padding: .85rem 1.6rem;
+  cursor: pointer;
+  transition: background .12s, transform .04s;
+}
+.doc-btn-primary { background: var(--doc-accent); color: #fff; }
+.doc-btn-primary:hover { background: #8a2e1f; }
+.doc-btn-secondary {
+  background: transparent;
+  color: var(--doc-accent);
+  border: 1px solid var(--doc-accent);
+}
+.doc-btn-secondary:hover { background: rgba(162, 57, 37, .07); }
+.doc-btn:active { transform: scale(0.98); }
+.doc-btn:disabled { opacity: .55; cursor: progress; }
+
+.doc-action-status {
+  margin-top: .8rem;
+  font-family: var(--doc-sans);
+  font-size: .85rem;
+  color: var(--doc-muted);
+  min-height: 1.2em;
+}

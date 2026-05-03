@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grill: OpenClaw Handoff</title>
+<link rel="stylesheet" href="/superpowers/_lib/grill.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "base",
+    themeVariables: {
+      fontFamily: "-apple-system, SF Pro Display, Helvetica Neue, system-ui, sans-serif",
+      primaryColor: "#fbfaf6",
+      primaryTextColor: "#1a1a1a",
+      primaryBorderColor: "#1a1a1a",
+      lineColor: "#1a1a1a",
+      secondaryColor: "#f1ede2",
+      tertiaryColor: "#ffffff"
+    },
+    flowchart: { curve: "basis", padding: 12 }
+  });
+</script>
+</head>
+<body>
+
+<div class="eyebrow">Plan Grill</div>
+<h1>OpenClaw Handoff</h1>
+<div class="byline">
+  <span>2026-05-03</span>
+  <span>Source: <code>2026-05-02-openclaw-handoff-design.html</code></span>
+  <span>11 questions</span>
+</div>
+
+<p class="ingress">
+The plan picks "auto-execute vs suggest-only" as the load-bearing distinction, but never specifies how Claude detects a sensitive task at runtime, what verifies success after delegation, or how the tier boundary holds up against a streak of OpenClaw failures. Eleven questions probe those soft spots — each with Claude's own pick already selected. Override only where you disagree.
+</p>
+
+<main id="grill-form"></main>
+
+<script>
+window.GRILL = {
+  plan: "2026-05-02-openclaw-handoff-design.html",
+  target: {
+    term_program: "Apple_Terminal",
+    tty: "/dev/ttys007",
+    term_session_id: "2DF0ECAA-7B1B-4CE8-8000-925AA849DC49",
+    tmux_pane: "",
+    pid: 44635
+  },
+  questions: [
+    {
+      id: "q1",
+      category: "Architecture",
+      type: "open",
+      text: "The auto-execute timeout is 120 seconds. What's the basis for that number?",
+      rationale: "The spec hard-codes --timeout 120 but never justifies it. If real GUI chores routinely take 80–100s, a 120s ceiling is a tight margin and will produce false-failures. If they take ~10s, 120s is just dead air on the failure path.",
+      diagram: `flowchart LR
+  T1["~10s<br/>typical click"] --> Bar
+  T2["~30s<br/>multi-step"] --> Bar
+  T3["~90s<br/>remote roundtrip"] --> Bar
+  Bar{"Timeout = 120s"}
+  Bar -->|"too tight at 90s"| Risk["false-fails"]
+  Bar -->|"dead air at 10s"| Waste["slow recovery"]`,
+      diagramCaption: "Same timeout fits real chores poorly at both ends.",
+      recommendation: "Set 60s by default; raise per-task only when Claude can name the reason (e.g., 'this involves a remote login round-trip').",
+      recommendationReason: "Most automatable Mac chores complete in under 30s. A short default surfaces real hangs fast and trains us to be honest about which tasks need more headroom."
+    },
+    {
+      id: "q2",
+      category: "Architecture",
+      type: "single",
+      text: "Should an auto-execute delegation be allowed to chain multiple actions in one OpenClaw turn, or only a single discrete action?",
+      rationale: "The plan describes the auto-execute tier with single-action examples ('open this app', 'click that button'). It doesn't say whether 'open Finder, navigate to Downloads, drag file X to folder Y' is one auto-execute or three.",
+      diagram: `flowchart LR
+  S["1 action<br/>(too granular)"]
+  M["≤3 chained<br/>(bounded)"]
+  U["unbounded<br/>(loses reversibility)"]
+  S -.-> M -.-> U
+  style M stroke:#a23925,stroke-width:3px`,
+      diagramCaption: "Chain depth as a spectrum of blast radius.",
+      options: [
+        "Single discrete action only",
+        "Up to 3 chained sub-actions",
+        "Any chain OpenClaw decides on",
+        "Single action by default; explicit user opt-in for chains"
+      ],
+      recommendation: "Up to 3 chained sub-actions",
+      recommendationReason: "Single-action is too granular (clicking in System Settings is always 3+ clicks); 'any chain' loses the reversibility guarantee. Three is the sweet spot — bounded enough to reason about blast radius."
+    },
+    {
+      id: "q3",
+      category: "Failure modes",
+      type: "single",
+      text: "OpenClaw says it succeeded but the result is wrong — it clicked the wrong dialog button. How does Claude detect this?",
+      rationale: "The spec defines failure as 'non-zero exit / error JSON', but a wrong-but-confident OpenClaw return is the more dangerous failure mode. The plan is silent on it.",
+      diagram: `flowchart LR
+  OC["OpenClaw<br/>'success'"] --> A["Trust"]
+  OC --> B["Screenshot<br/>+ vision"]
+  OC --> C["Re-query state"]
+  OC --> D["Ask user"]
+  A --> R1["fast · risky"]
+  B --> R2["slow · expensive"]
+  C --> R3["fast · narrow"]
+  D --> R4["slow · certain"]
+  style C stroke:#a23925,stroke-width:3px`,
+      diagramCaption: "Verification strategies traded off on latency vs certainty.",
+      options: [
+        "Trust OpenClaw's success signal",
+        "Always follow up with a screenshot verification step",
+        "Run a secondary check (e.g., re-query state)",
+        "Ask the user to confirm before continuing"
+      ],
+      recommendation: "Run a secondary check (e.g., re-query state)",
+      recommendationReason: "Screenshot-then-eyeball doubles latency and burns vision tokens. A targeted re-query (\"is the toggle now on?\") is fast, deterministic, and only needs to happen for state-changing tasks."
+    },
+    {
+      id: "q4",
+      category: "Failure modes",
+      type: "single",
+      text: "If OpenClaw fails 3 times in a row this session, what should Claude do?",
+      rationale: "The plan handles single-failure cases ('fall back to asking') but is silent on streaks. Three failures in a row probably means OpenClaw is misreading the task domain — continuing is wasted token spend.",
+      diagram: `stateDiagram-v2
+  [*] --> Healthy
+  Healthy --> Healthy: success
+  Healthy --> Strike1: fail
+  Strike1 --> Healthy: success
+  Strike1 --> Strike2: fail
+  Strike2 --> Healthy: success
+  Strike2 --> Degraded: fail
+  Degraded --> Degraded: rest of session`,
+      diagramCaption: "Failure streak state machine — Degraded is the new sticky mode.",
+      options: [
+        "Keep trying — failures are independent",
+        "Stop offering OpenClaw for the rest of this session",
+        "Drop to suggest-only tier for the rest of the session",
+        "Ask the user what to do"
+      ],
+      recommendation: "Drop to suggest-only tier for the rest of the session",
+      recommendationReason: "Avoids burning tokens on a broken auto-execute path while keeping OpenClaw available as a manual escape hatch. Next session resets — failures aren't permanently sticky."
+    },
+    {
+      id: "q5",
+      category: "Edge cases",
+      type: "open",
+      text: "What if Claude offers OpenClaw, you say yes, but OpenClaw is already running a long task started elsewhere (voice, chat channel, prior delegation)?",
+      rationale: "The spec assumes OpenClaw is always available. Voice mode (wake word) and any future chat channels can hold OpenClaw busy on an unrelated task. Concurrent delegation isn't addressed.",
+      diagram: `sequenceDiagram
+  participant V as Voice / Channel
+  participant OC as OpenClaw
+  participant CC as Claude Code
+  V->>OC: long task in flight
+  CC->>OC: new delegation
+  Note over OC: queue · cancel old<br/>· refuse · ?`,
+      diagramCaption: "Concurrent delegation arrival — what does OpenClaw do?",
+      recommendation: "Queue: bridge waits up to 30s for the current OpenClaw turn to finish, then fires; if longer, surface a 'busy, fall back to manual?' prompt.",
+      recommendationReason: "Cancel-the-old is too aggressive (interrupts user's voice query). Refuse-now is too brittle. A short queue handles 90% of real overlap without surprising anyone."
+    },
+    {
+      id: "q6",
+      category: "Edge cases",
+      type: "single",
+      text: "What if the OpenClaw gateway isn't running when Claude tries to delegate?",
+      rationale: "Gateway is a LaunchAgent — usually up — but laptop sleep, crashes, or first-boot can leave it down. Spec doesn't say what Claude does on connection failure.",
+      diagram: `flowchart TD
+  Try["delegate"] --> Conn{"connect?"}
+  Conn -->|"refused"| Choice{choose}
+  Conn -->|"ok"| Run["run task"]
+  Choice --> A["ask user"]
+  Choice --> B["launchctl restart<br/>+ retry once"]
+  Choice --> C["fail loudly"]
+  Choice --> D["skip offer"]
+  style B stroke:#a23925,stroke-width:3px`,
+      diagramCaption: "Recovery branches when the gateway is unreachable.",
+      options: [
+        "Fall back to asking the user directly",
+        "Try to start the gateway via launchctl, then retry once",
+        "Fail loudly with the launchctl command for the user",
+        "Skip the offer entirely; just ask"
+      ],
+      recommendation: "Try to start the gateway via launchctl, then retry once",
+      recommendationReason: "Gateway-down is mechanical and self-recoverable. One automatic restart attempt costs nothing; if it still fails, then fall back. Don't make the user babysit a daemon."
+    },
+    {
+      id: "q7",
+      category: "Observability",
+      type: "yesno",
+      text: "Should Claude log every OpenClaw delegation (request + result) somewhere persistent?",
+      rationale: "Without a log, debugging 'why did OpenClaw click the wrong button?' depends on session memory — which evaporates. With logs, post-hoc review (and grilling future plans against real failure data) becomes possible.",
+      recommendation: "Yes",
+      recommendationReason: "Cheap to write, expensive to lack. The first time something breaks weirdly you'll wish you had it."
+    },
+    {
+      id: "q8",
+      category: "Observability",
+      type: "single",
+      text: "If yes — where should the log live?",
+      rationale: "Three plausible homes; each has a tradeoff between discoverability and noise.",
+      options: [
+        "~/.openclaw/logs/delegations.jsonl",
+        "~/.claude/openclaw-delegations.log",
+        "Bridge stdout (already captured)",
+        "Don't log — answered No to Q7"
+      ],
+      recommendation: "~/.openclaw/logs/delegations.jsonl",
+      recommendationReason: "OpenClaw owns the lifecycle; logs belong with the rest of OpenClaw's logs. JSONL keeps it grep-able and parse-able later."
+    },
+    {
+      id: "q9",
+      category: "Security / Trust",
+      type: "multi",
+      text: "Which task categories should NEVER auto-execute, even if they look short and reversible? (Select all that apply)",
+      rationale: "The spec lists 'sensitive' categories qualitatively (credentials, payments). A concrete deny-list is sharper than vibes — Claude can pattern-match against it at offer-time.",
+      diagram: `flowchart LR
+  subgraph Reversible
+    F["read file<br/>(in known dir)"]
+  end
+  subgraph "Auth-bearing or irreversible"
+    B["browser w/ session"]
+    M["send message"]
+    S["System Settings"]
+    L["sign-in flow"]
+    P["payment UI"]
+  end
+  Reversible -.-> Auto["auto-execute OK"]
+  Reversible --> Auto
+  L --> Block["never auto"]
+  B --> Block
+  M --> Block
+  S --> Block
+  P --> Block`,
+      diagramCaption: "Blast-radius split — left side stays auto, right side never.",
+      options: [
+        "Anything in a browser tab with a logged-in session",
+        "Anything that reads files outside ~/docs and ~/Downloads",
+        "Anything that sends a message in Mail / Messages / Slack",
+        "Anything in System Settings (privacy, accounts, network)",
+        "Anything that signs into a new account",
+        "Anything that triggers payment UI"
+      ],
+      recommendation: [
+        "Anything in a browser tab with a logged-in session",
+        "Anything that sends a message in Mail / Messages / Slack",
+        "Anything in System Settings (privacy, accounts, network)",
+        "Anything that signs into a new account",
+        "Anything that triggers payment UI"
+      ],
+      recommendationReason: "All five are either irreversible (sent message), authoritative (Settings, sign-in, payment), or fan-out beyond intent (logged-in browser session). File-reading inside a known dir is fine — that one stays in auto-execute scope."
+    },
+    {
+      id: "q10",
+      category: "Scope",
+      type: "scale",
+      min: 1,
+      max: 5,
+      minLabel: "ask almost everything",
+      maxLabel: "do almost everything plausible",
+      text: "How aggressive should the auto-execute tier be by default?",
+      rationale: "The plan picks a midpoint implicitly through its examples. Making the dial explicit lets us tune deliberately and revisit later.",
+      diagram: `flowchart LR
+  L["1<br/>ask everything"] --> M2["2"] --> M3["3<br/>balanced"] --> M4["4"] --> R["5<br/>do everything"]
+  style M3 fill:#a23925,color:#fff,stroke:#a23925`,
+      diagramCaption: "The aggressiveness dial — start at 3, ratchet later.",
+      recommendation: 3,
+      recommendationReason: "Middle is the right starting position for a new behavior. Easy to dial up once we've seen it not break things; hard to recover trust if we dial it up first."
+    },
+    {
+      id: "q11",
+      category: "Open decisions",
+      type: "single",
+      text: "The spec defers chat channels (Telegram/Discord). When should they enter scope?",
+      rationale: "Spec says 'deferred' without a trigger condition. Without one, deferred features quietly become 'never'.",
+      diagram: `flowchart LR
+  Now["today: local only"] --> T{"trigger?"}
+  T -->|"never"| Stay["stay local"]
+  T -->|"user asks"| Add["add channels"]
+  T -->|"async need"| Add
+  T -->|"phase 2 default"| Add
+  style Add stroke:#a23925`,
+      diagramCaption: "Trigger conditions for moving from deferred → in scope.",
+      options: [
+        "Never — local delegation only",
+        "When the user explicitly asks for them",
+        "When Claude needs async confirmation (e.g., user away from desk)",
+        "Phase 2: default-on once stability is proven"
+      ],
+      recommendation: "When the user explicitly asks for them",
+      recommendationReason: "Channels are a meaningful surface-area expansion (auth, chat ID lookup, message routing). Don't pay that cost speculatively. The user knows when they want it."
+    }
+  ]
+};
+</script>
+<script src="/superpowers/_lib/grill.js"></script>
+
+</body>
+</html>

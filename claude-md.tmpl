@@ -1,0 +1,39 @@
+# Communication
+
+When something is complicated, lead with a diagram and concrete details. Don't underestimate what I know — let me ask if I need clarification. Every stone turned, but lean. Plain words. No bloat, no throat-clearing, no metaphors that don't earn their keep.
+
+# Specs, plans, design docs
+
+Write them as standalone HTML files in `~/docs/superpowers/{specs,plans,grills}/`, not Markdown. Mermaid via CDN script. Article-style typography (ingress, brødtekst, captioned figures, serif body, sans headings). Distribute diagrams throughout — each section that explains a flow / comparison / decision gets a Mermaid figure. Aim for at least one visual every ~300 words. Always open via the live-reload URL, never `file://`:
+
+    open http://localhost:8765/superpowers/specs/<filename>.html
+    open http://localhost:8765/superpowers/plans/<filename>.html
+
+`__LR_LABEL__` LaunchAgent serves `~/docs/` on port 8765 with WebSocket hot reload (~200 ms refresh).
+
+## Action buttons (every spec & plan)
+
+End every spec / plan / grill HTML with a one-line `<script src="/superpowers/_lib/doc.js"></script>` include. Doc.js auto-injects the right buttons based on the URL path:
+
+| Doc type | Primary | Secondary |
+|---|---|---|
+| `/specs/*.html` | Create plan from this spec | Grill the spec |
+| `/plans/*.html` | Build this plan | Grill the plan |
+| `/grills/*.html` | Submit (handled by `_lib/grill.js`) | — |
+
+Buttons POST to `__BR_LABEL__` (LaunchAgent on `localhost:8766`), which routes the message into the originating terminal tab via AppleScript / tmux / iTerm so I see the prompt land where I'm working.
+
+Before the doc.js include, set:
+
+    <script>
+      window.CLAUDE_TARGET = /* paste output of get-terminal-target */;
+      window.DOC_PATH = "<this-filename>.html";
+    </script>
+
+Get the target via:
+
+    ~/.local/bin/paperflow-target
+
+## Grills (plan stress-tests)
+
+Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/superpowers/_lib/grill.{css,js}`.
