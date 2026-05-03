@@ -31,7 +31,14 @@ If unsure, lean toward the article. Brevity wins in chat; depth wins on page.
 
 2. **Pick a slug.** `YYYY-MM-DD-<short-topic-slug>.html`. Today's date in `YYYY-MM-DD` form. Short, kebab-case slug capturing the topic in 2–4 words.
 
-3. **Write the article** to:
+3. **Spawn a subagent to write the article.** Per paperflow's subagent-first principle, the main session decides + synthesizes; the subagent does the long-form writing. Brief the subagent (subagent_type: `general-purpose`) with:
+   - The topic and the conclusion / framing the user is interested in
+   - The output path (below)
+   - The full HTML template structure (eyebrow, title, byline, ingress, body sections with Mermaid figures + tables, optional pullquote, bottom-line)
+   - The exact `<script>` tail with `window.CLAUDE_TARGET`, `window.DOC_PATH`, and `<script src="/superpowers/_lib/doc.js">`
+   - "Write the article body. Return the URL when done. Do not summarize the content."
+
+4. **Write the article** to:
 
    ```
    ~/docs/superpowers/notes/<slug>.html
@@ -58,7 +65,7 @@ If unsure, lean toward the article. Brevity wins in chat; depth wins on page.
 
    `doc.js` will inject a **Reply** textarea + button (and a **Make this a spec** secondary) at the bottom.
 
-5. **Reply in chat tersely** — 1 to 3 sentences max + the localhost URL:
+5. **When the subagent returns**, reply in chat tersely — 1 to 3 sentences max + the localhost URL:
 
    ```
    Wrote the discussion to http://localhost:8765/superpowers/notes/<slug>.html.

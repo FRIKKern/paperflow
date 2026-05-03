@@ -188,9 +188,22 @@ The renderer pre-selects Claude's recommendation, shows a "★ Claude's pick: ..
 
 ---
 
+## Subagent-driven by default
+
+Paperflow follows a **subagent-first** workflow: the main Claude session does decisions, synthesis, and conversation; subagents do the research, execution, and artifact-writing. Each subagent burns its own context on the work and returns only the distilled result, so the main session always has a perfectly synthesized view on top.
+
+| Delegate to subagent | Keep in main session |
+|---|---|
+| Research (searching, reading many files, web fetches) | Decisions, trade-off calls |
+| Execution (plan steps, batched code edits, tests) | Synthesis (presenting subagent results) |
+| Long-form writing (spec/plan/grill/note bodies) | Conversation with you |
+| Tool-heavy work (>500 tokens of raw output) | Quick back-and-forth |
+
+The trade-off: more tokens spent, but the main session never bloats. Past ~50% context utilization, model behavior degrades — the subagent pattern keeps that ceiling far away. This is hard-wired in `~/.claude/CLAUDE.md` (installed by paperflow) and in every paperflow skill.
+
 ## Skills
 
-Three Claude Code skills ship with paperflow. Claude invokes them on demand based on what you ask for.
+Three Claude Code skills ship with paperflow. Claude invokes them on demand based on what you ask for. Each spawns a subagent for the actual work — main session reports the URL + summary.
 
 | Skill | Trigger phrases | What it does |
 |---|---|---|

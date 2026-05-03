@@ -19,6 +19,8 @@ Run idempotently. Safe to invoke whenever you suspect drift.
 
 ## Process
 
+**Subagent-first.** Delegate the clone + install + status-parse to a subagent (`subagent_type: general-purpose`). Brief: "Clone https://github.com/FRIKKern/paperflow.git to ~/Documents/GitHub/paperflow if not already present. Run `bash ~/Documents/GitHub/paperflow/install.sh`. Parse the final Status block. Return only: (1) the status table verbatim, (2) any red lines that need user attention, (3) whether the user needs to run `/hooks` or restart." The main session presents that synthesis to the user.
+
 1. **Check whether the repo is present.** Default location: `~/Documents/GitHub/paperflow/`. If absent:
 
    ```bash

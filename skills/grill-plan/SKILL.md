@@ -17,6 +17,8 @@ A path to a spec or plan HTML, e.g.:
 
 ## Process
 
+**Subagent-first.** Per paperflow's default workflow, delegate the read + draft to a subagent (`subagent_type: general-purpose`). Brief: "Read this plan in full, generate 8–15 pointed questions following the schema below, write the grill HTML to `<path>` using the shared renderer at `/superpowers/_lib/grill.{css,js}`. Embed `window.CLAUDE_TARGET` from `paperflow-target`. Return only the URL — no summary." The main session reports the URL + a one-line framing of what the grill probes.
+
 1. **Read the plan in full.** Don't skim. Understand what it claims, what it omits, what tradeoffs it picked, where the load-bearing decisions are.
 
 2. **Generate 8–15 questions across these categories** (skip ones that don't apply):

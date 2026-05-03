@@ -26,14 +26,33 @@ Buttons POST to `__BR_LABEL__` (LaunchAgent on `localhost:8766`), which routes t
 Before the doc.js include, set:
 
     <script>
-      window.CLAUDE_TARGET = /* paste output of get-terminal-target */;
+      window.CLAUDE_TARGET = /* paste output of get-terminal-target.sh */;
       window.DOC_PATH = "<this-filename>.html";
     </script>
 
 Get the target via:
 
-    ~/.local/bin/paperflow-target
+    ~/.claude/skills/setup-doc-workflow/get-terminal-target.sh
 
 ## Grills (plan stress-tests)
 
 Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/superpowers/_lib/grill.{css,js}`.
+
+# Subagent-driven workflow (default)
+
+Default to delegating non-trivial work to subagents (Task / Agent tool, appropriate `subagent_type`). The main session is for orchestration, decisions, and synthesis — never for raw tool output, file dumps, or exploration.
+
+| Delegate to subagent | Keep in main session |
+|---|---|
+| Research (searching, reading many files, web fetches, codebase exploration) | Decisions ("which approach", trade-off calls) |
+| Execution (each step of a plan, batched code edits, running tests) | Synthesis (presenting subagent results clearly) |
+| Long-form writing (the body of specs/plans/grills/notes) | Conversation with me |
+| Tool-heavy work (>500 tokens of raw output) | Quick back-and-forth |
+
+**Why:** A 1M context window degrades past ~50%. Subagents burn their own context on the work and return only the distilled result. The main session always has a perfectly synthesized view on top. More expensive in tokens, much better behavior over long sessions.
+
+**For paperflow:** every skill (`discuss`, `grill-plan`, `paperflow-write-spec`, `paperflow-write-plan`) spawns a subagent to produce the HTML artifact. Main session presents the URL + 1–3 sentence summary.
+
+**Default subagent_type:** `general-purpose` for most work. `Explore` for read-only codebase searches. `Plan` for architectural design. Specialized agents when their description fits.
+
+**Brief subagents like a smart colleague:** explain the goal, what's already known, what artifact to produce. Cap response length when relevant.
