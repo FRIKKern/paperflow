@@ -38,6 +38,14 @@ Get the target via:
 
 Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/superpowers/_lib/grill.{css,js}`.
 
+# Visual evidence
+
+When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, transition, color, spacing, typography, component — run `pre-flight-capture` before drafting the plan and embed the resulting `<figure>` blocks in a "Pre-flight evidence" H2 near the top. After the build, run `pre-flight-capture` with `mode: after` to fill in the post-flight half, then run `write-changelog` to render the proof page at `~/docs/superpowers/changelog/<date>-<topic>-changelog.html` with before/after side-by-side.
+
+- Captures live in `~/docs/superpowers/captures/<date>-<topic-slug>/` (shared across before + after; referenced by the changelog via relative `../captures/.../`).
+- Web surfaces use the `visual-investigator` subagent (Chrome DevTools MCP). Native macOS uses OpenClaw + `screencapture -v`.
+- One changelog per shipped UI change. The `/changelog/` URL pattern auto-opens via the PostToolUse hook and `doc.js` injects a single Share button.
+
 # Subagent-driven workflow (default)
 
 Default to delegating non-trivial work to subagents (Task / Agent tool, appropriate `subagent_type`). The main session is for orchestration, decisions, and synthesis — never for raw tool output, file dumps, or exploration.

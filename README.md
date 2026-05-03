@@ -218,8 +218,84 @@ Three Claude Code skills ship with paperflow. Claude invokes them on demand base
 | `paperflow-install` | "install paperflow" · "the bridge isn't running" · first-time setup | Clones repo if missing, runs `install.sh`, reports the green/red status table. Idempotent. |
 | `discuss` | "discuss X" · "explain in depth" · "compare" · "deep-dive" — or whenever a long-form answer would otherwise be a wall of terminal text | Writes the discussion as an HTML article to `~/docs/superpowers/notes/`, auto-opens it, ends with a Reply textarea so you can respond inline. Keeps the chat reply terse. |
 | `grill-plan` | "grill this" · button click on a spec/plan | Reads the doc, generates 8–15 pointed questions across categories with rationale + recommendation + per-question Mermaid diagrams. Renders as an HTML form. |
+| `pre-flight-capture` | spec/plan touches HTML/CSS/JSX/Vue/Svelte/Tailwind · "capture before" · before any visual change | Captures static screenshots + 3–6 s videos of every interaction the plan changes. Saves to `~/docs/superpowers/captures/<date>-<slug>/`. Re-invoked with `mode: after` after the build. |
+| `write-changelog` | after a UI build · "write the changelog" · "publish the proof" | Renders an HTML proof page to `~/docs/superpowers/changelog/` with before/after side-by-side, files touched, verification checklist, rollback line. |
 
 Skills sit on top of the infrastructure (LaunchAgents, hooks, renderers). They tell Claude *when* to invoke the workflow and *how* to write the artifact.
+
+---
+
+## Visual evidence
+
+Any plan that touches the visible UI runs through a four-step proof loop: pre-flight capture → plan with the captures embedded → build → post-flight capture → changelog. The result is a single HTML page per UI change with autoplay-loop before/after side-by-side, so "what shipped" is never a guess.
+
+```mermaid
+flowchart LR
+    Ask["You ask:<br/>'redesign the<br/>Submit button'"]
+    Pre["pre-flight-capture<br/>before.png + before.mp4"]
+    Plan["Plan with<br/>'Pre-flight evidence'<br/>section embedded"]
+    Build["Build<br/>(executing-plans)"]
+    Post["pre-flight-capture<br/>mode: after<br/>after.png + after.mp4"]
+    Changelog["write-changelog<br/>before/after<br/>side-by-side HTML"]
+    Open["Auto-opens<br/>at /changelog/"]
+
+    Ask --> Pre --> Plan --> Build --> Post --> Changelog --> Open
+```
+
+**When the workflow auto-fires:** the plan or spec mentions `HTML`, `CSS`, `JSX`, `TSX`, `Vue`, `Svelte`, `Tailwind`, styling, animation, hover, focus, layout, transition, color, spacing, typography, or component — or a build is about to touch any `.html` / `.css` / `.jsx` / `.tsx` / `.vue` / `.svelte` / `.scss` file.
+
+**When you invoke explicitly:** "capture before", "the spec touches UI", "before we change visuals", "write the changelog", "publish the proof".
+
+**Storage shape:**
+
+```
+~/docs/superpowers/
+├── captures/
+│   └── 2026-05-02-submit-button-redesign/
+│       ├── before.png
+│       ├── before-hover.mp4
+│       ├── after.png
+│       └── after-hover.mp4
+└── changelog/
+    └── 2026-05-02-submit-button-redesign-changelog.html
+```
+
+Captures live in `captures/`, not nested under `changelog/`, so the changelog HTML can reference them via a relative `../captures/.../` path — and one set of media can power multiple changelogs if a follow-up tweak ships against the same baseline.
+
+**What a changelog looks like (excerpt):**
+
+```html
+<div class="eyebrow">Changelog</div>
+<h1>Submit button — softer, slower, on-brand</h1>
+<div class="byline">
+  <span>2026-05-02</span>
+  <span>Source: <code>2026-05-02-submit-button-redesign-plan.html</code></span>
+  <span>2 files touched</span>
+</div>
+
+<p class="ingress">
+  The Submit button used to snap from charcoal to brand red on hover —
+  zero transition, jarring on every form. It now fades through brand-tinted
+  opacity over 200 ms and settles instead of flashes.
+</p>
+
+<div class="changelog-hero">
+  <figure>
+    <video src="../captures/2026-05-02-submit-button-redesign/before-hover.mp4"
+           autoplay loop muted playsinline></video>
+    <figcaption>Before — hover state</figcaption>
+  </figure>
+  <figure>
+    <video src="../captures/2026-05-02-submit-button-redesign/after-hover.mp4"
+           autoplay loop muted playsinline></video>
+    <figcaption>After — hover state</figcaption>
+  </figure>
+</div>
+```
+
+The `pre-flight-capture` skill itself does not write its own CLI tool — it briefs the existing `visual-investigator` subagent (web, via Chrome DevTools MCP) or OpenClaw + `screencapture -v` (native macOS).
+
+---
 
 ## Examples
 

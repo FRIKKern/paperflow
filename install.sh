@@ -62,6 +62,8 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/docs/superpowers/plans" \
          "$HOME/docs/superpowers/grills" \
          "$HOME/docs/superpowers/notes" \
+         "$HOME/docs/superpowers/captures" \
+         "$HOME/docs/superpowers/changelog" \
          "$HOME/docs/superpowers/_lib" \
          "$HOME/.local/bin" \
          "$HOME/.local/log" \
@@ -69,6 +71,8 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/.claude/skills/grill-plan" \
          "$HOME/.claude/skills/paperflow-install" \
          "$HOME/.claude/skills/discuss" \
+         "$HOME/.claude/skills/pre-flight-capture" \
+         "$HOME/.claude/skills/write-changelog" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -212,7 +216,7 @@ fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in grill-plan paperflow-install discuss; do
+for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog; do
     if [ -f "$REPO/skills/$s/SKILL.md" ]; then
         mkdir -p "$HOME/.claude/skills/$s"
         cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -260,6 +264,8 @@ log "Status"
     [ -f "$HOME/.claude/skills/grill-plan/SKILL.md" ]         && ok "grill skill   : present"    || err "grill skill   : missing"
     [ -f "$HOME/.claude/skills/paperflow-install/SKILL.md" ]  && ok "install skill : present"    || err "install skill : missing"
     [ -f "$HOME/.claude/skills/discuss/SKILL.md" ]            && ok "discuss skill : present"    || err "discuss skill : missing"
+    [ -f "$HOME/.claude/skills/pre-flight-capture/SKILL.md" ] && ok "pre-flight    : present"    || err "pre-flight    : missing"
+    [ -f "$HOME/.claude/skills/write-changelog/SKILL.md" ]    && ok "changelog skill: present"   || err "changelog skill: missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
