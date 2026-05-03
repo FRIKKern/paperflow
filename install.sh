@@ -102,13 +102,22 @@ NODE_BIN_DIR="$(dirname "$NODE_BIN")"
 ok "$NODE_BIN ($("$NODE_BIN" --version))"
 
 # ─── 3. live-server (npm global) ────────────────────────────────────
+# Pinned to 1.2.2 — the last release before the 2024 maintainer change;
+# newer pre-release builds have a known WebSocket-init regression that
+# breaks our live-render WS-intercept.
 log "live-server"
+LIVE_SERVER_PIN="1.2.2"
 LIVE_SERVER="$NODE_BIN_DIR/live-server"
 if [ -x "$LIVE_SERVER" ]; then
-    skip "already installed"
+    LS_VER="$("$LIVE_SERVER" --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    if [ -n "$LS_VER" ] && [ "$LS_VER" != "$LIVE_SERVER_PIN" ]; then
+        skip "already installed (v$LS_VER) — note: paperflow targets v$LIVE_SERVER_PIN; if you hit live-reload issues, run: npm uninstall -g live-server && bash install.sh"
+    else
+        skip "already installed (v${LS_VER:-unknown})"
+    fi
 else
-    "$NODE_BIN_DIR/npm" install -g live-server >/dev/null 2>&1
-    ok "installed"
+    "$NODE_BIN_DIR/npm" install -g live-server@1.2.2 >/dev/null 2>&1
+    ok "installed (v$LIVE_SERVER_PIN)"
 fi
 
 LIVE_SERVER_JS="$(readlink "$LIVE_SERVER" 2>/dev/null || echo "")"
