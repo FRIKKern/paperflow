@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# paperflow-audit-site — wrapper around Unlighthouse for whole-site audits.
+#
+# Usage:
+#   paperflow-audit-site --site <url> [--slug <slug>]
+#   paperflow-audit-site --rotate            # archive sweep only, no audit
+#   paperflow-audit-site --resume <slug>     # retry from audit-failures.jsonl
+#   paperflow-audit-site --help
+#
+# Behaviour:
+#   - Pre-flight: requires `unlighthouse` on PATH; otherwise prints install hint.
+#   - Output: ~/docs/superpowers/audits/<YYYY-MM-DD>-<slug>/
+#   - Lazy archive sweep at every invocation: subdirs > 30 days old move to
+#     ~/docs/superpowers/audits/_archive/<YYYY>/<MM>/<date>-<slug>/.
+#   - Partial reports on non-zero exit, with failure.log + JSONL log line.
+
+set -u
+
+# ─── helpers ────────────────────────────────────────────────────────────────
+log()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
+ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[1;33m•\033[0m %s\n' "$*"; }
+err()  { printf '  \033[1;31m✗\033[0m %s\n' "$*" >&2; }
+
+AUDITS_DIR="$HOME/docs/superpowers/audits"
+ARCHIVE_DIR="$AUDITS_DIR/_archive"
+LOG_FILE="$HOME/.openclaw/logs/audit-failures.jsonl"
+
+usage() {
+  cat <<'EOF'
+paperflow-audit-site — Unlighthouse wrapper
+
+Usage:
+  paperflow-audit-site --site <url> [--slug <slug>]
+  paperflow-audit-site --rotate
+  paperflow-audit-site --resume <slug>
+  paperflow-audit-site --help
+
+Options:
+  --site <url>      Target site to audit (required unless --rotate / --resume).
+  --slug <slug>     Override the auto-derived slug.
+  --rotate          Run the >30-day archive sweep and exit.
+  --resume <slug>   Re-attempt the most recent failed audit for <slug>.
+  --help            This message.
+
+Pre-req:
+  unlighthouse on PATH. If absent, install with:
+    npm install -g @unlighthouse/cli puppeteer
+
+Output:
+  ~/docs/superpowers/audits/<YYYY-MM-DD>-<slug>/index.html
+EOF
+}
+
+slugify_url() {
+  local url="$1"
+  # strip protocol, then keep host + collapse non-alphanum to '-'
+  printf '%s' "$url" \
+    | sed -E 's#^https?://##; s#/.*$##' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'
+}
+
+archive_sweep() {
+  # Move audit subdirs > 30 days old to _archive/<YYYY>/<MM>/.
+  mkdir -p "$ARCHIVE_DIR"
+  [ -d "$AUDITS_DIR" ] || return 0
+  local moved=0
+  # Only top-level dated subdirs (skip _archive itself).
+  while IFS= read -r dir; do
+    [ -z "$dir" ] && continue
+    base="$(basename "$dir")"
+    case "$base" in
+      _archive) continue ;;
+    esac
+    # Date prefix YYYY-MM-DD-...
+    date_prefix="$(printf '%s' "$base" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/')"
+    if [ "$date_prefix" = "$base" ] || [ -z "$date_prefix" ]; then
+      # Doesn't match dated pattern — leave it alone.
+      continue
+    fi
+    yyyy="${date_prefix%%-*}"
+    mm_dd="${date_prefix#*-}"
+    mm="${mm_dd%%-*}"
+    target="$ARCHIVE_DIR/$yyyy/$mm"
+    mkdir -p "$target"
+    # mtime older than 30 days?
+    if [ -n "$(find "$dir" -maxdepth 0 -type d -mtime +30 2>/dev/null)" ]; then
+      mv "$dir" "$target/" 2>/dev/null && moved=$((moved+1)) || true
+    fi
+  done < <(find "$AUDITS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  if [ "$moved" -gt 0 ]; then
+    ok "archived $moved old audit(s) to $ARCHIVE_DIR"
+  fi
+}
+
+write_failure_log() {
+  local slug="$1" exit_code="$2" last_url="$3" partial_count="$4"
+  mkdir -p "$(dirname "$LOG_FILE")"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n -c \
+      --arg ts "$ts" \
+      --arg slug "$slug" \
+      --argjson exit_code "$exit_code" \
+      --arg last_url "$last_url" \
+      --argjson partial_count "$partial_count" \
+      '{ts:$ts, slug:$slug, exit_code:$exit_code, last_url:$last_url, partial_count:$partial_count}' \
+      >> "$LOG_FILE"
+  else
+    printf '{"ts":"%s","slug":"%s","exit_code":%s,"last_url":"%s","partial_count":%s}\n' \
+      "$ts" "$slug" "$exit_code" "$last_url" "$partial_count" >> "$LOG_FILE"
+  fi
+}
+
+count_partials() {
+  local dir="$1"
+  # Best-effort count of any unlighthouse-data per-page entries.
+  if [ -d "$dir/unlighthouse-data" ]; then
+    find "$dir/unlighthouse-data" -mindepth 1 -maxdepth 2 -type d 2>/dev/null | wc -l | tr -d ' '
+  else
+    echo "0"
+  fi
+}
+
+# ─── arg parsing ────────────────────────────────────────────────────────────
+SITE=""
+SLUG=""
+ROTATE=0
+RESUME_SLUG=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --site)    SITE="${2:-}"; shift 2 ;;
+    --slug)    SLUG="${2:-}"; shift 2 ;;
+    --rotate)  ROTATE=1; shift ;;
+    --resume)  RESUME_SLUG="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "unknown arg: $1"; usage; exit 2 ;;
+  esac
+done
+
+# ─── --rotate-only mode ─────────────────────────────────────────────────────
+if [ "$ROTATE" -eq 1 ]; then
+  log "Archive sweep"
+  archive_sweep
+  ok "done"
+  exit 0
+fi
+
+# ─── --resume mode ──────────────────────────────────────────────────────────
+if [ -n "$RESUME_SLUG" ]; then
+  log "Resume: $RESUME_SLUG"
+  if [ ! -f "$LOG_FILE" ]; then
+    err "no failure log at $LOG_FILE"
+    exit 1
+  fi
+  LAST_RECORD=""
+  if command -v jq >/dev/null 2>&1; then
+    LAST_RECORD="$(grep -F "\"slug\":\"$RESUME_SLUG\"" "$LOG_FILE" | tail -n1 || true)"
+  else
+    LAST_RECORD="$(grep -F "\"slug\":\"$RESUME_SLUG\"" "$LOG_FILE" | tail -n1 || true)"
+  fi
+  if [ -z "$LAST_RECORD" ]; then
+    err "no failure record for slug: $RESUME_SLUG"
+    exit 1
+  fi
+  warn "resume: re-running audit for $RESUME_SLUG"
+  warn "(merges into the existing audit dir; prior partial pages kept)"
+  # Derive site from the saved last_url's host.
+  if command -v jq >/dev/null 2>&1; then
+    LAST_URL="$(printf '%s' "$LAST_RECORD" | jq -r '.last_url // ""')"
+  else
+    LAST_URL="$(printf '%s' "$LAST_RECORD" | sed -E 's/.*"last_url":"([^"]*)".*/\1/')"
+  fi
+  if [ -z "$LAST_URL" ]; then
+    err "failure record had no last_url; cannot resume — re-run with --site"
+    exit 1
+  fi
+  # Reduce to scheme://host
+  SITE="$(printf '%s' "$LAST_URL" | sed -E 's#^(https?://[^/]+).*#\1#')"
+  SLUG="$RESUME_SLUG"
+fi
+
+# ─── normal mode ────────────────────────────────────────────────────────────
+if [ -z "$SITE" ]; then
+  err "missing --site <url>"
+  usage
+  exit 2
+fi
+
+# Pre-flight: unlighthouse on PATH?
+if ! command -v unlighthouse >/dev/null 2>&1; then
+  err "unlighthouse not found on PATH."
+  printf '\n  Install:\n    npm install -g @unlighthouse/cli puppeteer\n\n'
+  exit 1
+fi
+
+# Lazy archive sweep before this run.
+archive_sweep
+
+# Slug derivation
+[ -z "$SLUG" ] && SLUG="$(slugify_url "$SITE")"
+[ -z "$SLUG" ] && SLUG="audit"
+
+DATE="$(date +%Y-%m-%d)"
+OUT_DIR="$AUDITS_DIR/${DATE}-${SLUG}"
+mkdir -p "$OUT_DIR"
+
+log "paperflow-audit-site"
+ok "site:    $SITE"
+ok "slug:    $SLUG"
+ok "output:  $OUT_DIR"
+
+# ─── run unlighthouse ──────────────────────────────────────────────────────
+set +e
+unlighthouse --site "$SITE" --output-path "$OUT_DIR" --no-cache
+EXIT_CODE=$?
+set -e
+
+if [ "$EXIT_CODE" -eq 0 ]; then
+  ok "audit complete"
+  if [ -f "$OUT_DIR/index.html" ]; then
+    /usr/bin/open "$OUT_DIR/index.html" >/dev/null 2>&1 || true
+    ok "opened: $OUT_DIR/index.html"
+  fi
+  exit 0
+fi
+
+# ─── failure path: try for partial report, then log ────────────────────────
+err "unlighthouse exited $EXIT_CODE — attempting partial report"
+PARTIAL_COUNT="$(count_partials "$OUT_DIR")"
+LAST_URL="$SITE"
+
+# Best-effort: if there's a generate command, try it; otherwise just log.
+if unlighthouse --help 2>/dev/null | grep -qi 'generate'; then
+  warn "running 'unlighthouse generate' on partial state"
+  unlighthouse generate --output-path "$OUT_DIR" >/dev/null 2>&1 || true
+fi
+
+# failure.log inside the audit dir
+{
+  printf 'paperflow-audit-site failure record\n'
+  printf 'time:           %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  printf 'slug:           %s\n' "$SLUG"
+  printf 'site:           %s\n' "$SITE"
+  printf 'exit_code:      %s\n' "$EXIT_CODE"
+  printf 'last_url:       %s\n' "$LAST_URL"
+  printf 'partial_count:  %s\n' "$PARTIAL_COUNT"
+} > "$OUT_DIR/failure.log"
+
+# JSONL line into ~/.openclaw/logs/audit-failures.jsonl
+write_failure_log "$SLUG" "$EXIT_CODE" "$LAST_URL" "$PARTIAL_COUNT"
+
+warn "partial report (if any) at: $OUT_DIR"
+warn "retry with: paperflow-audit-site --resume $SLUG"
+exit "$EXIT_CODE"

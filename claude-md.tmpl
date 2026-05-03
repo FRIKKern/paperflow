@@ -50,6 +50,12 @@ When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styli
 - Web surfaces use the `visual-investigator` subagent (Chrome DevTools MCP). Native macOS uses OpenClaw + `screencapture -v`.
 - One changelog per shipped UI change. The `/changelog/` URL pattern auto-opens via the PostToolUse hook and `doc.js` injects a single Share button.
 
+## Visual capture (visual-investigator)
+
+`visual-investigator` is the unified expert across four backends: Chrome DevTools MCP (single page, default), Unlighthouse (whole-site audits via `~/.local/bin/paperflow-audit-site`), BrowserBase (cloud parallel + cross-browser, future), and OpenClaw + `screencapture` (native macOS). Skills (`pre-flight-capture`, `site-audit`, `parallel-capture`) brief the agent with a structured `{surface, target, captures_needed, …}` JSON; the agent picks the right backend per the matrix in `~/.claude/agents/visual-investigator.md` and returns `{ok, artifacts, notes?}`. Skills stay thin orchestrators — they never name a backend, the agent never re-parses natural language.
+
+For whole-site audits specifically, the `site-audit` skill triggers on "audit my site", "lighthouse on X", "SEO check", "show me every page", "site overview". Output lands at `~/docs/superpowers/audits/<date>-<slug>/index.html`. Pre-req (opt-in): `npm install -g @unlighthouse/cli puppeteer`.
+
 # Subagent-driven workflow (default)
 
 Default to delegating non-trivial work to subagents (Task / Agent tool, appropriate `subagent_type`). The main session is for orchestration, decisions, and synthesis — never for raw tool output, file dumps, or exploration.

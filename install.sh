@@ -54,6 +54,13 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
+# Optional: unlighthouse for site-audit (Phase 1c). Don't auto-install.
+if command -v unlighthouse >/dev/null 2>&1; then
+    skip "unlighthouse: present (site-audit ready)"
+else
+    skip "unlighthouse: not installed — site-audit needs: npm install -g @unlighthouse/cli puppeteer"
+fi
+
 ok "ready"
 
 # ─── 1. Directories ────────────────────────────────────────────────
@@ -65,10 +72,13 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/docs/superpowers/captures" \
          "$HOME/docs/superpowers/changelog" \
          "$HOME/docs/superpowers/missions" \
+         "$HOME/docs/superpowers/audits" \
+         "$HOME/docs/superpowers/audits/_archive" \
          "$HOME/docs/superpowers/_lib" \
          "$HOME/.paperflow" \
          "$HOME/.local/bin" \
          "$HOME/.local/log" \
+         "$HOME/.openclaw/logs" \
          "$HOME/.claude/hooks" \
          "$HOME/.claude/skills/grill-plan" \
          "$HOME/.claude/skills/paperflow-install" \
@@ -79,6 +89,7 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/.claude/skills/mission-snapshot" \
          "$HOME/.claude/skills/mission-continue" \
          "$HOME/.claude/skills/paperflow-review-doc" \
+         "$HOME/.claude/skills/site-audit" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -257,7 +268,7 @@ fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog mission-create mission-snapshot mission-continue paperflow-review-doc; do
+for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog mission-create mission-snapshot mission-continue paperflow-review-doc site-audit; do
     if [ -f "$REPO/skills/$s/SKILL.md" ]; then
         mkdir -p "$HOME/.claude/skills/$s"
         cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -284,6 +295,12 @@ log "Helper: paperflow-validate"
 cp "$REPO/bin/paperflow-validate" "$HOME/.local/bin/paperflow-validate"
 chmod +x "$HOME/.local/bin/paperflow-validate"
 ok "installed at ~/.local/bin/paperflow-validate"
+
+# ─── 10d. audit wrapper at ~/.local/bin/paperflow-audit-site ───────
+log "Helper: paperflow-audit-site"
+cp "$REPO/bin/paperflow-audit-site" "$HOME/.local/bin/paperflow-audit-site"
+chmod +x "$HOME/.local/bin/paperflow-audit-site"
+ok "installed at ~/.local/bin/paperflow-audit-site"
 
 # ─── 11. CLAUDE.md (only if missing) ────────────────────────────────
 log "~/.claude/CLAUDE.md"
@@ -323,10 +340,13 @@ log "Status"
     [ -f "$HOME/.claude/skills/mission-snapshot/SKILL.md" ]   && ok "mission-snap.  : present"    || err "mission-snap.  : missing"
     [ -f "$HOME/.claude/skills/mission-continue/SKILL.md" ]   && ok "mission-cont.  : present"    || err "mission-cont.  : missing"
     [ -f "$HOME/.claude/skills/paperflow-review-doc/SKILL.md" ] && ok "review skill  : present"    || err "review skill  : missing"
+    [ -f "$HOME/.claude/skills/site-audit/SKILL.md" ]         && ok "site-audit skill: present"   || err "site-audit skill: missing"
+    [ -d "$HOME/docs/superpowers/audits" ]                    && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
     [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
     [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"
+    [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \

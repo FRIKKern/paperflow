@@ -51,7 +51,8 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Doc renderer | `~/docs/superpowers/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
 | Grill renderer | `~/docs/superpowers/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
 | Live-render | `~/docs/superpowers/_lib/live-render.{css,js}` | Chat-like DOM morph on file changes — no full reload, scroll and rendered Mermaid diagrams are preserved |
-| Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss,paperflow-review-doc,…}/SKILL.md` | Claude invokes these on demand |
+| Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss,paperflow-review-doc,site-audit,…}/SKILL.md` | Claude invokes these on demand |
+| Site audits | `~/docs/superpowers/audits/<date>-<slug>/` + `~/.local/bin/paperflow-audit-site` | Whole-site Lighthouse + thumbnails via Unlighthouse. See [Site audits](#site-audits). |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
 | Doc validator | `~/.local/bin/paperflow-validate` | Statically checks every Mermaid block in a doc HTML — catches the bomb-icon "Syntax error" before the user sees it. See [Quality checks](#quality-checks). |
 | Validate hook | `~/.claude/hooks/validate-paperflow-doc.sh` | PostToolUse(Write\|Edit) — runs `paperflow-validate` on any paperflow doc and surfaces failures via system-reminder |
@@ -223,6 +224,7 @@ Three Claude Code skills ship with paperflow. Claude invokes them on demand base
 | `discuss` | "discuss X" · "explain in depth" · "compare" · "deep-dive" — or whenever a long-form answer would otherwise be a wall of terminal text | Writes the discussion as an HTML article to `~/docs/superpowers/notes/`, auto-opens it, ends with a Reply textarea so you can respond inline. Keeps the chat reply terse. |
 | `grill-plan` | "grill this" · button click on a spec/plan | Reads the doc, generates 8–15 pointed questions across categories with rationale + recommendation + per-question Mermaid diagrams. Renders as an HTML form. |
 | `pre-flight-capture` | spec/plan touches HTML/CSS/JSX/Vue/Svelte/Tailwind · "capture before" · before any visual change | Captures static screenshots + 3–6 s videos of every interaction the plan changes. Saves to `~/docs/superpowers/captures/<date>-<slug>/`. Re-invoked with `mode: after` after the build. |
+| `site-audit` | "audit my site" · "lighthouse on X" · "SEO check" · "thumbnails of every page" · "site overview" | Briefs `visual-investigator` to run Unlighthouse on a whole site. Lighthouse scores + per-page thumbnails. Output at `~/docs/superpowers/audits/<date>-<slug>/index.html`. |
 | `write-changelog` | after a UI build · "write the changelog" · "publish the proof" | Renders an HTML proof page to `~/docs/superpowers/changelog/` with before/after side-by-side, files touched, verification checklist, rollback line. |
 
 Skills sit on top of the infrastructure (LaunchAgents, hooks, renderers). They tell Claude *when* to invoke the workflow and *how* to write the artifact.
@@ -298,6 +300,44 @@ Captures live in `captures/`, not nested under `changelog/`, so the changelog HT
 ```
 
 The `pre-flight-capture` skill itself does not write its own CLI tool — it briefs the existing `visual-investigator` subagent (web, via Chrome DevTools MCP) or OpenClaw + `screencapture -v` (native macOS).
+
+### Chrome DevTools MCP — direct path (advanced)
+
+The default web-capture path is the `visual-investigator` subagent — it isolates context, survives long sessions, and routes per the four-backend selection rule (Chrome DevTools MCP, Unlighthouse, BrowserBase, OpenClaw + `screencapture`).
+
+For very quick one-off checks where subagent overhead isn't worth it, you can install Chrome DevTools MCP at user level via the `/mcp` slash command in Claude Code and let the main session call it directly. Trade-off: every direct screenshot lands in the main session's context window. Soft gate: after 3 direct uses in one session, the system reminders escalate (level-4 aggressiveness) — switch to the subagent unless you have a specific reason.
+
+When to prefer direct: a single "what does this page look like right now?" question on a tight feedback loop. When to prefer the subagent: any investigation, any multi-shot capture, anything that might bloat the main context.
+
+---
+
+## Site audits
+
+Whole-site audits run through the `site-audit` skill, which briefs `visual-investigator` to pick Unlighthouse from its selection rule. One run produces Lighthouse scores per page, SEO checks, performance, accessibility, and screenshot thumbnails of every URL. The report lands at `~/docs/superpowers/audits/<date>-<slug>/index.html` and auto-opens in your browser.
+
+**Trigger phrases:**
+
+- "audit my site" / "audit X"
+- "lighthouse on X" / "run lighthouse"
+- "SEO check" / "SEO audit"
+- "show me every page" / "thumbnails of every page"
+- "site overview"
+
+**Direct invocation:**
+
+```bash
+~/.local/bin/paperflow-audit-site --site https://paperflow.dev
+~/.local/bin/paperflow-audit-site --rotate           # archive sweep only
+~/.local/bin/paperflow-audit-site --resume <slug>    # retry from failure log
+```
+
+**Pre-req (user opts in):**
+
+```bash
+npm install -g @unlighthouse/cli puppeteer
+```
+
+The wrapper bails with that exact hint if `unlighthouse` isn't on PATH. Audits older than 30 days move into `audits/_archive/<YYYY>/<MM>/` lazily on every invocation. Auth-gated sites are supported via cookie injection or Playwright storage state — see the `site-audit` skill for the recipes.
 
 ---
 
