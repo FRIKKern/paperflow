@@ -111,6 +111,10 @@ The bridge delivers a message starting with `Re: <slug>.html: <user's reply text
 - A direct chat reply (short)
 - Promotion to a `/specs/` artifact (if the user clicked **Make this a spec**)
 
+## Final review (mandatory)
+
+Before returning the URL to the user, invoke the `paperflow-review-doc` skill on the artifact path. If it returns `ok: false`, fix the offending blocks (typically Mermaid syntax errors) and re-save. Iterate up to 3 times. If still failing after 3 iterations, return the URL with a clear note that some Mermaid blocks may not render correctly — don't pretend it shipped clean.
+
 ## Don't
 
 - Don't write a discuss note for a yes/no answer or a code fix.

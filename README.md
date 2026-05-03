@@ -51,8 +51,11 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Doc renderer | `~/docs/superpowers/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
 | Grill renderer | `~/docs/superpowers/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
 | Live-render | `~/docs/superpowers/_lib/live-render.{css,js}` | Chat-like DOM morph on file changes — no full reload, scroll and rendered Mermaid diagrams are preserved |
-| Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss}/SKILL.md` | Claude invokes these on demand |
+| Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss,paperflow-review-doc,…}/SKILL.md` | Claude invokes these on demand |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
+| Doc validator | `~/.local/bin/paperflow-validate` | Statically checks every Mermaid block in a doc HTML — catches the bomb-icon "Syntax error" before the user sees it. See [Quality checks](#quality-checks). |
+| Validate hook | `~/.claude/hooks/validate-paperflow-doc.sh` | PostToolUse(Write\|Edit) — runs `paperflow-validate` on any paperflow doc and surfaces failures via system-reminder |
+| Review skill | `~/.claude/skills/paperflow-review-doc/SKILL.md` | Final-step skill called by every doc-writer; Layer 1 = static, Layer 2 = optional browser visual review |
 
 ---
 
@@ -345,6 +348,18 @@ Each mission gets a paired HTML + JSON file in `~/docs/superpowers/missions/`:
 ```
 
 The mission HTML auto-opens via the same hook as specs/plans, and `doc.js` injects two buttons: **Continue** (primary, runs the launcher) and **Snapshot** (secondary, refreshes state).
+
+---
+
+## Quality checks
+
+Every doc Claude writes runs through two layers of render-correctness checks before the URL is reported back to you.
+
+**Layer 1 — `paperflow-validate` (always, fast).** A ~80-line Node script that extracts every Mermaid block from the HTML (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings) and runs each through `mermaid.parse()`. Outputs JSON with the failed blocks, their line estimate, and the offending excerpt. A PostToolUse hook fires it on every Write|Edit of a paperflow doc; on failure, Claude sees a `<system-reminder>` and fixes the block before reporting the URL. This is what catches the "Syntax error in text" bomb icon at write-time instead of when you open the page.
+
+**Layer 2 — `paperflow-review-doc` (final step, optional browser check).** A skill called by every doc-writing skill (discuss, grill-plan, mission-create, mission-snapshot, write-changelog, pre-flight-capture) right before they hand you the URL. It re-runs Layer 1, and for high-stakes docs (long plans with many diagrams, changelogs, missions) optionally spawns a `visual-investigator` subagent to load the page, wait for Mermaid to render, and scan the DOM for any "Syntax error" elements or console errors.
+
+The two-layer setup means a Mermaid mistake never reaches your eyes through paperflow's normal flow — the writer catches it, fixes it, and reports the URL clean.
 
 ---
 

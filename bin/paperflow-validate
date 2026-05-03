@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+/* paperflow-validate <html-file>
+ *
+ * Static validator for Mermaid blocks in paperflow doc HTMLs. Catches
+ * syntax errors before the user sees the bomb icon in the browser.
+ *
+ * Handles two embedding shapes:
+ *   1. <pre class="mermaid">…</pre>      (specs / plans / notes / changelogs)
+ *   2. diagram: "flowchart …"            (grill JS-literal strings inside
+ *                                         window.GRILL.questions[])
+ *
+ * Output: JSON to stdout —
+ *   { ok, total, failed: [ { index, line_estimate, error_message,
+ *                            source_excerpt, kind, qid? } ] }
+ *
+ * Exit codes: 0 = all parse, 2 = at least one failure, 1 = usage error.
+ */
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const { execSync } = require("child_process");
+
+const argv = process.argv.slice(2);
+if (argv.length !== 1 || argv[0] === "--help" || argv[0] === "-h") {
+  process.stderr.write("usage: paperflow-validate <html-file>\n");
+  process.exit(argv.length === 0 ? 1 : 0);
+}
+const FILE = path.resolve(argv[0]);
+if (!fs.existsSync(FILE)) {
+  process.stderr.write(`paperflow-validate: file not found: ${FILE}\n`);
+  process.exit(1);
+}
+const html = fs.readFileSync(FILE, "utf8");
+
+// ── 1. Extract Mermaid sources ──────────────────────────────────────
+const blocks = [];
+
+// 1a. <pre class="mermaid">…</pre>
+const preRe = /<pre[^>]*\bclass="mermaid"[^>]*>([\s\S]*?)<\/pre>/g;
+let m, idx = 0;
+while ((m = preRe.exec(html))) {
+  const offset = m.index;
+  const lineEst = html.slice(0, offset).split(/\n/).length;
+  // Decode minimal HTML entities the CDN renderer would decode at runtime.
+  const src = m[1].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  blocks.push({ index: idx++, kind: "pre", line_estimate: lineEst, source: src.trim() });
+}
+
+// 1b. JS-literal `diagram: "…"` inside window.GRILL.questions[]
+//     Matches both "double-quoted" and `backtick` strings; respects
+//     escape sequences. Pulled by a regex tolerant enough for our
+//     well-formed renderer output.
+const diagRe = /\bdiagram\s*:\s*("(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g;
+const qidRe = /id\s*:\s*["']([^"']+)["']/;
+while ((m = diagRe.exec(html))) {
+  const offset = m.index;
+  const lineEst = html.slice(0, offset).split(/\n/).length;
+  let src;
+  try { src = JSON.parse(m[1].startsWith("`") ? '"' + m[1].slice(1, -1).replace(/"/g, '\\"') + '"' : m[1]); }
+  catch { src = m[1].slice(1, -1); }
+  // Find the question id by scanning backwards a few hundred chars.
+  const ctx = html.slice(Math.max(0, offset - 600), offset);
+  const qm = ctx.match(/id\s*:\s*["']([^"']+)["'][^]*$/);
+  const qid = qm ? qm[1] : null;
+  blocks.push({ index: idx++, kind: "diagram", qid, line_estimate: lineEst, source: src });
+}
+
+// ── 2. Parse each block via mermaid (Node-mode patched DOMPurify) ───
+async function loadMermaid() {
+  // Find global node_modules root.
+  let root;
+  try {
+    root = execSync("npm root -g", { encoding: "utf8" }).trim();
+  } catch (e) {
+    throw new Error("npm not found on PATH; cannot locate mermaid");
+  }
+  const mermaidEsm = path.join(root, "mermaid", "dist", "mermaid.core.mjs");
+  if (!fs.existsSync(mermaidEsm)) {
+    throw new Error(`mermaid not installed globally. run: npm install -g mermaid`);
+  }
+  const dpEsm = path.join(root, "mermaid", "node_modules", "dompurify", "dist", "purify.es.mjs");
+  // Patch DOMPurify before mermaid imports it. ES-module default exports
+  // are live bindings; mutating the function object is observed by every
+  // importer of the same specifier.
+  const dpMod = await import("file://" + dpEsm);
+  const D = dpMod.default;
+  const noop = () => {};
+  D.addHook = noop; D.removeHook = noop; D.removeHooks = noop; D.removeAllHooks = noop;
+  D.sanitize = (s) => s;
+  D.isValidAttribute = () => true;
+  D.setConfig = noop; D.clearConfig = noop;
+  D.isSupported = false;
+  if (!D.version) D.version = "stub";
+  if (!D.removed) D.removed = [];
+  const m = await import("file://" + mermaidEsm);
+  return m.default;
+}
+
+(async () => {
+  if (blocks.length === 0) {
+    process.stdout.write(JSON.stringify({ ok: true, total: 0, failed: [] }) + "\n");
+    process.exit(0);
+  }
+  let mermaid;
+  try { mermaid = await loadMermaid(); }
+  catch (e) {
+    process.stdout.write(JSON.stringify({
+      ok: false, total: blocks.length, failed: [],
+      error: `loader: ${e.message}`
+    }) + "\n");
+    process.exit(2);
+  }
+  const failed = [];
+  for (const b of blocks) {
+    try {
+      await mermaid.parse(b.source);
+    } catch (e) {
+      const msg = (e && e.message ? e.message : String(e)).split("\n").slice(0, 6).join("\n");
+      failed.push({
+        index: b.index,
+        kind: b.kind,
+        qid: b.qid || null,
+        line_estimate: b.line_estimate,
+        error_message: msg,
+        source_excerpt: b.source.split("\n").slice(0, 4).join("\n") + (b.source.split("\n").length > 4 ? "\n…" : "")
+      });
+    }
+  }
+  const out = { ok: failed.length === 0, total: blocks.length, failed };
+  process.stdout.write(JSON.stringify(out, null, 2) + "\n");
+  process.exit(failed.length === 0 ? 0 : 2);
+})().catch((e) => {
+  process.stderr.write(`paperflow-validate: fatal: ${e && e.stack ? e.stack : e}\n`);
+  process.exit(2);
+});

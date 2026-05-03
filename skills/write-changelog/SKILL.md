@@ -206,6 +206,10 @@ For each `before-<suffix>.{png,mp4}` in the captures directory, find the matchin
 
 Paste the JSON into `window.CLAUDE_TARGET` so the Share button reaches *this* terminal tab.
 
+## Final review (mandatory)
+
+Before returning the URL to the user, invoke the `paperflow-review-doc` skill on the changelog HTML path. If it returns `ok: false`, fix the offending blocks (typically Mermaid syntax errors) and re-save. Iterate up to 3 times. If still failing after 3 iterations, return the URL with a clear note that some Mermaid blocks may not render correctly — don't pretend it shipped clean.
+
 ## What this skill is not
 
 - **Not a release-notes generator.** Single change set, single page. No version numbers.

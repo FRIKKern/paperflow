@@ -129,6 +129,10 @@ Plan templates get one new H2 near the top:
 
 The skill produces the `<figure>` blocks. Plan author pastes them in. That's it — no template surgery.
 
+## Final review (mandatory)
+
+If this skill writes any HTML output (e.g. an embedded `<figure>` block in a plan), before returning the URL to the user invoke the `paperflow-review-doc` skill on the artifact path. If it returns `ok: false`, fix the offending blocks (typically Mermaid syntax errors) and re-save. Iterate up to 3 times. If still failing after 3 iterations, return the URL with a clear note that some Mermaid blocks may not render correctly — don't pretend it shipped clean.
+
 ## What this skill is not
 
 - **Not a custom CLI capture tool.** Use existing subagents (`visual-investigator` for web, OpenClaw for native).

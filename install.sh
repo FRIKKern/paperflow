@@ -78,6 +78,7 @@ mkdir -p "$HOME/docs/superpowers/specs" \
          "$HOME/.claude/skills/mission-create" \
          "$HOME/.claude/skills/mission-snapshot" \
          "$HOME/.claude/skills/mission-continue" \
+         "$HOME/.claude/skills/paperflow-review-doc" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -118,6 +119,18 @@ if [ -x "$LIVE_SERVER" ]; then
 else
     "$NODE_BIN_DIR/npm" install -g live-server@1.2.2 >/dev/null 2>&1
     ok "installed (v$LIVE_SERVER_PIN)"
+fi
+
+# mermaid (npm global) — used by paperflow-validate to statically check
+# Mermaid blocks in doc HTMLs before the user opens them in browser.
+log "mermaid"
+MERMAID_DIR="$NODE_BIN_DIR/../lib/node_modules/mermaid"
+if [ -d "$MERMAID_DIR" ]; then
+    MM_VER="$(/usr/bin/env node -e "console.log(require('$MERMAID_DIR/package.json').version)" 2>/dev/null || echo unknown)"
+    skip "already installed (v$MM_VER)"
+else
+    "$NODE_BIN_DIR/npm" install -g mermaid >/dev/null 2>&1
+    ok "installed"
 fi
 
 LIVE_SERVER_JS="$(readlink "$LIVE_SERVER" 2>/dev/null || echo "")"
@@ -190,7 +203,7 @@ done
 
 # ─── 7. Hooks ───────────────────────────────────────────────────────
 log "Hooks"
-for f in inject-principles.sh auto-open-doc.sh; do
+for f in inject-principles.sh auto-open-doc.sh validate-paperflow-doc.sh; do
     cp "$REPO/hooks/$f" "$HOME/.claude/hooks/$f"
     chmod +x "$HOME/.claude/hooks/$f"
     ok "$f"
@@ -215,7 +228,7 @@ else
 fi
 
 if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command? | type == "string" and endswith("auto-open-doc.sh"))' "$SETTINGS" >/dev/null 2>&1; then
-    skip "PostToolUse hook already present"
+    skip "PostToolUse auto-open hook already present"
 else
     TMP="$(mktemp)"
     jq '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
@@ -225,12 +238,26 @@ else
                   timeout: 3 }]
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
-    ok "merged PostToolUse"
+    ok "merged PostToolUse auto-open"
+fi
+
+if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command? | type == "string" and endswith("validate-paperflow-doc.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+    skip "PostToolUse validate hook already present"
+else
+    TMP="$(mktemp)"
+    jq '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+        matcher: "Write|Edit",
+        hooks: [{ type: "command",
+                  command: "$HOME/.claude/hooks/validate-paperflow-doc.sh",
+                  timeout: 15 }]
+    }])' "$SETTINGS" > "$TMP"
+    mv "$TMP" "$SETTINGS"
+    ok "merged PostToolUse validate"
 fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog mission-create mission-snapshot mission-continue; do
+for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog mission-create mission-snapshot mission-continue paperflow-review-doc; do
     if [ -f "$REPO/skills/$s/SKILL.md" ]; then
         mkdir -p "$HOME/.claude/skills/$s"
         cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -251,6 +278,12 @@ log "Helper: paperflow-continue"
 cp "$REPO/bin/paperflow-continue" "$HOME/.local/bin/paperflow-continue"
 chmod +x "$HOME/.local/bin/paperflow-continue"
 ok "installed at ~/.local/bin/paperflow-continue"
+
+# ─── 10c. doc validator at ~/.local/bin/paperflow-validate ─────────
+log "Helper: paperflow-validate"
+cp "$REPO/bin/paperflow-validate" "$HOME/.local/bin/paperflow-validate"
+chmod +x "$HOME/.local/bin/paperflow-validate"
+ok "installed at ~/.local/bin/paperflow-validate"
 
 # ─── 11. CLAUDE.md (only if missing) ────────────────────────────────
 log "~/.claude/CLAUDE.md"
@@ -289,8 +322,11 @@ log "Status"
     [ -f "$HOME/.claude/skills/mission-create/SKILL.md" ]     && ok "mission-create : present"    || err "mission-create : missing"
     [ -f "$HOME/.claude/skills/mission-snapshot/SKILL.md" ]   && ok "mission-snap.  : present"    || err "mission-snap.  : missing"
     [ -f "$HOME/.claude/skills/mission-continue/SKILL.md" ]   && ok "mission-cont.  : present"    || err "mission-cont.  : missing"
+    [ -f "$HOME/.claude/skills/paperflow-review-doc/SKILL.md" ] && ok "review skill  : present"    || err "review skill  : missing"
+    [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
     [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
+    [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \

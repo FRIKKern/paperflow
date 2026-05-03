@@ -80,6 +80,10 @@ Use the same article CSS as specs/plans (inline `<style>` block; copy from a rec
 
 `~/.paperflow/active-mission` is a single file with one line: the current mission slug. `mission-snapshot` and `mission-continue` read it. If the user starts a new mission while one is active, overwrite — only one active mission at a time.
 
+## Final review (mandatory)
+
+Before returning the URL to the user, invoke the `paperflow-review-doc` skill on the mission HTML path. If it returns `ok: false`, fix the offending blocks (typically Mermaid syntax errors in the mission map) and re-save. Iterate up to 3 times. If still failing after 3 iterations, return the URL with a clear note that some Mermaid blocks may not render correctly — don't pretend it shipped clean.
+
 ## Don't
 
 - Don't proactively tag existing specs/plans/grills with mission meta tags — that's phase 2.

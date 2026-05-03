@@ -175,6 +175,10 @@ The bridge delivers a message starting with `Grill answers for <plan>:`. Read it
 - Hand off to `writing-plans` skill for implementation
 - Build directly via the spec's Build button
 
+## Final review (mandatory)
+
+Before returning the URL to the user, invoke the `paperflow-review-doc` skill on the artifact path. If it returns `ok: false`, fix the offending blocks (typically Mermaid syntax errors in question diagrams) and re-save. Iterate up to 3 times. If still failing after 3 iterations, return the URL with a clear note that some Mermaid blocks may not render correctly — don't pretend it shipped clean.
+
 ## What this skill is not
 
 - **Not a code review.** It questions the *plan*, not the code. If the user wants a code review, hand off to a code-review skill instead.

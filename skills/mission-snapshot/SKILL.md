@@ -51,6 +51,10 @@ Refresh the active mission's `<slug>.html` and `<slug>.json` with the current st
 
 If the main agent isn't sure, leave those fields untouched — but ALWAYS refresh `artifacts` (file scan) and `resume_prompt`.
 
+## Final review (mandatory)
+
+Before returning the URL to the user, invoke the `paperflow-review-doc` skill on the mission HTML path. If it returns `ok: false`, fix the offending blocks (typically Mermaid syntax errors in the mission map) and re-save. Iterate up to 3 times. If still failing after 3 iterations, return the URL with a clear note that some Mermaid blocks may not render correctly — don't pretend it shipped clean.
+
 ## Don't
 
 - Don't create a new mission. This skill operates on the active one only.
