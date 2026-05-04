@@ -48,7 +48,7 @@ The wrapper auto-runs `open <dir>/index.html` on success.
 
 ### 3. Surface the result
 
-Report back: the report path (`~/docs/superpowers/audits/<date>-<slug>/index.html`), the live URL (`http://localhost:8765/superpowers/audits/<date>-<slug>/index.html` if the user wants to share), and a 1-line summary of what was captured.
+Report back: the report path (`~/docs/paperflow/audits/<date>-<slug>/index.html`), the live URL (`http://localhost:8765/paperflow/audits/<date>-<slug>/index.html` if the user wants to share), and a 1-line summary of what was captured.
 
 ### 4. Pre-req fallback
 

@@ -38,7 +38,7 @@ Trigger Layer 2 only if:
 
 Spawn a `visual-investigator` subagent (Chrome DevTools MCP). Brief:
 
-> Load `http://localhost:8765/<path-relative-to-docs>` (e.g. `superpowers/grills/2026-05-04-visual-capture-stack-grill.html`). Wait 3 s for Mermaid to render. Then:
+> Load `http://localhost:8765/<path-relative-to-docs>` (e.g. `paperflow/grills/2026-05-04-visual-capture-stack-grill.html`). Wait 3 s for Mermaid to render. Then:
 > 1. Scan the DOM for elements with text content matching `/Syntax error/i` or class containing `error-icon`.
 > 2. Capture any console errors emitted during render.
 > 3. Take a single full-page screenshot for evidence.

@@ -1,6 +1,6 @@
 ---
 name: write-changelog
-description: Use AFTER implementing a UI change to generate the proof page — an HTML article at ~/docs/superpowers/changelog/ that puts before/after captures side-by-side, names the files touched, lists what was verified, and gives a one-line rollback. Triggered by phrases like "write the changelog", "publish the proof", or automatically after a build that pre-flight-capture was run for. Consumes captures from ~/docs/superpowers/captures/<same-slug>/ (both `before-*` and `after-*` files).
+description: Use AFTER implementing a UI change to generate the proof page — an HTML article at ~/docs/paperflow/changelog/ that puts before/after captures side-by-side, names the files touched, lists what was verified, and gives a one-line rollback. Triggered by phrases like "write the changelog", "publish the proof", or automatically after a build that pre-flight-capture was run for. Consumes captures from ~/docs/paperflow/captures/<same-slug>/ (both `before-*` and `after-*` files).
 ---
 
 # write-changelog
@@ -17,17 +17,17 @@ If pre-flight evidence exists but post-flight doesn't, **first** invoke `pre-fli
 
 ## Inputs
 
-1. The captures directory: `~/docs/superpowers/captures/<YYYY-MM-DD>-<topic-slug>/`
+1. The captures directory: `~/docs/paperflow/captures/<YYYY-MM-DD>-<topic-slug>/`
 2. The plan or spec the change came from (for cross-linking)
 3. Git diff or list of files touched
 
 ## Output
 
 ```
-~/docs/superpowers/changelog/<YYYY-MM-DD>-<topic-slug>-changelog.html
+~/docs/paperflow/changelog/<YYYY-MM-DD>-<topic-slug>-changelog.html
 ```
 
-URL: `http://localhost:8765/superpowers/changelog/<filename>.html`
+URL: `http://localhost:8765/paperflow/changelog/<filename>.html`
 
 The auto-open hook fires on Write of this path. `doc.js` detects `/changelog/` in the URL and renders a "Share" action button.
 
@@ -40,7 +40,7 @@ The auto-open hook fires on Write of this path. `doc.js` detects `/changelog/` i
 > - Source plan: `<plan-filename>.html`
 > - Files touched + summary diff: `<inline list>`
 >
-> Write a self-contained HTML changelog to `<output-path>` using the template in the `write-changelog` SKILL.md. Pair every `before-*` with its matching `after-*` (e.g., `before-hover.mp4` ↔ `after-hover.mp4`). Article-style typography — same eyebrow/title/byline/ingress/H2 pattern as the spec template. End with `window.CLAUDE_TARGET`, `window.DOC_PATH`, and `<script src="/superpowers/_lib/doc.js">`. Capture the terminal target via `~/.local/bin/paperflow-target`.
+> Write a self-contained HTML changelog to `<output-path>` using the template in the `write-changelog` SKILL.md. Pair every `before-*` with its matching `after-*` (e.g., `before-hover.mp4` ↔ `after-hover.mp4`). Article-style typography — same eyebrow/title/byline/ingress/H2 pattern as the spec template. End with `window.CLAUDE_TARGET`, `window.DOC_PATH`, and `<script src="/paperflow/_lib/doc.js">`. Capture the terminal target via `~/.local/bin/paperflow-target`.
 >
 > Return only the URL.
 
@@ -62,7 +62,7 @@ The auto-open hook fires on Write of this path. `doc.js` detects `/changelog/` i
 <head>
 <meta charset="utf-8">
 <title>Changelog: <topic></title>
-<link rel="stylesheet" href="/superpowers/_lib/doc.css">
+<link rel="stylesheet" href="/paperflow/_lib/doc.css">
 <style>
   /* Reuse spec/plan tokens. doc.css ships them. */
   .changelog-hero {
@@ -188,7 +188,7 @@ The auto-open hook fires on Write of this path. `doc.js` detects `/changelog/` i
   window.CLAUDE_TARGET = /* paste output of paperflow-target */;
   window.DOC_PATH = "<this-filename>.html";
 </script>
-<script src="/superpowers/_lib/doc.js"></script>
+<script src="/paperflow/_lib/doc.js"></script>
 
 </body>
 </html>

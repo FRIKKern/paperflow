@@ -43,7 +43,7 @@ Spawn a fresh Claude Code session in a new terminal tab, pre-loaded with the mis
 Set by `mission-create` at creation and refreshed by `mission-snapshot`:
 
 ```
-You are continuing the <name> mission. Read /Users/<user>/docs/superpowers/missions/<slug>.html in full. Then do: <next-step>.
+You are continuing the <name> mission. Read /Users/<user>/docs/paperflow/missions/<slug>.html in full. Then do: <next-step>.
 ```
 
 The fresh Claude session reads the mission HTML (which mirrors the JSON), gets the full picture (vision, artifacts, decisions, open questions), and starts work on the concrete next-step.

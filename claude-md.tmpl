@@ -4,20 +4,20 @@ When something is complicated, lead with a diagram and concrete details. Don't u
 
 # Specs, plans, design docs
 
-Write them as standalone HTML files in `~/docs/superpowers/{specs,plans,grills}/`, not Markdown. Mermaid via CDN script. Article-style typography (ingress, brødtekst, captioned figures, serif body, sans headings) — never ship inline `<style>` blocks; the typography lives in the shared stylesheet. Each doc links it once from `<head>`:
+Write them as standalone HTML files in `~/docs/paperflow/{specs,plans,grills}/`, not Markdown. Mermaid via CDN script. Article-style typography (ingress, brødtekst, captioned figures, serif body, sans headings) — never ship inline `<style>` blocks; the typography lives in the shared stylesheet. Each doc links it once from `<head>`:
 
-    <link rel="stylesheet" href="/superpowers/_lib/doc.css">
+    <link rel="stylesheet" href="/paperflow/_lib/doc.css">
 
 Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `<pre class="mermaid">` + `<figcaption><b>Figure N.</b> …</figcaption>`. Per-doc colour overrides set `:root` CSS variables before the link. Distribute diagrams throughout — each section that explains a flow / comparison / decision gets a Mermaid figure. Aim for at least one visual every ~300 words. Always open via the live-reload URL, never `file://`:
 
-    open http://localhost:8765/superpowers/specs/<filename>.html
-    open http://localhost:8765/superpowers/plans/<filename>.html
+    open http://localhost:8765/paperflow/specs/<filename>.html
+    open http://localhost:8765/paperflow/plans/<filename>.html
 
 `__LR_LABEL__` LaunchAgent serves `~/docs/` on port 8765 with WebSocket hot reload (~200 ms refresh).
 
 ## Action buttons (every spec & plan)
 
-End every spec / plan / grill HTML with a one-line `<script src="/superpowers/_lib/doc.js"></script>` include. Doc.js auto-injects the right buttons based on the URL path:
+End every spec / plan / grill HTML with a one-line `<script src="/paperflow/_lib/doc.js"></script>` include. Doc.js auto-injects the right buttons based on the URL path:
 
 | Doc type | Primary | Secondary |
 |---|---|---|
@@ -40,17 +40,17 @@ Get the target via:
 
 ## Grills (plan stress-tests)
 
-Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/superpowers/_lib/grill.{css,js}`.
+Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
 
 # Doc review (mandatory)
 
-Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/superpowers/{specs,plans,grills,notes,changelog,missions,audits}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Writing skills (discuss, grill-plan, mission-create, mission-snapshot, write-changelog, pre-flight-capture) call the `paperflow-review-doc` skill as their final step — Layer 1 is `paperflow-validate`, Layer 2 is an optional browser visual check via `visual-investigator` for high-stakes docs. Iterate up to 3 times to fix syntax errors before handing the URL to the user.
+Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/paperflow/{specs,plans,grills,notes,changelog,missions,audits}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Writing skills (discuss, grill-plan, mission-create, mission-snapshot, write-changelog, pre-flight-capture) call the `paperflow-review-doc` skill as their final step — Layer 1 is `paperflow-validate`, Layer 2 is an optional browser visual check via `visual-investigator` for high-stakes docs. Iterate up to 3 times to fix syntax errors before handing the URL to the user.
 
 # Visual evidence
 
-When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, transition, color, spacing, typography, component — run `pre-flight-capture` before drafting the plan and embed the resulting `<figure>` blocks in a "Pre-flight evidence" H2 near the top. After the build, run `pre-flight-capture` with `mode: after` to fill in the post-flight half, then run `write-changelog` to render the proof page at `~/docs/superpowers/changelog/<date>-<topic>-changelog.html` with before/after side-by-side.
+When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, transition, color, spacing, typography, component — run `pre-flight-capture` before drafting the plan and embed the resulting `<figure>` blocks in a "Pre-flight evidence" H2 near the top. After the build, run `pre-flight-capture` with `mode: after` to fill in the post-flight half, then run `write-changelog` to render the proof page at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html` with before/after side-by-side.
 
-- Captures live in `~/docs/superpowers/captures/<date>-<topic-slug>/` (shared across before + after; referenced by the changelog via relative `../captures/.../`).
+- Captures live in `~/docs/paperflow/captures/<date>-<topic-slug>/` (shared across before + after; referenced by the changelog via relative `../captures/.../`).
 - Web surfaces use the `visual-investigator` subagent (Chrome DevTools MCP). Native macOS uses OpenClaw + `screencapture -v`.
 - One changelog per shipped UI change. The `/changelog/` URL pattern auto-opens via the PostToolUse hook and `doc.js` injects a single Share button.
 
@@ -58,7 +58,7 @@ When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styli
 
 `visual-investigator` is the unified expert across four backends: Chrome DevTools MCP (single page, default), Unlighthouse (whole-site audits via `~/.local/bin/paperflow-audit-site`), BrowserBase (cloud parallel + cross-browser, future), and OpenClaw + `screencapture` (native macOS). Skills (`pre-flight-capture`, `site-audit`, `parallel-capture`) brief the agent with a structured `{surface, target, captures_needed, …}` JSON; the agent picks the right backend per the matrix in `~/.claude/agents/visual-investigator.md` and returns `{ok, artifacts, notes?}`. Skills stay thin orchestrators — they never name a backend, the agent never re-parses natural language.
 
-For whole-site audits specifically, the `site-audit` skill triggers on "audit my site", "lighthouse on X", "SEO check", "show me every page", "site overview". Output lands at `~/docs/superpowers/audits/<date>-<slug>/index.html`. Pre-req (opt-in): `npm install -g @unlighthouse/cli puppeteer`.
+For whole-site audits specifically, the `site-audit` skill triggers on "audit my site", "lighthouse on X", "SEO check", "show me every page", "site overview". Output lands at `~/docs/paperflow/audits/<date>-<slug>/index.html`. Pre-req (opt-in): `npm install -g @unlighthouse/cli puppeteer`.
 
 # Subagent-driven workflow (default)
 
@@ -81,7 +81,7 @@ Default to delegating non-trivial work to subagents (Task / Agent tool, appropri
 
 # Missions
 
-When starting any non-trivial multi-artifact piece of work (will span multiple specs / plans / grills / changelogs), run `mission-create` first. It writes an HTML + JSON pair to `~/docs/superpowers/missions/` and marks the mission active in `~/.paperflow/active-mission`.
+When starting any non-trivial multi-artifact piece of work (will span multiple specs / plans / grills / changelogs), run `mission-create` first. It writes an HTML + JSON pair to `~/docs/paperflow/missions/` and marks the mission active in `~/.paperflow/active-mission`.
 
 When context is filling up, before any big handoff, or before invoking `mission-continue`, run `mission-snapshot`. It refreshes the active mission's HTML + JSON sidecar with the current artifacts, progress, decisions, open questions, and a fresh `resume_prompt`.
 
