@@ -54,6 +54,27 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
+# npm global write access — the #1 install failure on macOS. Homebrew puts
+# node at /usr/local/bin and root-owns /usr/local/lib/node_modules, so a
+# later `npm install -g` exits with EACCES and the user is left guessing
+# (especially if we suppressed stderr). Catch it now with a clear remedy.
+if command -v npm >/dev/null 2>&1; then
+    NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
+    NPM_GLOBAL_DIR="$NPM_PREFIX/lib/node_modules"
+    if [ -n "$NPM_PREFIX" ] && [ ! -w "$NPM_PREFIX/lib" ] 2>/dev/null && [ ! -w "$NPM_GLOBAL_DIR" ] 2>/dev/null; then
+        err "npm cannot write to: $NPM_GLOBAL_DIR"
+        printf '\n    paperflow installs live-server + mermaid as global npm packages.\n'
+        printf '    Pick one fix and re-run:\n\n'
+        printf '    A)  Reclaim ownership of the npm global dirs (one-time):\n'
+        printf '        sudo chown -R $(whoami) %s/lib/node_modules %s/bin %s/share\n\n' "$NPM_PREFIX" "$NPM_PREFIX" "$NPM_PREFIX"
+        printf '    B)  Use a user-local prefix:\n'
+        printf '        npm config set prefix ~/.npm-global\n'
+        printf '        export PATH="$HOME/.npm-global/bin:$PATH"   # add to ~/.zshrc\n\n'
+        printf '    Then:  bash install.sh\n'
+        exit 1
+    fi
+fi
+
 # Optional: unlighthouse for site-audit (Phase 1c). Don't auto-install.
 if command -v unlighthouse >/dev/null 2>&1; then
     skip "unlighthouse: present (site-audit ready)"
@@ -128,7 +149,7 @@ if [ -x "$LIVE_SERVER" ]; then
         skip "already installed (v${LS_VER:-unknown})"
     fi
 else
-    "$NODE_BIN_DIR/npm" install -g live-server@1.2.2 >/dev/null 2>&1
+    "$NODE_BIN_DIR/npm" install -g live-server@1.2.2 >/dev/null
     ok "installed (v$LIVE_SERVER_PIN)"
 fi
 
@@ -140,7 +161,7 @@ if [ -d "$MERMAID_DIR" ]; then
     MM_VER="$(/usr/bin/env node -e "console.log(require('$MERMAID_DIR/package.json').version)" 2>/dev/null || echo unknown)"
     skip "already installed (v$MM_VER)"
 else
-    "$NODE_BIN_DIR/npm" install -g mermaid >/dev/null 2>&1
+    "$NODE_BIN_DIR/npm" install -g mermaid >/dev/null
     ok "installed"
 fi
 
@@ -181,28 +202,81 @@ reload_agent() {
     fi
 }
 
+# Poll an http port until it responds 200, or timeout. Default 5s @ 0.5s steps.
+wait_for_port() {
+    local port="$1" max_tries="${2:-10}" tries=0
+    while [ "$tries" -lt "$max_tries" ]; do
+        if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/" 2>/dev/null | grep -q 200; then
+            return 0
+        fi
+        sleep 0.5
+        tries=$((tries + 1))
+    done
+    return 1
+}
+
+# Wait for a LaunchAgent's port; if it's still down, kickstart once and re-poll.
+ensure_agent_up() {
+    local label="$1" port="$2"
+    wait_for_port "$port" && return 0
+    launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    wait_for_port "$port"
+}
+
 # ─── 4. live-server LaunchAgent ─────────────────────────────────────
 log "LaunchAgent: $LR_LABEL"
 LR_PLIST="$HOME/Library/LaunchAgents/$LR_LABEL.plist"
 render "$REPO/launchagents/docs-livereload.plist.tmpl" "$LR_PLIST" "$LR_LABEL"
 reload_agent "$LR_LABEL" "$LR_PLIST"
-sleep 1
-if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8765/" 2>/dev/null | grep -q 200; then
+if ensure_agent_up "$LR_LABEL" 8765; then
     ok "up at http://localhost:8765"
 else
     err "not reachable — check $HOME/.local/log/docs-livereload.err.log"
 fi
 
-# ─── 5. claude-bridge LaunchAgent ───────────────────────────────────
-log "LaunchAgent: $BR_LABEL"
-BR_PLIST="$HOME/Library/LaunchAgents/$BR_LABEL.plist"
-render "$REPO/launchagents/claude-bridge.plist.tmpl" "$BR_PLIST" "$BR_LABEL"
-reload_agent "$BR_LABEL" "$BR_PLIST"
-sleep 1
-if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8766/" 2>/dev/null | grep -q 200; then
-    ok "up at http://localhost:8766"
+# ─── 5. claude-bridge ───────────────────────────────────────────────
+# On cmux.app systems we cannot run the bridge as a LaunchAgent: cmux's socket
+# is in access_mode "cmuxOnly" and rejects connections whose responsible-process
+# ancestor is launchd, returning "Failed to write to socket (Broken pipe)" on
+# every dispatch. The bridge MUST be a child of cmux.app to inherit the trust
+# cmux's auth requires. We achieve that with `cmux new-workspace --command`,
+# which spawns the bridge as a managed cmux subprocess.
+#
+# On non-cmux systems (Apple Terminal / iTerm / plain Ghostty), keep the
+# LaunchAgent path — same behavior as before.
+if [ -n "${CMUX_SOCKET:-}" ] && [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "$CMUX_BUNDLED_CLI_PATH" ]; then
+    log "claude-bridge (cmux mode)"
+    # Tear down any existing LaunchAgent — it would race for port 8766 and
+    # always lose the cmux dispatch even if the port-bind succeeded.
+    if launchctl print "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1 || true
+        skip "removed legacy LaunchAgent (cmux requires in-app spawn)"
+    fi
+    if pgrep -f "node.*claude-bridge\.js" >/dev/null 2>&1; then
+        skip "already running"
+    else
+        "$CMUX_BUNDLED_CLI_PATH" new-workspace \
+            --name "paperflow-bridge" \
+            --command "$NODE_BIN $REPO/bin/claude-bridge.js" \
+            >/dev/null 2>&1 \
+                && ok "spawned via cmux new-workspace" \
+                || err "cmux new-workspace failed"
+    fi
+    if wait_for_port 8766 20; then
+        ok "up at http://localhost:8766"
+    else
+        err "not reachable — check the paperflow-bridge workspace in cmux"
+    fi
 else
-    err "not reachable — check $HOME/.local/log/claude-bridge.err.log"
+    log "LaunchAgent: $BR_LABEL"
+    BR_PLIST="$HOME/Library/LaunchAgents/$BR_LABEL.plist"
+    render "$REPO/launchagents/claude-bridge.plist.tmpl" "$BR_PLIST" "$BR_LABEL"
+    reload_agent "$BR_LABEL" "$BR_PLIST"
+    if ensure_agent_up "$BR_LABEL" 8766; then
+        ok "up at http://localhost:8766"
+    else
+        err "not reachable — check $HOME/.local/log/claude-bridge.err.log"
+    fi
 fi
 
 # ─── 6. Shared renderers in ~/docs/superpowers/_lib/ ────────────────
@@ -316,15 +390,24 @@ fi
 echo
 log "Status"
 {
-    if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8765/" 2>/dev/null | grep -q 200; then
+    if ensure_agent_up "$LR_LABEL" 8765; then
         ok "live-server   : up    (http://localhost:8765)"
     else
         err "live-server   : DOWN"
     fi
-    if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8766/" 2>/dev/null | grep -q 200; then
-        ok "claude-bridge : up    (http://localhost:8766)"
+    # In cmux mode the bridge isn't a LaunchAgent, so just probe the port.
+    if [ -n "${CMUX_SOCKET:-}" ]; then
+        if wait_for_port 8766 4; then
+            ok "claude-bridge : up    (http://localhost:8766, cmux mode)"
+        else
+            err "claude-bridge : DOWN  (open the paperflow-bridge cmux workspace)"
+        fi
     else
-        err "claude-bridge : DOWN"
+        if ensure_agent_up "$BR_LABEL" 8766; then
+            ok "claude-bridge : up    (http://localhost:8766)"
+        else
+            err "claude-bridge : DOWN"
+        fi
     fi
     [ -f "$CLAUDE_MD" ]                                && ok "CLAUDE.md     : present"    || err "CLAUDE.md     : missing"
     [ -x "$HOME/.claude/hooks/inject-principles.sh" ]  && ok "inject hook   : executable" || err "inject hook   : missing"
@@ -354,7 +437,11 @@ log "Status"
 }
 
 echo
-log "Activate hooks in any running Claude Code session:"
-echo "  Open /hooks once (or restart) — running sessions don't auto-pick-up new hooks."
-echo
+printf '\033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+printf '⚠  RESTART CLAUDE CODE  before testing.\n'
+printf '   Already-running sessions do NOT pick up the newly installed:\n'
+printf '     • hooks         (run /hooks to reload without restarting)\n'
+printf '     • skills        (grill-plan, discuss, mission-*, etc. — restart only)\n'
+printf '     • CLAUDE.md     (loaded once at session start)\n'
+printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n'
 log "Done. Try writing a spec — it'll auto-open with action buttons."
