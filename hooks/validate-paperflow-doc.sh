@@ -13,6 +13,13 @@ FILE_PATH="$(printf '%s' "$PAYLOAD" | /usr/bin/env jq -r '.tool_input.file_path 
 [ -n "$FILE_PATH" ] || exit 0
 
 case "$FILE_PATH" in
+  */docs/paperflow/specs/*.html|\
+  */docs/paperflow/plans/*.html|\
+  */docs/paperflow/grills/*.html|\
+  */docs/paperflow/notes/*.html|\
+  */docs/paperflow/changelog/*.html|\
+  */docs/paperflow/missions/*.html|\
+  */docs/paperflow/audits/*.html|\
   */docs/superpowers/specs/*.html|\
   */docs/superpowers/plans/*.html|\
   */docs/superpowers/grills/*.html|\

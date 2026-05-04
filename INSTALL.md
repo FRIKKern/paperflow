@@ -13,8 +13,8 @@ The fastest path is the one-liner in the [README](./README.md). This file covers
 | Standing principles | `~/.claude/CLAUDE.md` | Loaded into every Claude Code session (only created if missing) |
 | UserPromptSubmit hook | `~/.claude/hooks/inject-principles.sh` | Re-injects principles every turn (bloat-resistant) |
 | Auto-open hook | `~/.claude/hooks/auto-open-doc.sh` | Opens any spec/plan/grill/note HTML you write |
-| Doc renderer | `~/docs/superpowers/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
-| Grill renderer | `~/docs/superpowers/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
+| Doc renderer | `~/docs/paperflow/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
+| Grill renderer | `~/docs/paperflow/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
 | Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss}/SKILL.md` | Claude invokes these on demand |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
 

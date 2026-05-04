@@ -1,7 +1,7 @@
 /* paperflow doc stylesheet — article typography + action bar.
  *
  * Loaded by every spec / plan / grill via:
- *   <link rel="stylesheet" href="/superpowers/_lib/doc.css">
+ *   <link rel="stylesheet" href="/paperflow/_lib/doc.css">
  *
  * doc.js also injects this <link> at runtime, so older pages still work.
  * Linking from <head> is preferred to avoid a flash of unstyled content.

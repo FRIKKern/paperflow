@@ -53,9 +53,11 @@ fi
 # 4. Renderers
 log "Renderers"
 for f in doc.css doc.js grill.css grill.js; do
-    rm -f "$HOME/docs/superpowers/_lib/$f"
+    rm -f "$HOME/docs/paperflow/_lib/$f"
+    rm -f "$HOME/docs/superpowers/_lib/$f" 2>/dev/null || true   # legacy v1 layout
 done
-rmdir "$HOME/docs/superpowers/_lib" 2>/dev/null && ok "_lib removed (was empty)" || skip "_lib kept (other files inside)"
+rmdir "$HOME/docs/paperflow/_lib" 2>/dev/null && ok "_lib removed (was empty)" || skip "_lib kept (other files inside)"
+rmdir "$HOME/docs/superpowers/_lib" 2>/dev/null || true   # legacy v1 layout
 
 # 5. Skill
 log "Skill"

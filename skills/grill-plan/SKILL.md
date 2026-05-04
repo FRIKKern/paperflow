@@ -1,6 +1,6 @@
 ---
 name: grill-plan
-description: Use when the user clicks "Grill the plan" in a spec/plan HTML, asks to grill / stress-test / pressure-test a plan, or says "grill it". Reads the spec/plan, generates 8–15 pointed questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions), and writes an HTML form to ~/docs/superpowers/grills/ using the shared renderer. The user fills out the form in browser, hits Submit, answers come back through claude-bridge for plan revision.
+description: Use when the user clicks "Grill the plan" in a spec/plan HTML, asks to grill / stress-test / pressure-test a plan, or says "grill it". Reads the spec/plan, generates 8–15 pointed questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions), and writes an HTML form to ~/docs/paperflow/grills/ using the shared renderer. The user fills out the form in browser, hits Submit, answers come back through claude-bridge for plan revision.
 ---
 
 # Grill a plan
@@ -12,12 +12,12 @@ Critically examine a plan/spec to surface hidden assumptions, missing edge cases
 A path to a spec or plan HTML, e.g.:
 
 ```
-~/docs/superpowers/specs/2026-05-02-openclaw-handoff-design.html
+~/docs/paperflow/specs/2026-05-02-openclaw-handoff-design.html
 ```
 
 ## Process
 
-**Subagent-first.** Per paperflow's default workflow, delegate the read + draft to a subagent (`subagent_type: general-purpose`). Brief: "Read this plan in full, generate 8–15 pointed questions following the schema below, write the grill HTML to `<path>` using the shared renderer at `/superpowers/_lib/grill.{css,js}`. Embed `window.CLAUDE_TARGET` from `paperflow-target`. Return only the URL — no summary." The main session reports the URL + a one-line framing of what the grill probes.
+**Subagent-first.** Per paperflow's default workflow, delegate the read + draft to a subagent (`subagent_type: general-purpose`). Brief: "Read this plan in full, generate 8–15 pointed questions following the schema below, write the grill HTML to `<path>` using the shared renderer at `/paperflow/_lib/grill.{css,js}`. Embed `window.CLAUDE_TARGET` from `paperflow-target`. Return only the URL — no summary." The main session reports the URL + a one-line framing of what the grill probes.
 
 1. **Read the plan in full.** Don't skim. Understand what it claims, what it omits, what tradeoffs it picked, where the load-bearing decisions are.
 
@@ -65,10 +65,10 @@ A path to a spec or plan HTML, e.g.:
 Write a self-contained HTML to:
 
 ```
-~/docs/superpowers/grills/YYYY-MM-DD-<topic>-grill.html
+~/docs/paperflow/grills/YYYY-MM-DD-<topic>-grill.html
 ```
 
-Use the shared renderer at `/superpowers/_lib/grill.{css,js}` — do not inline styles.
+Use the shared renderer at `/paperflow/_lib/grill.{css,js}` — do not inline styles.
 
 ### Capture the terminal target
 
@@ -86,7 +86,7 @@ Paste the JSON output verbatim into `window.GRILL.target` so the Submit button r
 <head>
 <meta charset="utf-8">
 <title>Grill: <topic></title>
-<link rel="stylesheet" href="/superpowers/_lib/grill.css">
+<link rel="stylesheet" href="/paperflow/_lib/grill.css">
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>
   mermaid.initialize({
@@ -161,7 +161,7 @@ window.GRILL = {
   ]
 };
 </script>
-<script src="/superpowers/_lib/grill.js"></script>
+<script src="/paperflow/_lib/grill.js"></script>
 
 </body>
 </html>

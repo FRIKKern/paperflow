@@ -19,7 +19,7 @@ When Claude writes a spec or plan, you usually want to see it, react to it, and 
 ```mermaid
 flowchart LR
     Claude["Claude Code<br/>in terminal"]
-    Spec["~/docs/superpowers/<br/>{specs,plans,grills}/<br/>*.html"]
+    Spec["~/docs/paperflow/<br/>{specs,plans,grills}/<br/>*.html"]
     LR["docs-livereload<br/>(LaunchAgent · port 8765)"]
     Browser["Browser tab<br/>http://localhost:8765/..."]
     User["You"]
@@ -48,11 +48,11 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Standing principles | `~/.claude/CLAUDE.md` | Loaded into every Claude Code session |
 | UserPromptSubmit hook | `~/.claude/hooks/inject-principles.sh` | Re-injects principles every turn (bloat-resistant) |
 | Auto-open hook | `~/.claude/hooks/auto-open-doc.sh` | Opens any spec/plan/grill HTML you write |
-| Doc renderer | `~/docs/superpowers/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
-| Grill renderer | `~/docs/superpowers/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
-| Live-render | `~/docs/superpowers/_lib/live-render.{css,js}` | Chat-like DOM morph on file changes — no full reload, scroll and rendered Mermaid diagrams are preserved |
+| Doc renderer | `~/docs/paperflow/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
+| Grill renderer | `~/docs/paperflow/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
+| Live-render | `~/docs/paperflow/_lib/live-render.{css,js}` | Chat-like DOM morph on file changes — no full reload, scroll and rendered Mermaid diagrams are preserved |
 | Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss,paperflow-review-doc,site-audit,…}/SKILL.md` | Claude invokes these on demand |
-| Site audits | `~/docs/superpowers/audits/<date>-<slug>/` + `~/.local/bin/paperflow-audit-site` | Whole-site Lighthouse + thumbnails via Unlighthouse. See [Site audits](#site-audits). |
+| Site audits | `~/docs/paperflow/audits/<date>-<slug>/` + `~/.local/bin/paperflow-audit-site` | Whole-site Lighthouse + thumbnails via Unlighthouse. See [Site audits](#site-audits). |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
 | Doc validator | `~/.local/bin/paperflow-validate` | Statically checks every Mermaid block in a doc HTML — catches the bomb-icon "Syntax error" before the user sees it. See [Quality checks](#quality-checks). |
 | Validate hook | `~/.claude/hooks/validate-paperflow-doc.sh` | PostToolUse(Write\|Edit) — runs `paperflow-validate` on any paperflow doc and surfaces failures via system-reminder |
@@ -100,7 +100,7 @@ Takes about a minute. Sets up two LaunchAgents, two hooks, three skills, and the
 | 1 | live-server starts on port 8765 | `~/Library/LaunchAgents/dev.<user>.docs-livereload.plist` |
 | 2 | claude-bridge starts on port 8766 | `~/Library/LaunchAgents/dev.<user>.claude-bridge.plist` |
 | 3 | Hooks wire into Claude Code | `~/.claude/hooks/`, `~/.claude/settings.json` |
-| 4 | Skills + renderers install | `~/.claude/skills/`, `~/docs/superpowers/_lib/` |
+| 4 | Skills + renderers install | `~/.claude/skills/`, `~/docs/paperflow/_lib/` |
 
 ### Pre-reqs
 
@@ -153,7 +153,7 @@ flowchart LR
     Revise --> Plan --> PlanHTML --> Build --> Done
 ```
 
-1. **Write a spec.** Ask Claude. The HTML lands in `~/docs/superpowers/specs/<date>-<topic>-design.html` and auto-opens in your browser.
+1. **Write a spec.** Ask Claude. The HTML lands in `~/docs/paperflow/specs/<date>-<topic>-design.html` and auto-opens in your browser.
 2. **Optionally grill it.** Hit *Grill the spec* — Claude generates a structured question form with pre-selected recommendations, per-question diagrams, and a "write your own" override on every question. Auto-opens.
 3. **Submit answers.** Hit *Send answers to Claude* — the structured answers land as a prompt in *your* terminal. Claude integrates them.
 4. **Create a plan.** Hit *Create plan from this spec* — Claude writes the plan.
@@ -179,7 +179,7 @@ Every spec/plan HTML ends with two short script tags:
   window.CLAUDE_TARGET = /* JSON from `paperflow-target` */;
   window.DOC_PATH = "<this-filename>.html";
 </script>
-<script src="/superpowers/_lib/doc.js"></script>
+<script src="/paperflow/_lib/doc.js"></script>
 ```
 
 `doc.js` reads the URL, decides the doc type, injects the correct buttons, and POSTs `{target, message}` to `http://localhost:8766/build` when clicked. The bridge dispatches the message into the terminal tab identified by `CLAUDE_TARGET`.
@@ -246,11 +246,11 @@ Three Claude Code skills ship with paperflow. Claude invokes them on demand base
 | Skill | Trigger phrases | What it does |
 |---|---|---|
 | `paperflow-install` | "install paperflow" · "the bridge isn't running" · first-time setup | Clones repo if missing, runs `install.sh`, reports the green/red status table. Idempotent. |
-| `discuss` | "discuss X" · "explain in depth" · "compare" · "deep-dive" — or whenever a long-form answer would otherwise be a wall of terminal text | Writes the discussion as an HTML article to `~/docs/superpowers/notes/`, auto-opens it, ends with a Reply textarea so you can respond inline. Keeps the chat reply terse. |
+| `discuss` | "discuss X" · "explain in depth" · "compare" · "deep-dive" — or whenever a long-form answer would otherwise be a wall of terminal text | Writes the discussion as an HTML article to `~/docs/paperflow/notes/`, auto-opens it, ends with a Reply textarea so you can respond inline. Keeps the chat reply terse. |
 | `grill-plan` | "grill this" · button click on a spec/plan | Reads the doc, generates 8–15 pointed questions across categories with rationale + recommendation + per-question Mermaid diagrams. Renders as an HTML form. |
-| `pre-flight-capture` | spec/plan touches HTML/CSS/JSX/Vue/Svelte/Tailwind · "capture before" · before any visual change | Captures static screenshots + 3–6 s videos of every interaction the plan changes. Saves to `~/docs/superpowers/captures/<date>-<slug>/`. Re-invoked with `mode: after` after the build. |
-| `site-audit` | "audit my site" · "lighthouse on X" · "SEO check" · "thumbnails of every page" · "site overview" | Briefs `visual-investigator` to run Unlighthouse on a whole site. Lighthouse scores + per-page thumbnails. Output at `~/docs/superpowers/audits/<date>-<slug>/index.html`. |
-| `write-changelog` | after a UI build · "write the changelog" · "publish the proof" | Renders an HTML proof page to `~/docs/superpowers/changelog/` with before/after side-by-side, files touched, verification checklist, rollback line. |
+| `pre-flight-capture` | spec/plan touches HTML/CSS/JSX/Vue/Svelte/Tailwind · "capture before" · before any visual change | Captures static screenshots + 3–6 s videos of every interaction the plan changes. Saves to `~/docs/paperflow/captures/<date>-<slug>/`. Re-invoked with `mode: after` after the build. |
+| `site-audit` | "audit my site" · "lighthouse on X" · "SEO check" · "thumbnails of every page" · "site overview" | Briefs `visual-investigator` to run Unlighthouse on a whole site. Lighthouse scores + per-page thumbnails. Output at `~/docs/paperflow/audits/<date>-<slug>/index.html`. |
+| `write-changelog` | after a UI build · "write the changelog" · "publish the proof" | Renders an HTML proof page to `~/docs/paperflow/changelog/` with before/after side-by-side, files touched, verification checklist, rollback line. |
 
 Skills sit on top of the infrastructure (LaunchAgents, hooks, renderers). They tell Claude *when* to invoke the workflow and *how* to write the artifact.
 
@@ -280,7 +280,7 @@ flowchart LR
 **Storage shape:**
 
 ```
-~/docs/superpowers/
+~/docs/paperflow/
 ├── captures/
 │   └── 2026-05-02-submit-button-redesign/
 │       ├── before.png
@@ -338,7 +338,7 @@ When to prefer direct: a single "what does this page look like right now?" quest
 
 ## Site audits
 
-Whole-site audits run through the `site-audit` skill, which briefs `visual-investigator` to pick Unlighthouse from its selection rule. One run produces Lighthouse scores per page, SEO checks, performance, accessibility, and screenshot thumbnails of every URL. The report lands at `~/docs/superpowers/audits/<date>-<slug>/index.html` and auto-opens in your browser.
+Whole-site audits run through the `site-audit` skill, which briefs `visual-investigator` to pick Unlighthouse from its selection rule. One run produces Lighthouse scores per page, SEO checks, performance, accessibility, and screenshot thumbnails of every URL. The report lands at `~/docs/paperflow/audits/<date>-<slug>/index.html` and auto-opens in your browser.
 
 **Trigger phrases:**
 
@@ -384,7 +384,7 @@ flowchart LR
     Work -.->|context fills up| Snap
 ```
 
-Each mission gets a paired HTML + JSON file in `~/docs/superpowers/missions/`:
+Each mission gets a paired HTML + JSON file in `~/docs/paperflow/missions/`:
 
 | File | Role |
 |---|---|
@@ -404,7 +404,7 @@ Each mission gets a paired HTML + JSON file in `~/docs/superpowers/missions/`:
 **Storage shape:**
 
 ```
-~/docs/superpowers/missions/
+~/docs/paperflow/missions/
 ├── 2026-05-02-paperflow-v2.html
 └── 2026-05-02-paperflow-v2.json
 
@@ -476,7 +476,7 @@ paperflow/
 ├── bin/
 │   ├── claude-bridge.js          # the bridge service (Node)
 │   └── get-terminal-target.sh    # detects your terminal target
-├── lib/                          # web renderers (copied to ~/docs/superpowers/_lib/)
+├── lib/                          # web renderers (copied to ~/docs/paperflow/_lib/)
 │   ├── doc.css
 │   ├── doc.js                    # injects per-doc-type action buttons
 │   ├── grill.css

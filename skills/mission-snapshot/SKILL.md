@@ -28,11 +28,11 @@ Refresh the active mission's `<slug>.html` and `<slug>.json` with the current st
 
 2. **Spawn a subagent (`subagent_type: general-purpose`)** to do the refresh. Brief it with:
    - The slug.
-   - Path to the existing JSON: `~/docs/superpowers/missions/<slug>.json`.
-   - Path to the existing HTML: `~/docs/superpowers/missions/<slug>.html`.
+   - Path to the existing JSON: `~/docs/paperflow/missions/<slug>.json`.
+   - Path to the existing HTML: `~/docs/paperflow/missions/<slug>.html`.
    - Instructions:
      - Read the existing JSON. Note the `created` timestamp.
-     - Scan `~/docs/superpowers/{specs,plans,grills,notes,changelog}/` for HTML files modified since `created`. For each new file, append to `artifacts` with type, path (e.g. `/superpowers/specs/<file>`), and title (extract from `<h1>` or `<title>`).
+     - Scan `~/docs/paperflow/{specs,plans,grills,notes,changelog}/` for HTML files modified since `created`. For each new file, append to `artifacts` with type, path (e.g. `/paperflow/specs/<file>`), and title (extract from `<h1>` or `<title>`).
      - Update `progress.done` / `progress.in_progress` / `progress.next` based on what's actually shipped vs in-flight (the subagent should look at recent file mtimes and the latest changelog, if any).
      - Add any new decisions made during this session (the main agent passes these in via the brief).
      - Refresh `open_questions` (the main agent passes these in).
@@ -41,7 +41,7 @@ Refresh the active mission's `<slug>.html` and `<slug>.json` with the current st
      - Bump the byline status if appropriate.
    - "Return only the URL when done. Do not summarize."
 
-3. **Reply** with the URL: `http://localhost:8765/superpowers/missions/<slug>.html`.
+3. **Reply** with the URL: `http://localhost:8765/paperflow/missions/<slug>.html`.
 
 ## What the main agent passes to the subagent
 
