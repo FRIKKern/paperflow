@@ -12,7 +12,7 @@ Install or repair the paperflow doc-workflow stack (live-server LaunchAgent, cla
 - "install paperflow"
 - "the bridge isn't running" / "the button does nothing" / "live reload broke"
 - "set up doc workflow on this machine"
-- Status check: hooks present, LaunchAgents up, renderers in `~/docs/superpowers/_lib/`
+- Status check: hooks present, LaunchAgents up, renderers in `~/docs/paperflow/_lib/`
 - Fresh Mac, first-time setup
 
 Run idempotently. Safe to invoke whenever you suspect drift.
@@ -66,10 +66,10 @@ Other pre-reqs (jq, Xcode CLI, Claude Code) are nearly always present on a worki
 | Standing principles | `~/.claude/CLAUDE.md` (only written if absent) |
 | UserPromptSubmit hook | `~/.claude/hooks/inject-principles.sh` |
 | PostToolUse auto-open hook | `~/.claude/hooks/auto-open-doc.sh` |
-| Renderers | `~/docs/superpowers/_lib/{doc,grill}.{css,js}` |
+| Renderers | `~/docs/paperflow/_lib/{doc,grill}.{css,js}` |
 | Grill skill | `~/.claude/skills/grill-plan/SKILL.md` |
 | Target helper | `~/.local/bin/paperflow-target` |
-| Doc dirs | `~/docs/superpowers/{specs,plans,grills,notes}/` |
+| Doc dirs | `~/docs/paperflow/{specs,plans,grills,notes}/` |
 
 ## Verify
 
