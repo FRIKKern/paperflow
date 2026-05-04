@@ -57,6 +57,31 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Doc validator | `~/.local/bin/paperflow-validate` | Statically checks every Mermaid block in a doc HTML — catches the bomb-icon "Syntax error" before the user sees it. See [Quality checks](#quality-checks). |
 | Validate hook | `~/.claude/hooks/validate-paperflow-doc.sh` | PostToolUse(Write\|Edit) — runs `paperflow-validate` on any paperflow doc and surfaces failures via system-reminder |
 | Review skill | `~/.claude/skills/paperflow-review-doc/SKILL.md` | Final-step skill called by every doc-writer; Layer 1 = static, Layer 2 = optional browser visual review |
+| Statusline | `~/.claude/statusline.sh` + `~/.paperflow/statusline-limits.json` | One-line bottom bar wired into Claude Code's `statusLine`. See [Statusline](#statusline). |
+
+### Statusline
+
+The statusline renders one row at the bottom of every Claude Code prompt:
+
+```
+137,420 / 1M · 1209d022 · paperflow · main
+```
+
+Three fields: tokens-used / model-limit, the first 8 chars of the session id, the project name (basename of `workspace.project_dir`), and the git branch. On narrow terminals fields drop right-to-left — branch first, then project, then session, tokens always survive.
+
+Set `STATUSLINE_DEBUG=1` in your shell to mirror every render to `~/.paperflow/statusline-debug.log` (one tab-separated line per invocation; rotates at 5 MB to `.log.1`).
+
+To add a new model's context-window limit, edit `~/.paperflow/statusline-limits.json` directly:
+
+```bash
+jq '.limits["claude-opus-4-8"] = 1000000' \
+   ~/.paperflow/statusline-limits.json \
+   > ~/.paperflow/statusline-limits.json.tmp \
+   && mv ~/.paperflow/statusline-limits.json.tmp \
+         ~/.paperflow/statusline-limits.json
+```
+
+The installer never overwrites a user-edited limits file — it tracks shipped versions via `~/.paperflow/.statusline-limits-installed-sha`.
 
 ---
 
