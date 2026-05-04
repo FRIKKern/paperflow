@@ -38,14 +38,26 @@
   overflow: hidden;
 }
 
-.mz-stage svg,
-.mz-stage img {
+.mz-stage svg {
   display: block;
   width: min(92vw, 1600px);
   height: auto;
   max-height: 92vh;
-  object-fit: contain;
   /* No transition on transform — drag/zoom must feel direct. */
+  will-change: transform;
+}
+
+/* Images: render at natural pixel size so quality is preserved at every
+ * zoom level. The JS fit-to-stage applies a CSS transform to fit on first
+ * open; the browser still has the original pixels in hand for zoom-in.
+ * Capping width here would downscale before the transform and we'd lose
+ * sharpness even at scale=1. */
+.mz-stage img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  height: auto;
+  image-rendering: -webkit-optimize-contrast;
   will-change: transform;
 }
 
