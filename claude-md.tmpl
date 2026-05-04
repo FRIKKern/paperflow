@@ -30,13 +30,13 @@ Buttons POST to `__BR_LABEL__` (LaunchAgent on `localhost:8766`), which routes t
 Before the doc.js include, set:
 
     <script>
-      window.CLAUDE_TARGET = /* paste output of get-terminal-target.sh */;
+      window.CLAUDE_TARGET = /* paste output of ~/.local/bin/paperflow-target */;
       window.DOC_PATH = "<this-filename>.html";
     </script>
 
 Get the target via:
 
-    ~/.claude/skills/setup-doc-workflow/get-terminal-target.sh
+    ~/.local/bin/paperflow-target
 
 ## Grills (plan stress-tests)
 
