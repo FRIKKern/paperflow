@@ -352,6 +352,96 @@ for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog
     fi
 done
 
+# ─── 9b. Statusline ────────────────────────────────────────────────
+# One bash script + one editable JSON, wired into ~/.claude/settings.json.
+# Sidecar SHA tracking — overwrite only when the live file matches the SHA we
+# recorded the last time we installed it. User-edited files are left alone.
+log "Statusline"
+
+install_statusline_script() {
+    local src="$REPO/lib/statusline.sh"
+    local dst="$HOME/.claude/statusline.sh"
+    local sidecar="$HOME/.paperflow/.statusline-installed-sha"
+    mkdir -p "$HOME/.claude" "$HOME/.paperflow"
+    if [ ! -f "$dst" ]; then
+        cp "$src" "$dst"
+        chmod +x "$dst"
+        shasum -a 256 "$dst" | cut -d' ' -f1 > "$sidecar"
+        ok "installed $dst"
+        return
+    fi
+    if [ ! -f "$sidecar" ]; then
+        skip "$dst — no install sidecar (delete file to overwrite)"
+        return
+    fi
+    local live recorded
+    live=$(shasum -a 256 "$dst" | cut -d' ' -f1)
+    recorded=$(cat "$sidecar")
+    if [ "$live" = "$recorded" ]; then
+        cp "$src" "$dst"
+        chmod +x "$dst"
+        shasum -a 256 "$dst" | cut -d' ' -f1 > "$sidecar"
+        ok "upgraded $dst"
+    else
+        skip "$dst — your statusline differs from the last paperflow install"
+        printf '              rename it or delete %s to overwrite\n' "$sidecar"
+    fi
+}
+
+install_statusline_limits() {
+    local src="$REPO/lib/statusline-limits.json"
+    local dst="$HOME/.paperflow/statusline-limits.json"
+    local sidecar="$HOME/.paperflow/.statusline-limits-installed-sha"
+    mkdir -p "$HOME/.paperflow"
+    if [ ! -f "$dst" ]; then
+        cp "$src" "$dst"
+        shasum -a 256 "$dst" | cut -d' ' -f1 > "$sidecar"
+        ok "installed $dst"
+        return
+    fi
+    if [ ! -f "$sidecar" ]; then
+        skip "$dst — no install sidecar (delete file to overwrite)"
+        return
+    fi
+    local live recorded
+    live=$(shasum -a 256 "$dst" | cut -d' ' -f1)
+    recorded=$(cat "$sidecar")
+    if [ "$live" = "$recorded" ]; then
+        cp "$src" "$dst"
+        shasum -a 256 "$dst" | cut -d' ' -f1 > "$sidecar"
+        ok "upgraded $dst"
+    else
+        skip "$dst — user-edited limits"
+        printf '              delete %s to overwrite\n' "$sidecar"
+    fi
+}
+
+merge_statusline_settings() {
+    local target='$HOME/.claude/statusline.sh'
+    [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+    local existing
+    existing=$(jq -r '.statusLine.command // empty' "$SETTINGS")
+    if [ -z "$existing" ]; then
+        local tmp; tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+        jq --arg cmd "$target" \
+           '.statusLine = { "type": "command", "command": $cmd }' \
+           "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+        trap - EXIT
+        ok "merged statusLine into $SETTINGS"
+    elif [ "$existing" = "$target" ]; then
+        skip "statusLine already points at paperflow"
+    else
+        skip "settings.json — your statusLine points at $existing"
+        printf '              Not overwriting. To switch:\n\n'
+        printf '    jq '"'"'.statusLine.command = "$HOME/.claude/statusline.sh"'"'"' \\\n'
+        printf '       ~/.claude/settings.json | sponge ~/.claude/settings.json\n\n'
+    fi
+}
+
+install_statusline_script
+install_statusline_limits
+merge_statusline_settings
+
 # ─── 10. terminal-target helper at ~/.local/bin/paperflow-target ───
 log "Helper: paperflow-target"
 cp "$REPO/bin/get-terminal-target.sh" "$HOME/.local/bin/paperflow-target"
@@ -434,6 +524,12 @@ log "Status"
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings PTU  : wired"      || err "settings PTU  : broken"
+    [ -x "$HOME/.claude/statusline.sh" ]                       && ok "statusline    : executable" || err "statusline    : missing"
+    [ -f "$HOME/.paperflow/statusline-limits.json" ]           && ok "limits.json   : present"    || err "limits.json   : missing"
+    [ -f "$HOME/.paperflow/.statusline-installed-sha" ]        && ok "sl sidecar    : present"    || err "sl sidecar    : missing"
+    [ -f "$HOME/.paperflow/.statusline-limits-installed-sha" ] && ok "limits sidecar: present"    || err "limits sidecar: missing"
+    jq -e '.statusLine' "$SETTINGS" >/dev/null 2>&1 \
+                                                       && ok "settings stat.: wired"      || skip "settings stat.: not wired (foreign or absent)"
 }
 
 echo
@@ -444,4 +540,16 @@ printf '     • hooks         (run /hooks to reload without restarting)\n'
 printf '     • skills        (grill-plan, discuss, mission-*, etc. — restart only)\n'
 printf '     • CLAUDE.md     (loaded once at session start)\n'
 printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n'
+
+# Running-Claude warning. The /claude space pattern avoids matching paperflow,
+# claude-flow, etc. — only actual Claude Code sessions show up here.
+warn_running_claude() {
+    local n
+    n=$(pgrep -f '/claude ' 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+    if [ "${n:-0}" -gt 0 ]; then
+        printf '\033[1;33m⚠  Found %s running Claude Code session(s) — the statusline won'\''t appear in those until you restart them.\033[0m\n\n' "$n"
+    fi
+}
+warn_running_claude
+
 log "Done. Try writing a spec — it'll auto-open with action buttons."
