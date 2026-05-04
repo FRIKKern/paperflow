@@ -20,6 +20,11 @@
   --sans: -apple-system, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", "Menlo", monospace;
 
+  /* Bleed width for elements that can use more horizontal space than the
+   * 680px reading column — tables, opt-in <div class="table-bleed">, etc.
+   * Caps at 1100px so very wide monitors don't make tables un-scannable. */
+  --wide-content: min(100vw - 2rem, 1100px);
+
   --doc-accent: var(--accent);
   --doc-paper: var(--paper);
   --doc-rule: var(--rule);
@@ -134,20 +139,40 @@ figcaption b {
   margin-right: .35em;
 }
 
+/* Tables break out of the 680px reading column when the viewport has room.
+ * The wrapper handles horizontal scrolling on narrow screens; the table
+ * itself centers on the viewport via the standard "left: 50%; translate-50%"
+ * bleed pattern. Body text continues to read at 680px around it. */
+.table-bleed,
+table {
+  margin: 1.5rem 0 2rem;
+  width: var(--wide-content, min(100vw - 2rem, 1100px));
+  max-width: none;
+  position: relative;
+  left: 50%;
+  transform: translateX(-50%);
+  overflow-x: auto;
+}
+
 table {
   border-collapse: collapse;
-  width: 100%;
-  margin: 1.5rem 0 2rem;
   font-family: var(--sans);
   font-size: .92rem;
   line-height: 1.5;
+  /* Wrap a thin border so the bled-wide table reads as a unit on
+   * wide screens without floating in space. */
+  background: var(--paper);
+  padding: .25rem 1.1rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
 }
 th, td {
-  padding: .7rem .8rem .7rem 0;
+  padding: .7rem .9rem;
   text-align: left;
   vertical-align: top;
   border-bottom: 1px solid var(--rule);
 }
+tr:last-child td { border-bottom: 0; }
 th {
   font-weight: 600;
   border-bottom: 2px solid var(--fg);
@@ -157,7 +182,8 @@ th {
   color: var(--muted);
   padding-bottom: .55rem;
 }
-td:first-child, th:first-child { padding-left: 0; }
+td:first-child, th:first-child { padding-left: .3rem; }
+td:last-child, th:last-child { padding-right: .3rem; }
 
 code {
   font-family: var(--mono);
