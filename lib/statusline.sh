@@ -345,6 +345,38 @@ format_with_commas() {
     }'
 }
 
+# ANSI color helpers — all honour the NO_COLOR env-var convention
+# (https://no-color.org). When NO_COLOR is set and non-empty they emit
+# the empty string, so output is byte-identical to the un-coloured form.
+
+# Return the ANSI colour escape for a token count.
+#   <50000          → green   (\033[32m)
+#   50000–99999     → yellow  (\033[33m)
+#   ≥100000         → red     (\033[31m)
+# Empty $TOKENS or NO_COLOR set → empty string.
+color_for_tokens() {
+    [ -n "${NO_COLOR:-}" ] && { printf ''; return 0; }
+    [ -z "${TOKENS:-}" ] && { printf ''; return 0; }
+    awk -v t="$TOKENS" 'BEGIN {
+        if (t+0 < 50000) printf "\033[32m"
+        else if (t+0 < 100000) printf "\033[33m"
+        else printf "\033[31m"
+    }'
+}
+
+# Dim-on / reset escapes (also NO_COLOR-aware).
+ansi_dim()   { [ -n "${NO_COLOR:-}" ] && printf '' || printf '\033[2m'; }
+ansi_reset() { [ -n "${NO_COLOR:-}" ] && printf '' || printf '\033[0m'; }
+
+# Compute tokens-as-percentage-of-limit, one-decimal.
+# Empty/zero limit → "0.0". Stdin: none. Stdout: "13.7" etc.
+compute_percentage() {
+    awk -v t="${TOKENS:-0}" -v w="${LIMIT:-0}" 'BEGIN {
+        if (w+0 == 0) print "0.0"
+        else printf "%.1f", (t/w)*100
+    }'
+}
+
 # Format a limit like 1000000 → "1M", 200000 → "200k".
 format_limit() {
     local n="${1:-0}"
@@ -371,13 +403,22 @@ truncate_to_width() {
         ''|*[!0-9]*) cols=120 ;;
     esac
 
+    # Pre-compute ANSI wrappers (empty when NO_COLOR is set).
+    local dim reset tcolor sep
+    dim=$(ansi_dim)
+    reset=$(ansi_reset)
+    tcolor=$(color_for_tokens)
+    sep="${dim} · ${reset}"
+
     local tokens_field=""
     if [ -n "$TOKENS" ]; then
-        local pretty
+        local pretty lim pct
         pretty=$(format_with_commas "$TOKENS")
-        local lim
         lim=$(format_limit "$LIMIT")
-        tokens_field="$pretty / $lim"
+        pct=$(compute_percentage)
+        # Colour applies only to the comma-formatted token count;
+        # the limit and percentage stay un-coloured.
+        tokens_field="${tcolor}${pretty}${reset} / ${lim} (${pct}%)"
     fi
 
     # Build cumulative line based on width.
@@ -386,28 +427,28 @@ truncate_to_width() {
         out="$tokens_field"
     fi
 
-    # SID always after tokens when width >= 40.
+    # SID always after tokens when width >= 40 (dimmed).
     if [ "$cols" -ge 40 ] && [ -n "$SID_SHORT" ]; then
         if [ -n "$out" ]; then
-            out="$out · $SID_SHORT"
+            out="${out}${sep}${dim}${SID_SHORT}${reset}"
         else
-            out="$SID_SHORT"
+            out="${dim}${SID_SHORT}${reset}"
         fi
     fi
 
-    # Project at >= 60.
+    # Project at >= 60 (dimmed).
     if [ "$cols" -ge 60 ] && [ -n "$PROJECT" ]; then
         if [ -n "$out" ]; then
-            out="$out · $PROJECT"
+            out="${out}${sep}${dim}${PROJECT}${reset}"
         else
-            out="$PROJECT"
+            out="${dim}${PROJECT}${reset}"
         fi
     fi
 
-    # Branch at >= 80.
+    # Branch at >= 80 (undimmed — secondary signal already).
     if [ "$cols" -ge 80 ] && [ -n "$BRANCH" ]; then
         if [ -n "$out" ]; then
-            out="$out · $BRANCH"
+            out="${out}${sep}${BRANCH}"
         else
             out="$BRANCH"
         fi

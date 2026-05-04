@@ -11,6 +11,12 @@
 
 set -u
 
+# All existing fixtures predate ANSI colour/dim styling. NO_COLOR=1 keeps
+# the renderer's output byte-identical to the pre-colour baseline so the
+# whole fixture suite stays valid without churning every expected.txt.
+# Color-aware fixtures (if/when added) should run in their own runner.
+export NO_COLOR=1
+
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 FIXDIR="$REPO/tests/statusline/fixtures"
 SCRIPT="$REPO/lib/statusline.sh"
