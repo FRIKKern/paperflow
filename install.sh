@@ -4,7 +4,7 @@
 # Installs the full doc-workflow stack:
 #   - live-server LaunchAgent (~/docs hot reload, port 8765)
 #   - claude-bridge LaunchAgent (browser → terminal, port 8766)
-#   - shared web renderers in ~/docs/superpowers/_lib/
+#   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
 #   - grill-plan skill at ~/.claude/skills/grill-plan/
 #   - terminal-target helper at ~/.local/bin/paperflow-target
@@ -84,18 +84,75 @@ fi
 
 ok "ready"
 
+# ─── 0b. Migration: superpowers → paperflow paths ──────────────────
+# Idempotent. v1 layout (real ~/docs/superpowers/) gets moved to
+# ~/docs/paperflow/ and a backward-compat symlink is installed at
+# ~/docs/superpowers → paperflow. Re-runs are no-ops once the v2
+# layout is in place. Sets ~/.paperflow/.major-version=2.
+log "Migration: superpowers → paperflow paths"
+PF_DOCS="$HOME/docs/paperflow"
+SP_DOCS="$HOME/docs/superpowers"
+
+mkdir -p "$HOME/docs"
+
+# Case A: legacy real dir at ~/docs/superpowers, no paperflow yet.
+if [ -d "$SP_DOCS" ] && [ ! -L "$SP_DOCS" ] && [ ! -e "$PF_DOCS" ]; then
+    mv "$SP_DOCS" "$PF_DOCS"
+    ln -s paperflow "$SP_DOCS"
+    ok "moved ~/docs/superpowers → ~/docs/paperflow + compat symlink"
+# Case B: split brain — both real dir and paperflow exist. Bail loudly.
+elif [ -d "$SP_DOCS" ] && [ ! -L "$SP_DOCS" ] && [ -d "$PF_DOCS" ]; then
+    err "both ~/docs/superpowers (real dir) and ~/docs/paperflow exist."
+    err "resolve manually before re-running install.sh."
+    exit 2
+# Case C: paperflow exists, symlink missing. Recreate symlink.
+elif [ -d "$PF_DOCS" ] && [ ! -e "$SP_DOCS" ]; then
+    ln -s paperflow "$SP_DOCS"
+    ok "created compat symlink ~/docs/superpowers → paperflow"
+# Case D: fresh install, neither exists. Create paperflow + symlink.
+elif [ ! -e "$PF_DOCS" ] && [ ! -e "$SP_DOCS" ]; then
+    mkdir -p "$PF_DOCS"
+    ln -s paperflow "$SP_DOCS"
+    ok "created fresh paperflow tree + compat symlink"
+else
+    skip "already paperflow"
+fi
+
+# Sed-rewrite paths inside any pre-existing user HTMLs. Narrow patterns —
+# only the actual stylesheet/script and dir prefixes, not bare /superpowers/.
+if [ -d "$PF_DOCS" ]; then
+    find "$PF_DOCS" -name '*.html' -type f -exec \
+        sed -i '' \
+            -e 's|/superpowers/_lib/|/paperflow/_lib/|g' \
+            -e 's|/superpowers/specs/|/paperflow/specs/|g' \
+            -e 's|/superpowers/plans/|/paperflow/plans/|g' \
+            -e 's|/superpowers/grills/|/paperflow/grills/|g' \
+            -e 's|/superpowers/notes/|/paperflow/notes/|g' \
+            -e 's|/superpowers/captures/|/paperflow/captures/|g' \
+            -e 's|/superpowers/changelog/|/paperflow/changelog/|g' \
+            -e 's|/superpowers/missions/|/paperflow/missions/|g' \
+            -e 's|/superpowers/audits/|/paperflow/audits/|g' \
+            -e 's|~/docs/superpowers/|~/docs/paperflow/|g' \
+            {} + 2>/dev/null || true
+fi
+
+# Write the version flag (paperflow v2).
+mkdir -p "$HOME/.paperflow"
+echo 2 > "$HOME/.paperflow/.major-version"
+ok "version flag set to 2 (~/.paperflow/.major-version)"
+
 # ─── 1. Directories ────────────────────────────────────────────────
 log "Directories"
-mkdir -p "$HOME/docs/superpowers/specs" \
-         "$HOME/docs/superpowers/plans" \
-         "$HOME/docs/superpowers/grills" \
-         "$HOME/docs/superpowers/notes" \
-         "$HOME/docs/superpowers/captures" \
-         "$HOME/docs/superpowers/changelog" \
-         "$HOME/docs/superpowers/missions" \
-         "$HOME/docs/superpowers/audits" \
-         "$HOME/docs/superpowers/audits/_archive" \
-         "$HOME/docs/superpowers/_lib" \
+mkdir -p "$HOME/docs/paperflow/specs" \
+         "$HOME/docs/paperflow/plans" \
+         "$HOME/docs/paperflow/grills" \
+         "$HOME/docs/paperflow/notes" \
+         "$HOME/docs/paperflow/captures" \
+         "$HOME/docs/paperflow/changelog" \
+         "$HOME/docs/paperflow/missions" \
+         "$HOME/docs/paperflow/audits" \
+         "$HOME/docs/paperflow/audits/_archive" \
+         "$HOME/docs/paperflow/_lib" \
          "$HOME/.paperflow" \
          "$HOME/.local/bin" \
          "$HOME/.local/log" \
@@ -279,10 +336,10 @@ else
     fi
 fi
 
-# ─── 6. Shared renderers in ~/docs/superpowers/_lib/ ────────────────
+# ─── 6. Shared renderers in ~/docs/paperflow/_lib/ ──────────────────
 log "Renderers"
 for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js live-render.css live-render.js; do
-    cp "$REPO/lib/$f" "$HOME/docs/superpowers/_lib/$f"
+    cp "$REPO/lib/$f" "$HOME/docs/paperflow/_lib/$f"
     ok "$f"
 done
 
@@ -502,8 +559,8 @@ log "Status"
     [ -f "$CLAUDE_MD" ]                                && ok "CLAUDE.md     : present"    || err "CLAUDE.md     : missing"
     [ -x "$HOME/.claude/hooks/inject-principles.sh" ]  && ok "inject hook   : executable" || err "inject hook   : missing"
     [ -x "$HOME/.claude/hooks/auto-open-doc.sh" ]      && ok "open hook     : executable" || err "open hook     : missing"
-    [ -f "$HOME/docs/superpowers/_lib/doc.js" ]        && ok "doc renderer  : present"    || err "doc renderer  : missing"
-    [ -f "$HOME/docs/superpowers/_lib/grill.js" ]      && ok "grill render. : present"    || err "grill render. : missing"
+    [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
+    [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
     [ -f "$HOME/.claude/skills/grill-plan/SKILL.md" ]         && ok "grill skill   : present"    || err "grill skill   : missing"
     [ -f "$HOME/.claude/skills/paperflow-install/SKILL.md" ]  && ok "install skill : present"    || err "install skill : missing"
     [ -f "$HOME/.claude/skills/discuss/SKILL.md" ]            && ok "discuss skill : present"    || err "discuss skill : missing"
@@ -514,7 +571,7 @@ log "Status"
     [ -f "$HOME/.claude/skills/mission-continue/SKILL.md" ]   && ok "mission-cont.  : present"    || err "mission-cont.  : missing"
     [ -f "$HOME/.claude/skills/paperflow-review-doc/SKILL.md" ] && ok "review skill  : present"    || err "review skill  : missing"
     [ -f "$HOME/.claude/skills/site-audit/SKILL.md" ]         && ok "site-audit skill: present"   || err "site-audit skill: missing"
-    [ -d "$HOME/docs/superpowers/audits" ]                    && ok "audits dir    : ready"      || err "audits dir    : missing"
+    [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
     [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"

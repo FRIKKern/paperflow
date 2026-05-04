@@ -6,7 +6,7 @@
 #   paperflow-continue <slug>
 #   paperflow-continue --dry-run <slug>
 #
-# Reads ~/docs/superpowers/missions/<slug>.json for the resume_prompt, then
+# Reads ~/docs/paperflow/missions/<slug>.json for the resume_prompt, then
 # opens a new tab/window in the current terminal (or falls back to Apple
 # Terminal) running:
 #   cd ~ && claude --dangerously-skip-permissions <resume_prompt>
@@ -41,7 +41,7 @@ if [ -z "$SLUG" ]; then
     exit 2
 fi
 
-MISSION_JSON="$HOME/docs/superpowers/missions/${SLUG}.json"
+MISSION_JSON="$HOME/docs/paperflow/missions/${SLUG}.json"
 if [ ! -f "$MISSION_JSON" ]; then
     printf 'Mission JSON not found: %s\n' "$MISSION_JSON" >&2
     exit 1

@@ -1,6 +1,6 @@
 ---
 name: pre-flight-capture
-description: Use BEFORE any visual UI change — when the spec/plan touches HTML, CSS, JSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, or any user-facing interaction; when the user says "capture before", "the spec touches UI", "before we change visuals"; or when a plan is about to be implemented and includes UI work. Captures pre-flight static screenshots + short videos of the affected interactions, saves them under ~/docs/superpowers/captures/, and returns ready-to-paste markdown/HTML snippets the plan author embeds in a "Pre-flight evidence" section. Same skill is invoked with mode `after` after the build to capture post-flight evidence for the changelog.
+description: Use BEFORE any visual UI change — when the spec/plan touches HTML, CSS, JSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, or any user-facing interaction; when the user says "capture before", "the spec touches UI", "before we change visuals"; or when a plan is about to be implemented and includes UI work. Captures pre-flight static screenshots + short videos of the affected interactions, saves them under ~/docs/paperflow/captures/, and returns ready-to-paste markdown/HTML snippets the plan author embeds in a "Pre-flight evidence" section. Same skill is invoked with mode `after` after the build to capture post-flight evidence for the changelog.
 ---
 
 # pre-flight-capture
@@ -51,7 +51,7 @@ If only one target, just `before.png` + `before.mp4`.
 ### 3. Output path
 
 ```
-~/docs/superpowers/captures/<YYYY-MM-DD>-<topic-slug>/
+~/docs/paperflow/captures/<YYYY-MM-DD>-<topic-slug>/
 ```
 
 Same slug as the spec/plan (`2026-05-02-submit-button-redesign` etc). The directory is shared between `before` and `after` so the changelog HTML can reference both via one relative `../captures/.../` path.
@@ -69,7 +69,7 @@ Same slug as the spec/plan (`2026-05-02-submit-button-redesign` etc). The direct
 > - **Submit button hover**: record 4 s while you move the cursor onto the button and hold.
 > - **Form focus state**: record 4 s clicking into the email input.
 >
-> Save into `~/docs/superpowers/captures/2026-05-02-submit-button-redesign/` as `before.png`, `before-hover.mp4`, `before-focus.mp4`.
+> Save into `~/docs/paperflow/captures/2026-05-02-submit-button-redesign/` as `before.png`, `before-hover.mp4`, `before-focus.mp4`.
 >
 > Return only the file paths, one per line. No summary.
 
@@ -79,7 +79,7 @@ For native interactions, two-step:
 
 ```bash
 # Start video capture (5s, mouse cursor included, no sound)
-screencapture -v -V 5 -C ~/docs/superpowers/captures/<dir>/before.mp4 &
+screencapture -v -V 5 -C ~/docs/paperflow/captures/<dir>/before.mp4 &
 
 # Trigger the interaction via OpenClaw
 ~/.local/bin/openclaw-delegate --message "Open <app>, click the <thing>" --json --timeout 30
@@ -90,7 +90,7 @@ wait  # let screencapture finish
 For static-only:
 
 ```bash
-screencapture -x ~/docs/superpowers/captures/<dir>/before.png
+screencapture -x ~/docs/paperflow/captures/<dir>/before.png
 ```
 
 ### 5. Return to the main session

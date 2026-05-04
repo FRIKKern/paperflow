@@ -1,6 +1,6 @@
 ---
 name: discuss
-description: Use when the user asks to discuss / explain in depth / compare / deep-dive / weigh / brainstorm a topic, OR when your reply would otherwise be a long terminal answer (>300 words, multiple diagrams, multiple tables, architecture or trade-off discussion). Writes the discussion to a beautiful HTML article at ~/docs/superpowers/notes/, auto-opens it in the browser, and includes a reply textarea at the bottom so the user can send back a structured response. Keeps chat reply terse (1-3 sentence summary + URL).
+description: Use when the user asks to discuss / explain in depth / compare / deep-dive / weigh / brainstorm a topic, OR when your reply would otherwise be a long terminal answer (>300 words, multiple diagrams, multiple tables, architecture or trade-off discussion). Writes the discussion to a beautiful HTML article at ~/docs/paperflow/notes/, auto-opens it in the browser, and includes a reply textarea at the bottom so the user can send back a structured response. Keeps chat reply terse (1-3 sentence summary + URL).
 ---
 
 # discuss
@@ -35,13 +35,13 @@ If unsure, lean toward the article. Brevity wins in chat; depth wins on page.
    - The topic and the conclusion / framing the user is interested in
    - The output path (below)
    - The full HTML template structure (eyebrow, title, byline, ingress, body sections with Mermaid figures + tables, optional pullquote, bottom-line)
-   - The exact `<script>` tail with `window.CLAUDE_TARGET`, `window.DOC_PATH`, and `<script src="/superpowers/_lib/doc.js">`
+   - The exact `<script>` tail with `window.CLAUDE_TARGET`, `window.DOC_PATH`, and `<script src="/paperflow/_lib/doc.js">`
    - "Write the article body. Return the URL when done. Do not summarize the content."
 
 4. **Write the article** to:
 
    ```
-   ~/docs/superpowers/notes/<slug>.html
+   ~/docs/paperflow/notes/<slug>.html
    ```
 
    Article structure:
@@ -60,7 +60,7 @@ If unsure, lean toward the article. Brevity wins in chat; depth wins on page.
      window.CLAUDE_TARGET = /* JSON from paperflow-target */;
      window.DOC_PATH = "<slug>.html";
    </script>
-   <script src="/superpowers/_lib/doc.js"></script>
+   <script src="/paperflow/_lib/doc.js"></script>
    ```
 
    `doc.js` will inject a **Reply** textarea + button (and a **Make this a spec** secondary) at the bottom.
@@ -68,7 +68,7 @@ If unsure, lean toward the article. Brevity wins in chat; depth wins on page.
 5. **When the subagent returns**, reply in chat tersely — 1 to 3 sentences max + the localhost URL:
 
    ```
-   Wrote the discussion to http://localhost:8765/superpowers/notes/<slug>.html.
+   Wrote the discussion to http://localhost:8765/paperflow/notes/<slug>.html.
    <one-sentence summary of the conclusion or framing>.
    ```
 
@@ -76,7 +76,7 @@ If unsure, lean toward the article. Brevity wins in chat; depth wins on page.
 
 ## Template
 
-Use the same article CSS as specs/plans (inline `<style>` block, Mermaid 10 from CDN). For consistency, copy the head + style from `~/docs/superpowers/notes/2026-05-03-skills-vs-infrastructure.html` (the canonical example) and adapt the body.
+Use the same article CSS as specs/plans (inline `<style>` block, Mermaid 10 from CDN). For consistency, copy the head + style from `~/docs/paperflow/notes/2026-05-03-skills-vs-infrastructure.html` (the canonical example) and adapt the body.
 
 Minimal head:
 
