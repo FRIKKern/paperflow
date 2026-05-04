@@ -73,7 +73,7 @@ Use the shared renderer at `/superpowers/_lib/grill.{css,js}` — do not inline 
 ### Capture the terminal target
 
 ```bash
-~/.claude/skills/setup-doc-workflow/get-terminal-target.sh
+~/.local/bin/paperflow-target
 ```
 
 Paste the JSON output verbatim into `window.GRILL.target` so the Submit button reaches *this* terminal tab.
@@ -124,7 +124,7 @@ Paste the JSON output verbatim into `window.GRILL.target` so the Submit button r
 <script>
 window.GRILL = {
   plan: "<plan-filename>.html",
-  target: { /* paste output of get-terminal-target.sh */ },
+  target: { /* paste output of ~/.local/bin/paperflow-target */ },
   questions: [
     {
       id: "q1",
