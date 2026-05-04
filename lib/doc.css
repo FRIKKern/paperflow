@@ -316,3 +316,81 @@ hr.section::after {
   color: var(--doc-muted);
   min-height: 1.2em;
 }
+
+/* ─── print / Save-as-PDF ─────────────────────────────────────────────
+ * Triggered by the doc.js Print button (window.print). Browsers expose
+ * "Save as PDF" as a destination in the same dialog, so a single rule
+ * set covers paper printing and PDF export. */
+@media print {
+  /* Hide the chrome — action buttons, modals, live-render overlays. */
+  .doc-action,
+  .mz-modal,
+  .lr-status,
+  .lr-banner,
+  noscript,
+  iframe[src*="livereload"] {
+    display: none !important;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  body {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 1.6cm 1.8cm !important;
+    font-size: 11pt !important;
+    line-height: 1.5 !important;
+  }
+
+  /* Tables: drop the viewport-bleed pattern on paper — there's no body
+   * column to bleed beyond, just the page. Take the full page width. */
+  table {
+    position: static !important;
+    left: auto !important;
+    transform: none !important;
+    width: 100% !important;
+    max-width: none !important;
+    border: 1px solid #999 !important;
+    background: #ffffff !important;
+  }
+
+  /* Avoid splitting figures / tables across pages where reasonable. */
+  figure,
+  table {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  h1, h2, h3 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Mermaid + images print at full container width. */
+  figure svg,
+  figure img,
+  figure pre.mermaid svg,
+  figure pre.mermaid img {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  /* Links: print as plain text, with the URL appended for outbound refs.
+   * Skip the appendage for in-page anchors and live-reload-relative paths. */
+  a {
+    color: #000 !important;
+    border-bottom: none !important;
+    text-decoration: underline;
+  }
+  a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: .85em;
+    color: #555;
+  }
+
+  @page {
+    margin: 1.4cm;
+  }
+}
