@@ -1,9 +1,10 @@
-/* GitHub-style click-to-zoom for Mermaid diagrams. */
+/* GitHub-style click-to-zoom for Mermaid diagrams and images. */
 
 .mz-zoomable {
   cursor: zoom-in;
 }
-.mz-zoomable svg {
+.mz-zoomable svg,
+.mz-zoomable img {
   pointer-events: none; /* let clicks bubble to the container so delegation hits */
 }
 
@@ -37,11 +38,13 @@
   overflow: hidden;
 }
 
-.mz-stage svg {
+.mz-stage svg,
+.mz-stage img {
   display: block;
   width: min(92vw, 1600px);
   height: auto;
   max-height: 92vh;
+  object-fit: contain;
   /* No transition on transform — drag/zoom must feel direct. */
   will-change: transform;
 }
