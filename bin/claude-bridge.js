@@ -58,6 +58,25 @@ function viaAppleTerminal(tty, message, cb) {
     (err, stdout) => cb(err, err ? null : 'apple:' + (stdout || '').trim()));
 }
 
+function viaCmux(target, message, cb) {
+  // cmux.app: use the bundled CLI to send text + Enter to a specific surface.
+  // The surface ref is captured at write-time by get-terminal-target.sh.
+  const cli = target.cmux_cli || '/Applications/cmux.app/Contents/Resources/bin/cmux';
+  const sendArgs = ['send'];
+  if (target.cmux_workspace) sendArgs.push('--workspace', target.cmux_workspace);
+  if (target.cmux_surface) sendArgs.push('--surface', target.cmux_surface);
+  sendArgs.push(message);
+  execFile(cli, sendArgs, err1 => {
+    if (err1) return cb(err1);
+    const keyArgs = ['send-key'];
+    if (target.cmux_workspace) keyArgs.push('--workspace', target.cmux_workspace);
+    if (target.cmux_surface) keyArgs.push('--surface', target.cmux_surface);
+    keyArgs.push('Return');
+    execFile(cli, keyArgs, err2 =>
+      cb(err2, err2 ? null : 'cmux:' + (target.cmux_surface || target.cmux_workspace)));
+  });
+}
+
 function viaActivateAndType(pid, message, cb) {
   // Generic fallback: bring PID's app to front, then send keystrokes.
   // ~200ms focus flicker — works for Ghostty/Warp/Alacritty/etc.
@@ -75,6 +94,9 @@ function viaActivateAndType(pid, message, cb) {
 function dispatch(target, message, cb) {
   if (!target || typeof target !== 'object') {
     return cb(new Error('target must be an object'));
+  }
+  if (target.term_program === 'cmux' || target.cmux_workspace || target.cmux_surface) {
+    return viaCmux(target, message, cb);
   }
   if (target.tmux_pane) {
     return viaTmux(target.tmux_pane, message, cb);

@@ -4,7 +4,11 @@ When something is complicated, lead with a diagram and concrete details. Don't u
 
 # Specs, plans, design docs
 
-Write them as standalone HTML files in `~/docs/superpowers/{specs,plans,grills}/`, not Markdown. Mermaid via CDN script. Article-style typography (ingress, brødtekst, captioned figures, serif body, sans headings). Distribute diagrams throughout — each section that explains a flow / comparison / decision gets a Mermaid figure. Aim for at least one visual every ~300 words. Always open via the live-reload URL, never `file://`:
+Write them as standalone HTML files in `~/docs/superpowers/{specs,plans,grills}/`, not Markdown. Mermaid via CDN script. Article-style typography (ingress, brødtekst, captioned figures, serif body, sans headings) — never ship inline `<style>` blocks; the typography lives in the shared stylesheet. Each doc links it once from `<head>`:
+
+    <link rel="stylesheet" href="/superpowers/_lib/doc.css">
+
+Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `<pre class="mermaid">` + `<figcaption><b>Figure N.</b> …</figcaption>`. Per-doc colour overrides set `:root` CSS variables before the link. Distribute diagrams throughout — each section that explains a flow / comparison / decision gets a Mermaid figure. Aim for at least one visual every ~300 words. Always open via the live-reload URL, never `file://`:
 
     open http://localhost:8765/superpowers/specs/<filename>.html
     open http://localhost:8765/superpowers/plans/<filename>.html

@@ -5,6 +5,36 @@
 
 set -e
 
+# ── cmux.app ────────────────────────────────────────────────────────
+# When Claude Code runs inside cmux.app, $$ has no real tty (cmux owns
+# the pty), and AppleScript / iTerm / Terminal don't apply. cmux exposes
+# a Unix-socket CLI with `send` / `send-key` for routing text to a
+# specific surface. Emit cmux-shaped routing info; the bridge dispatches
+# via viaCmux().
+if [ -n "${CMUX_SOCKET:-}" ] && [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "$CMUX_BUNDLED_CLI_PATH" ]; then
+  CMUX_IDENTIFY="$("$CMUX_BUNDLED_CLI_PATH" identify 2>/dev/null || echo '{}')"
+  CMUX_SURFACE_REF="$(printf '%s' "$CMUX_IDENTIFY" | /usr/bin/env jq -r '.caller.surface_ref // empty' 2>/dev/null || true)"
+  if [ -n "$CMUX_SURFACE_REF" ] && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    /usr/bin/env jq -n \
+      --arg tp   "cmux" \
+      --arg cli  "$CMUX_BUNDLED_CLI_PATH" \
+      --arg ws   "$CMUX_WORKSPACE_ID" \
+      --arg sf   "$CMUX_SURFACE_REF" \
+      '{
+        term_program: $tp,
+        cmux_cli: $cli,
+        cmux_workspace: $ws,
+        cmux_surface: $sf,
+        tty: null,
+        term_session_id: "",
+        tmux_pane: "",
+        pid: null
+      }'
+    exit 0
+  fi
+fi
+
+# ── tty-based terminals (Apple Terminal, iTerm, plain Ghostty/Warp) ─
 # Walk up the process tree from $$ to find the ancestor `claude` process
 # that has a real controlling tty (not "??"). Subshells don't inherit the
 # tty in some Claude Code Bash invocation modes, so $PPID isn't reliable.
