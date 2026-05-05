@@ -1,0 +1,11 @@
+name: check-skill-count
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  check-skill-count:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-skill-count.sh
