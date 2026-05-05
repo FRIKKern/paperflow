@@ -60,7 +60,7 @@ if ! command -v bd >/dev/null 2>&1; then
     err "for goals + phases + tasks. Pick one and re-run:"
     printf '\n      brew install beads        (macOS Homebrew)\n'
     printf '      npm i -g beads            (cross-platform)\n\n'
-    printf '    See https://github.com/steveyegge/beads\n'
+    printf '    See https://github.com/gastownhall/beads\n'
     exit 1
 fi
 ok "bd ($(bd --version 2>/dev/null | head -n1 || echo 'version unknown'))"
