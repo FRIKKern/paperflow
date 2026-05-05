@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pointer references a Beads task the mock doesn't know about. The mock
+# returns exit 1 from `bd show`; the statusline must fall through silently
+# and render the v8 line (no goal/phase/task segments).
+echo "bd-deadbeef"   > "$GOALREPO/.paperflow/active-goal"
+echo "bd-deadbeef.2" > "$GOALREPO/.paperflow/active-phase"
