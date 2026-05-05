@@ -288,6 +288,7 @@ log "Directories"
 mkdir -p "$HOME/docs/paperflow/specs" \
          "$HOME/docs/paperflow/plans" \
          "$HOME/docs/paperflow/grills" \
+         "$HOME/docs/paperflow/questionnaires" \
          "$HOME/docs/paperflow/notes" \
          "$HOME/docs/paperflow/captures" \
          "$HOME/docs/paperflow/changelog" \

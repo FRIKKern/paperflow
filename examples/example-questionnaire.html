@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Questionnaire: Add dark mode to the docs viewer</title>
+<link rel="stylesheet" href="/paperflow/_lib/grill.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: "base",
+    themeVariables: {
+      fontFamily: "-apple-system, SF Pro Display, Helvetica Neue, system-ui, sans-serif",
+      primaryColor: "#fbfaf6",
+      primaryTextColor: "#1a1a1a",
+      primaryBorderColor: "#1a1a1a",
+      lineColor: "#1a1a1a",
+      secondaryColor: "#f1ede2",
+      tertiaryColor: "#ffffff"
+    },
+    flowchart: { curve: "basis", padding: 12 }
+  });
+</script>
+</head>
+<body>
+
+<div class="eyebrow">Questionnaire</div>
+<h1>Add dark mode to the docs viewer</h1>
+<div class="byline">
+  <span>2026-05-05</span>
+  <span>Goal: <code>paperflow-XXXX</code></span>
+  <span>7 questions</span>
+  <span>Pre-draft discovery</span>
+</div>
+
+<p class="ingress">
+This is the canonical reference shape for paperflow questionnaires — a near-clone of an
+<i>openclaw-grill</i> file, with four meaningful differences: URL prefix is
+<code>/questionnaires/</code>, the eyebrow says "Questionnaire", the categories shift to
+<i>scope · constraints · preferences · context · success criteria · open decisions</i>, and
+<code>window.GRILL.kind</code> + <code>goalId</code> are set so the bridge submit lands in
+the right Goal even after a context switch. Two of the seven items below intentionally
+omit <code>recommendation</code> — discovery questions don't always have a pick.
+</p>
+
+<main id="grill-form"></main>
+
+<script>
+// We reuse window.GRILL as the global — a renderer rename would touch every grill HTML
+// for cosmetic gain. The two new optional fields (kind, goalId) flip the bridge-message
+// header and append a Goal: line; everything else is unchanged from grill shape.
+window.GRILL = {
+  plan: "2026-05-05-dark-mode-docs-viewer.html",
+  kind: "questionnaire",
+  goalId: "paperflow-XXXX",
+  target: {
+    term_program: "cmux",
+    cmux_cli: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+    cmux_workspace: "641A75F0-9BA3-42EB-B71F-8660D6257787",
+    cmux_surface: "surface:2",
+    tty: null,
+    term_session_id: "",
+    tmux_pane: "",
+    pid: null
+  },
+  questions: [
+    {
+      id: "q1",
+      category: "Scope",
+      type: "single",
+      text: "Which surfaces should pick up dark mode in this round?",
+      rationale: "The docs viewer renders specs, plans, grills, questionnaires, changelogs, audits, and Goal HTMLs. Naming the targeted set up front prevents 'one more page' creep mid-build.",
+      diagram: `flowchart LR
+  A["docs viewer<br/>chrome only"] --> B
+  B["chrome +<br/>article body"] --> C
+  C["everything,<br/>incl. Mermaid"]
+  style C stroke:#a23925,stroke-width:3px`,
+      diagramCaption: "Three plausible scopes; recommendation is the rightmost.",
+      options: [
+        "Chrome only (header, action bar, statusline)",
+        "Chrome + article body",
+        "Everything, including Mermaid figures"
+      ],
+      recommendation: "Everything, including Mermaid figures",
+      recommendationReason: "A half-dark page (light Mermaid on dark body) reads as broken. Either commit fully or skip — and the user has already asked, so commit."
+    },
+    {
+      id: "q2",
+      category: "Constraints",
+      type: "yesno",
+      text: "Must the existing light theme remain the default for new users?",
+      rationale: "Affects the toggle's persistence model. If light stays default, we need an explicit user opt-in; otherwise we follow `prefers-color-scheme`.",
+      recommendation: "Yes",
+      recommendationReason: "All existing screenshots, changelogs, and shared URLs are calibrated against the light palette. Switching defaults silently breaks visual recognition."
+    },
+    {
+      id: "q3",
+      category: "Preferences",
+      type: "single",
+      text: "Where should the dark-mode toggle live?",
+      rationale: "Three plausible homes; each has a discoverability vs. clutter tradeoff.",
+      diagram: `flowchart TD
+  A["doc-action bar<br/>(per page)"]
+  B["statusline<br/>(global, terminal)"]
+  C["browser-only<br/>prefers-color-scheme"]
+  D["dedicated tab corner<br/>cmux chrome"]
+  style A stroke:#a23925,stroke-width:3px`,
+      diagramCaption: "Toggle placement options — recommendation is the doc-action bar.",
+      options: [
+        "Doc-action bar (per page)",
+        "Statusline (global, in terminal)",
+        "Browser only — follow prefers-color-scheme",
+        "Dedicated cmux chrome corner"
+      ]
+      // No recommendation — this is genuinely a preference call we want from the user.
+    },
+    {
+      id: "q4",
+      category: "Context",
+      type: "open",
+      text: "Are there any existing CSS custom properties in `lib/doc.css` that already shadow a dark palette, or does the codebase only have light-mode tokens today?",
+      rationale: "If a half-built dark token set exists, the build phase should fold into it; if not, we design the token taxonomy from scratch."
+      // No recommendation — this is a factual lookup the user can answer faster than we can search.
+    },
+    {
+      id: "q5",
+      category: "Success criteria",
+      type: "multi",
+      text: "What does 'done' look like for v1? (select all that apply)",
+      rationale: "Forces the orchestrator to elicit a checkable definition of done before drafting the plan. Without this, build-phase verification has nothing to verify against.",
+      diagram: `flowchart LR
+  D["v1 'done'"]
+  D --> P1["all paperflow HTML<br/>renders in dark"]
+  D --> P2["toggle persists<br/>per-tab"]
+  D --> P3["Mermaid theme<br/>switches in lockstep"]
+  D --> P4["printed PDFs<br/>stay light"]
+  D --> P5["A11y contrast<br/>≥ WCAG AA"]`,
+      diagramCaption: "Candidate done-criteria; the user picks which ones bind v1.",
+      options: [
+        "All paperflow HTML renders correctly in dark",
+        "Toggle persists per browser tab",
+        "Toggle persists across browser restarts",
+        "Mermaid theme switches in lockstep with body theme",
+        "Printed PDFs stay light regardless of toggle",
+        "All text meets WCAG AA contrast in dark mode"
+      ],
+      recommendation: [
+        "All paperflow HTML renders correctly in dark",
+        "Mermaid theme switches in lockstep with body theme",
+        "Printed PDFs stay light regardless of toggle",
+        "All text meets WCAG AA contrast in dark mode"
+      ],
+      recommendationReason: "Per-tab persistence is fine without crossing the localStorage line; full restart-persistence raises a privacy/cookie surface we don't need yet. The other four are non-negotiable for shipping."
+    },
+    {
+      id: "q6",
+      category: "Open decisions",
+      type: "scale",
+      min: 1,
+      max: 5,
+      minLabel: "match macOS exactly",
+      maxLabel: "neutral / paperflow-branded",
+      text: "How closely should the dark palette mirror the macOS system dark style?",
+      rationale: "Anchoring against system dark mode means free familiarity but locks us into Apple's swings; a neutral palette gives us control but costs design work.",
+      diagram: `flowchart LR
+  L["1<br/>copy macOS"] --> M2["2"] --> M3["3<br/>blend"] --> M4["4"] --> R["5<br/>neutral brand"]
+  style M3 fill:#a23925,color:#fff,stroke:#a23925`,
+      diagramCaption: "The mirror-vs-brand dial.",
+      recommendation: 3,
+      recommendationReason: "Middle blend keeps macOS familiarity for the chrome (titlebars, separators) while letting the article body lean on paperflow's serif/typography palette."
+    },
+    {
+      id: "q7",
+      category: "Open decisions",
+      type: "single",
+      text: "Should the toggle expose three states (light / dark / system) or two (light / dark)?",
+      rationale: "Three-state is more work to implement (extra UI state, extra label, OS-event listener) but matches what users see in Slack, GitHub, VS Code.",
+      options: [
+        "Two-state (light / dark) — simpler",
+        "Three-state (light / dark / system) — matches peers"
+      ],
+      recommendation: "Three-state (light / dark / system) — matches peers",
+      recommendationReason: "Two-state forces a default-on-first-visit choice we'd just be guessing at. Three-state defers that to the OS, which is the right answer when we don't have a strong preference."
+    }
+  ]
+};
+</script>
+<script src="/paperflow/_lib/grill.js"></script>
+
+</body>
+</html>
