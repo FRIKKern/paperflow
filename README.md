@@ -83,6 +83,10 @@ jq '.limits["claude-opus-4-8"] = 1000000' \
 
 The installer never overwrites a user-edited limits file — it tracks shipped versions via `~/.paperflow/.statusline-limits-installed-sha`.
 
+### Tab reuse on cmux
+
+The auto-open hook never asks for a new tab — it just runs `open <URL>`. On cmux, the URL handler de-dupes by URL: same URL refocuses the existing surface (`placement=reuse`), a different URL opens a new one (`placement=new`). The hook captures cmux's response and appends one JSON line per invocation to `~/.paperflow/auto-open.log` (rotated at 1 MB to `.log.1`), so you can verify tab-reuse vs new-tab behaviour. On non-cmux Macs the response is empty; the log still records timestamp + URL for "did the hook fire?" debugging.
+
 ---
 
 ## Install
