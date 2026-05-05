@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Migrate legacy mission.json / goal.json files into Beads.
+# Idempotent — safe to invoke any number of times.
+#
+# Walks ~/docs/paperflow/{missions,goals}/<slug>/ for any mission.json or
+# goal.json. For each:
+#   1. Reads title / vision / tasks[] / unknown keys via jq.
+#   2. Bootstraps Beads in the current repo (if not already done).
+#   3. Creates a goal-task with kind:goal + goal-<slug> labels.
+#   4. Creates three default phase-tasks (pre-flight / build / review),
+#      each with kind:phase + goal-<slug>:phase-<name> labels.
+#      Phases depend on the goal-task (bd dep add <phase-id> <goal-id>).
+#   5. Creates each legacy tasks[] entry as a work-task assigned to the
+#      build phase via dependency.
+#   6. Preserves unknown JSON keys via the goal-task's notes/comments.
+#   7. Writes per-repo .paperflow/active-goal + .paperflow/active-phase
+#      pointers when the slug matches the legacy active-mission/-goal.
+#   8. Moves the legacy JSON to <dir>/legacy/ for audit.
+#
+# Re-running detects already-migrated goals via the presence of
+# <dir>/legacy/<filename>.json and skips them.
+
+set -euo pipefail
+
+PF_DOCS="$HOME/docs/paperflow"
+LEGACY_ACTIVE_GOAL="$HOME/.paperflow/active-goal"     # v5 location, JSON-shaped
+LEGACY_ACTIVE_MISSION="$HOME/.paperflow/active-mission" # v3/v4 location, slug-shaped
+
+# Tally how many legacy files we touch in this run.
+migrated=0
+skipped=0
+
+# Walk both legacy roots.
+for legacy_root in "$PF_DOCS/missions" "$PF_DOCS/goals"; do
+    [ -d "$legacy_root" ] || continue
+
+    for dir in "$legacy_root"/*/; do
+        [ -d "$dir" ] || continue
+        slug="$(basename "$dir")"
+
+        # Find the legacy JSON file (mission.json or goal.json).
+        json_file=""
+        legacy_basename=""
+        if [ -f "$dir/mission.json" ]; then
+            json_file="$dir/mission.json"
+            legacy_basename="mission.json"
+        elif [ -f "$dir/goal.json" ]; then
+            json_file="$dir/goal.json"
+            legacy_basename="goal.json"
+        fi
+
+        # Idempotence check: if we already migrated, the JSON sits under legacy/.
+        if [ -z "$json_file" ]; then
+            if [ -f "$dir/legacy/mission.json" ] || [ -f "$dir/legacy/goal.json" ]; then
+                skipped=$((skipped + 1))
+            fi
+            continue
+        fi
+
+        # Pull fields out of the legacy JSON.
+        title="$(jq -r '.title // .name // empty' "$json_file")"
+        vision="$(jq -r '.vision // .description // empty' "$json_file")"
+        [ -n "$title" ] || title="$slug"
+
+        # Find the repo this Goal lives under (cwd at install time, or skip).
+        repo_root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+        if [ -z "$repo_root" ]; then
+            repo_root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"
+        fi
+
+        # Bootstrap Beads if needed.
+        if [ ! -d "$repo_root/.beads" ]; then
+            ( cd "$repo_root" && bd init >/dev/null 2>&1 )
+        fi
+
+        # Create the goal-task.
+        if [ -n "$vision" ]; then
+            goal_id="$(cd "$repo_root" && bd create "$title" \
+                --labels "kind:goal,goal-$slug" \
+                -p 0 \
+                --description "$vision" \
+                --silent)"
+        else
+            goal_id="$(cd "$repo_root" && bd create "$title" \
+                --labels "kind:goal,goal-$slug" \
+                -p 0 \
+                --silent)"
+        fi
+        goal_id="$(printf '%s' "$goal_id" | tr -d '[:space:]')"
+        echo "migrated $slug -> goal-task $goal_id"
+
+        # Create three default phase-tasks (pre-flight / build / review).
+        # Each gets kind:phase + goal-<slug>:phase-<name> labels and a dep on the goal-task.
+        # bash 3.2 has no associative arrays — track each phase ID in a separate var.
+        preflight_phase_id=""
+        build_phase_id=""
+        review_phase_id=""
+        for phase in pre-flight build review; do
+            phase_id="$(cd "$repo_root" && bd create "$phase" \
+                --labels "kind:phase,goal-$slug:phase-$phase,goal-$slug" \
+                --silent)"
+            phase_id="$(printf '%s' "$phase_id" | tr -d '[:space:]')"
+            case "$phase" in
+                pre-flight) preflight_phase_id="$phase_id" ;;
+                build)      build_phase_id="$phase_id" ;;
+                review)     review_phase_id="$phase_id" ;;
+            esac
+            ( cd "$repo_root" && bd dep add "$phase_id" "$goal_id" >/dev/null 2>&1 )
+        done
+
+        # Walk legacy tasks[]: each becomes a work-task on the build phase.
+        if jq -e '.tasks // [] | length > 0' "$json_file" >/dev/null 2>&1; then
+            jq -c '.tasks // [] | .[]' "$json_file" | while IFS= read -r task_json; do
+                text="$(printf '%s' "$task_json" | jq -r 'if type == "string" then . else (.text // .title // .name // empty) end')"
+                [ -n "$text" ] || continue
+                work_id="$(cd "$repo_root" && bd create "$text" \
+                    --labels "goal-$slug,phase-build" \
+                    --silent)"
+                work_id="$(printf '%s' "$work_id" | tr -d '[:space:]')"
+                ( cd "$repo_root" && bd dep add "$work_id" "$build_phase_id" >/dev/null 2>&1 )
+            done
+        fi
+
+        # Carry unknown keys as a note on the goal-task for audit trail.
+        unknown_json="$(jq -c '. as $j | (keys - ["title","name","vision","description","tasks","status"]) as $u | if ($u | length) > 0 then (reduce $u[] as $k ({}; .[$k] = $j[$k])) else null end' "$json_file")"
+        if [ -n "$unknown_json" ] && [ "$unknown_json" != "null" ]; then
+            ( cd "$repo_root" && bd update "$goal_id" --append-notes "legacy:json $unknown_json" >/dev/null 2>&1 ) || true
+        fi
+
+        # Write per-repo pointer files when this slug is the legacy active mission/goal.
+        wrote_pointer=0
+        if [ -f "$LEGACY_ACTIVE_MISSION" ] && [ "$(cat "$LEGACY_ACTIVE_MISSION" 2>/dev/null)" = "$slug" ]; then
+            mkdir -p "$repo_root/.paperflow"
+            printf '%s\n' "$goal_id" > "$repo_root/.paperflow/active-goal"
+            printf '%s\n' "$build_phase_id" > "$repo_root/.paperflow/active-phase"
+            wrote_pointer=1
+        fi
+        if [ "$wrote_pointer" -eq 0 ] && [ -f "$LEGACY_ACTIVE_GOAL" ]; then
+            # Try parsing as JSON (.slug); fall back to a plain-string slug match.
+            legacy_slug="$(jq -r '.slug // empty' "$LEGACY_ACTIVE_GOAL" 2>/dev/null || true)"
+            if [ -z "$legacy_slug" ]; then
+                legacy_slug="$(cat "$LEGACY_ACTIVE_GOAL" 2>/dev/null | tr -d '[:space:]')"
+            fi
+            if [ "$legacy_slug" = "$slug" ]; then
+                mkdir -p "$repo_root/.paperflow"
+                printf '%s\n' "$goal_id" > "$repo_root/.paperflow/active-goal"
+                printf '%s\n' "$build_phase_id" > "$repo_root/.paperflow/active-phase"
+            fi
+        fi
+
+        # Move the legacy JSON to legacy/ for audit.
+        mkdir -p "$dir/legacy"
+        mv "$json_file" "$dir/legacy/$legacy_basename"
+
+        migrated=$((migrated + 1))
+    done
+done
+
+if [ "$migrated" -eq 0 ] && [ "$skipped" -eq 0 ]; then
+    echo "no legacy goals to migrate"
+elif [ "$migrated" -eq 0 ]; then
+    echo "no legacy goals to migrate ($skipped already-migrated)"
+else
+    echo "paperflow: legacy goal migration complete ($migrated migrated, $skipped already-migrated)"
+fi

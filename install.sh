@@ -54,6 +54,25 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
+# Beads (bd) — required for paperflow's task layer
+if ! command -v bd >/dev/null 2>&1; then
+    err "bd (Beads) is required. paperflow uses Beads as the system of record"
+    err "for goals + phases + tasks. Pick one and re-run:"
+    printf '\n      brew install beads        (macOS Homebrew)\n'
+    printf '      npm i -g beads            (cross-platform)\n\n'
+    printf '    See https://github.com/steveyegge/beads\n'
+    exit 1
+fi
+ok "bd ($(bd --version 2>/dev/null | head -n1 || echo 'version unknown'))"
+
+# Optional version baseline check — non-fatal warning only.
+# Known-good baseline: 1.0.3. Below that, bd may not have all paperflow's verbs.
+BD_VERSION="$(bd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || echo '0.0.0')"
+BD_BASELINE="1.0.3"
+if [ "$(printf '%s\n%s\n' "$BD_VERSION" "$BD_BASELINE" | sort -V | head -n1)" != "$BD_BASELINE" ]; then
+    skip "bd $BD_VERSION is below paperflow's baseline $BD_BASELINE — some verbs may differ"
+fi
+
 # npm global write access — the #1 install failure on macOS. Homebrew puts
 # node at /usr/local/bin and root-owns /usr/local/lib/node_modules, so a
 # later `npm install -g` exits with EACCES and the user is left guessing
@@ -523,6 +542,26 @@ cp "$REPO/bin/paperflow-audit-site" "$HOME/.local/bin/paperflow-audit-site"
 chmod +x "$HOME/.local/bin/paperflow-audit-site"
 ok "installed at ~/.local/bin/paperflow-audit-site"
 
+# ─── 10e. Beads bootstrap helper ───────────────────────────────────
+log "Helper: paperflow-bd-init"
+cp "$REPO/bin/paperflow-bd-init" "$HOME/.local/bin/paperflow-bd-init"
+chmod +x "$HOME/.local/bin/paperflow-bd-init"
+ok "installed at ~/.local/bin/paperflow-bd-init"
+
+# ─── 10f. Legacy goals migration helper ────────────────────────────
+log "Helper: paperflow-migrate-legacy-goals"
+cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrate-legacy-goals"
+chmod +x "$HOME/.local/bin/paperflow-migrate-legacy-goals"
+ok "installed at ~/.local/bin/paperflow-migrate-legacy-goals"
+
+# ─── 10g. Migration: legacy goals → Beads ──────────────────────────
+log "Migration: legacy goals → Beads"
+if "$HOME/.local/bin/paperflow-migrate-legacy-goals"; then
+    ok "migration complete"
+else
+    err "migration failed — check stderr above; legacy files preserved untouched"
+fi
+
 # ─── 11. CLAUDE.md (only if missing) ────────────────────────────────
 log "~/.claude/CLAUDE.md"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
@@ -577,6 +616,8 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
     [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
+    [ -x "$HOME/.local/bin/paperflow-bd-init" ]               && ok "bd-init helper : executable" || err "bd-init helper : missing"
+    [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \

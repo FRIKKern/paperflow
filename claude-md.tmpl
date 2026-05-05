@@ -42,6 +42,12 @@ Get the target via:
 
 Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
 
+# Beads — task layer
+
+paperflow uses Beads (`bd`) as the system of record for goals, phases, and tasks. Goals live as Beads tasks tagged `kind:goal`; phases as `kind:phase` children; work-tasks as children of phases. The `paperflow-build` skill claims tasks via `bd update <id> --claim`, closes via `bd close <id>`. `bd ready --label goal-<slug>` returns what to work next.
+
+Install: `brew install beads` or `npm i -g beads`. Per-repo init: `paperflow-bd-init`.
+
 # Doc review (mandatory)
 
 Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/paperflow/{specs,plans,grills,notes,changelog,missions,audits}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Writing skills (discuss, grill-plan, mission-create, mission-snapshot, write-changelog, pre-flight-capture) call the `paperflow-review-doc` skill as their final step — Layer 1 is `paperflow-validate`, Layer 2 is an optional browser visual check via `visual-investigator` for high-stakes docs. Iterate up to 3 times to fix syntax errors before handing the URL to the user.

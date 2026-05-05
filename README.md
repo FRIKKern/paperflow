@@ -108,6 +108,7 @@ Takes about a minute. Sets up two LaunchAgents, two hooks, three skills, and the
 |---|---|
 | Node 22+ | `brew install node` |
 | `jq` | `brew install jq` |
+| Beads (`bd`) | `brew install beads` or `npm i -g beads` (task storage) |
 | Xcode CLI | `xcode-select --install` |
 
 ### Verify
