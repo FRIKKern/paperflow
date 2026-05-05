@@ -156,6 +156,70 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // POST /marker — write a small sidecar file so paperflow-resume can detect
+  // submitted questionnaires. Body: { kind, plan, submitted_at? }.
+  // The marker file is written next to the doc HTML, named
+  // "<plan-stem>-answered.json". `plan` must be a relative path (no '..',
+  // no leading '/') under ~/docs/paperflow/ — anything else is rejected so
+  // the browser can't write outside the docs tree.
+  if (req.method === 'POST' && req.url === '/marker') {
+    let body = '';
+    req.on('data', c => (body += c));
+    req.on('end', () => {
+      const path = require('path');
+      const fs   = require('fs');
+      let payload;
+      try { payload = JSON.parse(body); }
+      catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+      const { kind, plan, submitted_at } = payload || {};
+      if (!plan || typeof plan !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'need {plan}' }));
+      }
+      // Reject path traversal + absolute paths.
+      if (plan.includes('..') || plan.startsWith('/')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'plan must be a relative path under ~/docs/paperflow/' }));
+      }
+      const docsRoot = path.join(process.env.HOME, 'docs', 'paperflow');
+      // Resolve plan relative to questionnaires/ first; fall back to
+      // grills/ for the symmetrical use case.
+      const stem = plan.replace(/\.html$/, '');
+      const candidates = [
+        path.join(docsRoot, 'questionnaires', `${stem}-answered.json`),
+        path.join(docsRoot, 'grills',         `${stem}-answered.json`)
+      ];
+      // Pick the first whose parent directory exists.
+      const target = candidates.find(p => {
+        try { return fs.statSync(path.dirname(p)).isDirectory(); }
+        catch { return false; }
+      });
+      if (!target) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'no suitable docs/paperflow/{questionnaires,grills}/ dir' }));
+      }
+      const ts = new Date().toISOString();
+      const marker = JSON.stringify({
+        kind: kind || 'unknown',
+        submitted_at: submitted_at || ts
+      });
+      fs.writeFile(target, marker, err => {
+        if (err) {
+          console.error(`[${ts}] marker write error:`, err.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+        console.log(`[${ts}] marker → ${target}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, path: target }));
+      });
+    });
+    return;
+  }
+
   res.writeHead(404); res.end();
 });
 
