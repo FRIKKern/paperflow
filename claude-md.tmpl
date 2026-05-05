@@ -92,6 +92,14 @@ Live-render is **mandatory and on by default** for every paperflow HTML — `doc
 
 Grills are the stress-test phase of `paperflow-plan` — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
 
+## Questionnaires (upfront discovery)
+
+Questionnaires are the *pre-draft* sibling of grills — same form renderer, opposite role. A grill stress-tests a plan that already exists; a questionnaire discovers what the user wants before there is anything to test. Fired by `paperflow-goal` on Goal opening (the common case) or by `paperflow-plan` when the user lobs in a complex task without shape. **Questionnaire and grill never compose on the same artifact** — the linear order is questionnaire → plan-draft → grill, never both flanking the same plan.
+
+Six categories: **scope · constraints · preferences · context · success criteria · open decisions**. Each question carries `rationale` and (optionally) `recommendation` + `recommendationReason` + Mermaid `diagram` — the recommendation field is explicitly optional here because the orchestrator may not have a pick yet (the whole point is to ask).
+
+Artifact: `~/docs/paperflow/questionnaires/<date>-<slug>-questionnaire.html`. Reuses `/paperflow/_lib/grill.{css,js}` verbatim; differentiated via `window.GRILL.kind = "questionnaire"` (which flips the bridge-message header to "Questionnaire answers for…") and `window.GRILL.goalId = "<beads-id>"` (appended as a `Goal:` line so the orchestrator can route answers correctly when the user has switched contexts). The submit bar is `position: sticky; bottom: 0` — once the user scrolls past Q1, the button stays pinned to the viewport. See `examples/example-questionnaire.html` for the canonical shape.
+
 # Statusline
 
 When this repo has an active goal (`<repo>/.paperflow/active-goal` exists), the bottom-bar statusline shows the goal slug, the active phase + position in the phase sequence, and the currently claimed Task with progress through the active phase. No setup needed beyond `paperflow-goal` having created the pointer files. The shape, at full width:

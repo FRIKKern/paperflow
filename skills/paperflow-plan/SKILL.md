@@ -18,7 +18,24 @@ Design the task graph within phases. The orchestrator delegates the long-form wr
 
 ## Process
 
-The skill walks three internal phases — draft, grill, revise — within a single Goal. Each phase delegates to a subagent for the actual writing; the orchestrator owns context, claims, and Beads mutations.
+The skill walks three internal phases — draft, grill, revise — within a single Goal. Each phase delegates to a subagent for the actual writing; the orchestrator owns context, claims, and Beads mutations. A **questionnaire** may precede the draft when the task lacks shape (see below); questionnaire and grill never both compose on the same plan.
+
+### Questionnaire before draft
+
+Fire a **questionnaire** when the user lobs in a task whose shape isn't clear from one sentence — broad scope, multiple axes, or expensive to redo. Skip for trivially-shaped work. Anchor against these case → outcome pairs:
+
+- *Case: "rename grill.js to form.js"* → **skip** (mechanical refactor, single axis).
+- *Case: "fix the typo in the onboarding header"* → **skip** (trivial).
+- *Case: "add a small CLI flag --json"* → **skip** (clear shape, cheap to reverse).
+- *Case: "add an audit-log feature"* → **write** (scope/constraints unclear: which events? retention? UI surface?).
+- *Case: "pick a state library"* → **write** (multi-axis preference call, hard to reverse later).
+- *Case: "design the plugin system"* → **write** (architectural, multiple axes, expensive to redo).
+
+**The artifact:** `~/docs/paperflow/questionnaires/<YYYY-MM-DD>-<slug>-questionnaire.html`. Reuses `/paperflow/_lib/grill.{css,js}` — set `window.GRILL.kind = "questionnaire"` and `window.GRILL.goalId = "<active-goal-id>"`. Six categories: *scope · constraints · preferences · context · success criteria · open decisions*. 5–10 questions; `recommendation` is optional. Copy `examples/example-questionnaire.html` as the starting template.
+
+**Stall handling:** surface the questionnaire URL before any plan HTML exists. If the user goes silent past the next prompt, **nudge once** with the URL repeated. If still no answers, proceed to Phase A (draft) without them and append one JSONL line to `~/.paperflow/questionnaire-skips.log`: `{"ts": "<iso>", "goal_id": "<id>", "questionnaire_path": "<abs path>", "reason": "stall"}`.
+
+**Output routing:** when answers arrive ("Questionnaire answers for…" + `Goal: <id>` line), fold them into the Phase A subagent brief — they tighten scope, name preferences, and surface success criteria the draft would otherwise have to guess at. The questionnaire informs the plan; it does **not** loop into the grill.
 
 ### Phase A — Draft
 
