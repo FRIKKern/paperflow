@@ -6,7 +6,7 @@
 #   - claude-bridge LaunchAgent (browser → terminal, port 8766)
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
-#   - grill-plan skill at ~/.claude/skills/grill-plan/
+#   - six paperflow-* skills at ~/.claude/skills/paperflow-{goal,plan,build,review,install,resume}/
 #   - terminal-target helper at ~/.local/bin/paperflow-target
 #   - ~/.claude/CLAUDE.md (only if missing)
 #
@@ -94,11 +94,11 @@ if command -v npm >/dev/null 2>&1; then
     fi
 fi
 
-# Optional: unlighthouse for site-audit (Phase 1c). Don't auto-install.
+# Optional: unlighthouse for paperflow-review's site-audit sub-flow. Don't auto-install.
 if command -v unlighthouse >/dev/null 2>&1; then
-    skip "unlighthouse: present (site-audit ready)"
+    skip "unlighthouse: present (site audits ready via paperflow-review)"
 else
-    skip "unlighthouse: not installed — site-audit needs: npm install -g @unlighthouse/cli puppeteer"
+    skip "unlighthouse: not installed — site audits in paperflow-review need: npm install -g @unlighthouse/cli puppeteer"
 fi
 
 ok "ready"
@@ -177,16 +177,12 @@ mkdir -p "$HOME/docs/paperflow/specs" \
          "$HOME/.local/log" \
          "$HOME/.openclaw/logs" \
          "$HOME/.claude/hooks" \
-         "$HOME/.claude/skills/grill-plan" \
+         "$HOME/.claude/skills/paperflow-goal" \
+         "$HOME/.claude/skills/paperflow-plan" \
+         "$HOME/.claude/skills/paperflow-build" \
+         "$HOME/.claude/skills/paperflow-review" \
          "$HOME/.claude/skills/paperflow-install" \
-         "$HOME/.claude/skills/discuss" \
-         "$HOME/.claude/skills/pre-flight-capture" \
-         "$HOME/.claude/skills/write-changelog" \
-         "$HOME/.claude/skills/mission-create" \
-         "$HOME/.claude/skills/mission-snapshot" \
-         "$HOME/.claude/skills/mission-continue" \
-         "$HOME/.claude/skills/paperflow-review-doc" \
-         "$HOME/.claude/skills/site-audit" \
+         "$HOME/.claude/skills/paperflow-resume" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -418,7 +414,7 @@ fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in grill-plan paperflow-install discuss pre-flight-capture write-changelog mission-create mission-snapshot mission-continue paperflow-review-doc site-audit; do
+for s in paperflow-goal paperflow-plan paperflow-build paperflow-review paperflow-install paperflow-resume; do
     if [ -f "$REPO/skills/$s/SKILL.md" ]; then
         mkdir -p "$HOME/.claude/skills/$s"
         cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -600,16 +596,12 @@ log "Status"
     [ -x "$HOME/.claude/hooks/auto-open-doc.sh" ]      && ok "open hook     : executable" || err "open hook     : missing"
     [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
     [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
-    [ -f "$HOME/.claude/skills/grill-plan/SKILL.md" ]         && ok "grill skill   : present"    || err "grill skill   : missing"
+    [ -f "$HOME/.claude/skills/paperflow-goal/SKILL.md" ]     && ok "goal skill    : present"    || err "goal skill    : missing"
+    [ -f "$HOME/.claude/skills/paperflow-plan/SKILL.md" ]     && ok "plan skill    : present"    || err "plan skill    : missing"
+    [ -f "$HOME/.claude/skills/paperflow-build/SKILL.md" ]    && ok "build skill   : present"    || err "build skill   : missing"
+    [ -f "$HOME/.claude/skills/paperflow-review/SKILL.md" ]   && ok "review skill  : present"    || err "review skill  : missing"
     [ -f "$HOME/.claude/skills/paperflow-install/SKILL.md" ]  && ok "install skill : present"    || err "install skill : missing"
-    [ -f "$HOME/.claude/skills/discuss/SKILL.md" ]            && ok "discuss skill : present"    || err "discuss skill : missing"
-    [ -f "$HOME/.claude/skills/pre-flight-capture/SKILL.md" ] && ok "pre-flight    : present"    || err "pre-flight    : missing"
-    [ -f "$HOME/.claude/skills/write-changelog/SKILL.md" ]    && ok "changelog skill: present"   || err "changelog skill: missing"
-    [ -f "$HOME/.claude/skills/mission-create/SKILL.md" ]     && ok "mission-create : present"    || err "mission-create : missing"
-    [ -f "$HOME/.claude/skills/mission-snapshot/SKILL.md" ]   && ok "mission-snap.  : present"    || err "mission-snap.  : missing"
-    [ -f "$HOME/.claude/skills/mission-continue/SKILL.md" ]   && ok "mission-cont.  : present"    || err "mission-cont.  : missing"
-    [ -f "$HOME/.claude/skills/paperflow-review-doc/SKILL.md" ] && ok "review skill  : present"    || err "review skill  : missing"
-    [ -f "$HOME/.claude/skills/site-audit/SKILL.md" ]         && ok "site-audit skill: present"   || err "site-audit skill: missing"
+    [ -f "$HOME/.claude/skills/paperflow-resume/SKILL.md" ]   && ok "resume skill  : present"    || err "resume skill  : missing"
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
@@ -635,7 +627,7 @@ printf '\033[1;33m━━━━━━━━━━━━━━━━━━━━�
 printf '⚠  RESTART CLAUDE CODE  before testing.\n'
 printf '   Already-running sessions do NOT pick up the newly installed:\n'
 printf '     • hooks         (run /hooks to reload without restarting)\n'
-printf '     • skills        (grill-plan, discuss, mission-*, etc. — restart only)\n'
+printf '     • skills        (paperflow-goal/plan/build/review/install/resume — restart only)\n'
 printf '     • CLAUDE.md     (loaded once at session start)\n'
 printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n'
 
