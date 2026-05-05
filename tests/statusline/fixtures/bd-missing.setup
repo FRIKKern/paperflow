@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pointers exist (and reference the mock-bd's known IDs), but bd is not on
+# PATH — the statusline must silent-skip the goal/phase/task resolution and
+# render the v8 line.
+echo "bd-a1b2"   > "$GOALREPO/.paperflow/active-goal"
+echo "bd-a1b2.2" > "$GOALREPO/.paperflow/active-phase"
