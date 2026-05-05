@@ -2,6 +2,48 @@
 
 When something is complicated, lead with a diagram and concrete details. Don't underestimate what I know — let me ask if I need clarification. Every stone turned, but lean. Plain words. No bloat, no throat-clearing, no metaphors that don't earn their keep.
 
+# What paperflow is
+
+paperflow runs in **one Claude Code instance** — the orchestrator. That single instance creates Goals, designs the task graph, dispatches subagents to do focused work, claims Tasks atomically in Beads while a subagent runs, closes them on verification, and routes browser button clicks back into its own session via the bridge. The orchestrator's job is *context*: knowing the active Goal, the active Phase within it, the currently claimed Task, the dependency graph above and below it, and the ground truth in Beads.
+
+The orchestrator never does long-form work itself — it delegates. `paperflow-plan`, `paperflow-build`, `paperflow-review` all spawn subagents for the actual writing, coding, reviewing. The orchestrator reads the next ready Task within the active phase, claims it in Beads, hands a focused prompt to a subagent with the Task ID and goal+phase context in scope, waits for verified output, then closes the Task. When the active phase empties, the orchestrator advances to the next phase. The bridge is the only inbound channel; subagent fan-out is the only outbound channel; Beads is the only persistent state.
+
+# Goals + Phases + Tasks
+
+The hierarchy is **Goal → Phase → Task**, mapped 1:1 to Beads' native hierarchical IDs (`bd-a1b2.1.1`). Every non-trivial Goal opens with three default phases — **pre-flight**, **build**, **review** — and each phase holds the work-tasks for that stretch.
+
+| Layer | Beads kind | Example ID | Lives at |
+|---|---|---|---|
+| Goal  | `kind:goal`  | `bd-a1b2`     | top-level Beads task |
+| Phase | `kind:phase` | `bd-a1b2.2`   | child of the goal-task |
+| Task  | (work-task)  | `bd-a1b2.2.3` | child of the phase-task |
+
+Two pointer files in `<repo>/.paperflow/` track what's active in this checkout:
+
+    <repo>/.paperflow/active-goal     # one line: bd-a1b2
+    <repo>/.paperflow/active-phase    # one line: bd-a1b2.2
+
+Lookup walks up from cwd to the nearest `.paperflow/`. When neither file exists anywhere up to `/`, there's no active goal/phase — paperflow falls back to whatever-Goal-is-newest behaviour. Both pointers are written by `paperflow-goal` (on Goal creation) and `paperflow-resume` (on switch).
+
+# The six skills
+
+Six skills, all `paperflow-*` prefixed. The cap is hit exactly — adding a new skill requires removing or merging an existing one. Each one delegates the actual work to a subagent; the skill body is what the orchestrator knows about Goal/Phase/Task context, what subagent prompt it produces, and what Beads mutations bracket the dispatch.
+
+| Skill | One-sentence purpose |
+|---|---|
+| `paperflow-goal`    | Open / snapshot / archive a Goal — orchestrator creates the goal-task with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review), sets the two pointer files, snapshots full state to HTML. |
+| `paperflow-plan`    | The signature paperflow move — orchestrator delegates to a subagent that drafts a plan, grills it with 8–15 pointed questions, revises with the user. The result becomes work-tasks linked into the active phase. |
+| `paperflow-build`   | Orchestrator claims the next ready task in the active phase, delegates execution to a subagent in that Task's context, verifies on return, closes. Advances the active-phase pointer when the current phase empties. |
+| `paperflow-review`  | Orchestrator opens a review-task linked to its parent build-task, delegates the review to a subagent. Closes on approval; reopens the build-task on rejection. Site audits live here too. |
+| `paperflow-install` | Bootstrap Beads, install / upgrade paperflow, write a new skill (delegated), write a changelog. The "what is paperflow?" entry point. |
+| `paperflow-resume`  | Mirrors Claude Code's `/resume` — list Goals, user picks, the active-goal pointer flips, the active-phase pointer defaults to the first incomplete phase, the Goal HTML opens via the cmux tab-reuse contract. |
+
+# Beads — task layer
+
+paperflow uses Beads (`bd`) as the system of record for goals, phases, and tasks. Goals live as Beads tasks tagged `kind:goal`; phases as `kind:phase` children; work-tasks as children of phases. `paperflow-build` claims tasks via `bd update <id> --claim` and closes via `bd update <id> --close`. `bd ready --label goal-<slug>:phase-<name>` returns the next ready work-task within the active phase.
+
+Install: `brew install beads` or `npm i -g beads`. Per-repo init: `paperflow-bd-init` (run once on first Goal in a repo).
+
 # Specs, plans, design docs
 
 Write them as standalone HTML files in `~/docs/paperflow/{specs,plans,grills}/`, not Markdown. Mermaid via CDN script. Article-style typography (ingress, brødtekst, captioned figures, serif body, sans headings) — never ship inline `<style>` blocks; the typography lives in the shared stylesheet. Each doc links it once from `<head>`:
@@ -21,8 +63,8 @@ End every spec / plan / grill HTML with a one-line `<script src="/paperflow/_lib
 
 | Doc type | Primary | Secondary |
 |---|---|---|
-| `/specs/*.html` | Create plan from this spec | Grill the spec |
-| `/plans/*.html` | Build this plan | Grill the plan |
+| `/specs/*.html`  | Create plan from this spec  | Grill the spec |
+| `/plans/*.html`  | Build this plan             | Grill the plan |
 | `/grills/*.html` | Submit (handled by `_lib/grill.js`) | — |
 
 Buttons POST to `__BR_LABEL__` (LaunchAgent on `localhost:8766`), which routes the message into the originating terminal tab via AppleScript / tmux / iTerm so I see the prompt land where I'm working.
@@ -38,23 +80,33 @@ Get the target via:
 
     ~/.local/bin/paperflow-target
 
+## Live-render
+
+Live-render is **mandatory and on by default** for every paperflow HTML — `doc.js` injects `live-render.{css,js}` on every load. The script itself short-circuits when `location.hostname` isn't in the allowlist (`localhost`, `127.0.0.1`, `::1`), so printed PDFs, emailed copies, and USB exports never try to open a WebSocket they can't reach. To opt out from a specific page (e.g. a fixed-snapshot demo), set:
+
+    <script>window.PAPERFLOW_NO_LIVE_RENDER = true;</script>
+
+…before the `doc.js` include.
+
 ## Grills (plan stress-tests)
 
-Grills use the `grill-plan` skill — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
+Grills are the stress-test phase of `paperflow-plan` — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
 
-# Beads — task layer
+# Statusline
 
-paperflow uses Beads (`bd`) as the system of record for goals, phases, and tasks. Goals live as Beads tasks tagged `kind:goal`; phases as `kind:phase` children; work-tasks as children of phases. The `paperflow-build` skill claims tasks via `bd update <id> --claim`, closes via `bd close <id>`. `bd ready --label goal-<slug>` returns what to work next.
+When this repo has an active goal (`<repo>/.paperflow/active-goal` exists), the bottom-bar statusline shows the goal slug, the active phase + position in the phase sequence, and the currently claimed Task with progress through the active phase. No setup needed beyond `paperflow-goal` having created the pointer files. The shape, at full width:
 
-Install: `brew install beads` or `npm i -g beads`. Per-repo init: `paperflow-bd-init`.
+    137,420 / 1M · 1209d022 · onboarding-revamp · ▸ phase 2/3: build · ▸ bd-a1b2.2.3 wire-bridge · 4/9 · main
+
+The statusline composes from a pre-rendered cache at `~/.paperflow/statusline.txt` (written by every Beads-mutating skill on claim/close); when stale, it falls through to live composition via `bd show / bd list --json`. Width-driven truncation drops phase first below 120 cols, then the task subsegments, then branch, project, session-id, in that order.
 
 # Doc review (mandatory)
 
-Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/paperflow/{specs,plans,grills,notes,changelog,missions,audits}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Writing skills (discuss, grill-plan, mission-create, mission-snapshot, write-changelog, pre-flight-capture) call the `paperflow-review-doc` skill as their final step — Layer 1 is `paperflow-validate`, Layer 2 is an optional browser visual check via `visual-investigator` for high-stakes docs. Iterate up to 3 times to fix syntax errors before handing the URL to the user.
+Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/paperflow/{specs,plans,grills,notes,changelog,goals,audits}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Iterate up to 3 times to fix syntax errors before handing the URL to the user.
 
 # Visual evidence
 
-When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, transition, color, spacing, typography, component — run `pre-flight-capture` before drafting the plan and embed the resulting `<figure>` blocks in a "Pre-flight evidence" H2 near the top. After the build, run `pre-flight-capture` with `mode: after` to fill in the post-flight half, then run `write-changelog` to render the proof page at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html` with before/after side-by-side.
+When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styling, animation, hover, focus, layout, transition, color, spacing, typography, component — capture pre-flight evidence before drafting the plan and embed the resulting `<figure>` blocks in a "Pre-flight evidence" H2 near the top. Pre-flight capture is folded into `paperflow-build`'s entry — it lands naturally in the *pre-flight* phase. After the build, capture the post-flight half and render the proof page at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html` with before/after side-by-side.
 
 - Captures live in `~/docs/paperflow/captures/<date>-<topic-slug>/` (shared across before + after; referenced by the changelog via relative `../captures/.../`).
 - Web surfaces use the `visual-investigator` subagent (Chrome DevTools MCP). Native macOS uses OpenClaw + `screencapture -v`.
@@ -62,13 +114,13 @@ When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styli
 
 ## Visual capture (visual-investigator)
 
-`visual-investigator` is the unified expert across four backends: Chrome DevTools MCP (single page, default), Unlighthouse (whole-site audits via `~/.local/bin/paperflow-audit-site`), BrowserBase (cloud parallel + cross-browser, future), and OpenClaw + `screencapture` (native macOS). Skills (`pre-flight-capture`, `site-audit`, `parallel-capture`) brief the agent with a structured `{surface, target, captures_needed, …}` JSON; the agent picks the right backend per the matrix in `~/.claude/agents/visual-investigator.md` and returns `{ok, artifacts, notes?}`. Skills stay thin orchestrators — they never name a backend, the agent never re-parses natural language.
+`visual-investigator` is the unified expert across four backends: Chrome DevTools MCP (single page, default), Unlighthouse (whole-site audits via `~/.local/bin/paperflow-audit-site`), BrowserBase (cloud parallel + cross-browser, future), and OpenClaw + `screencapture` (native macOS). The skill briefs the agent with a structured `{surface, target, captures_needed, …}` JSON; the agent picks the right backend per the matrix in `~/.claude/agents/visual-investigator.md` and returns `{ok, artifacts, notes?}`. Skills stay thin orchestrators — they never name a backend, the agent never re-parses natural language.
 
-For whole-site audits specifically, the `site-audit` skill triggers on "audit my site", "lighthouse on X", "SEO check", "show me every page", "site overview". Output lands at `~/docs/paperflow/audits/<date>-<slug>/index.html`. Pre-req (opt-in): `npm install -g @unlighthouse/cli puppeteer`.
+For whole-site audits specifically, the `paperflow-review` skill triggers on "audit my site", "lighthouse on X", "SEO check", "show me every page", "site overview". Output lands at `~/docs/paperflow/audits/<date>-<slug>/index.html`. Pre-req (opt-in): `npm install -g @unlighthouse/cli puppeteer`.
 
-# Subagent-driven workflow (default)
+# Subagent-driven workflow (the architecture)
 
-Default to delegating non-trivial work to subagents (Task / Agent tool, appropriate `subagent_type`). The main session is for orchestration, decisions, and synthesis — never for raw tool output, file dumps, or exploration.
+paperflow IS subagent-driven — the orchestrator delegates every non-trivial step to a subagent (Task / Agent tool, appropriate `subagent_type`). This is no longer guidance; it's the architecture. The main session is for orchestration, decisions, and synthesis — never for raw tool output, file dumps, or exploration.
 
 | Delegate to subagent | Keep in main session |
 |---|---|
@@ -77,21 +129,13 @@ Default to delegating non-trivial work to subagents (Task / Agent tool, appropri
 | Long-form writing (the body of specs/plans/grills/notes) | Conversation with me |
 | Tool-heavy work (>500 tokens of raw output) | Quick back-and-forth |
 
-**Why:** A 1M context window degrades past ~50%. Subagents burn their own context on the work and return only the distilled result. The main session always has a perfectly synthesized view on top. More expensive in tokens, much better behavior over long sessions.
+**Why:** A 1M context window degrades past ~50%. Subagents burn their own context on the work and return only the distilled result. The orchestrator always has a perfectly synthesized view on top. More expensive in tokens, much better behavior over long sessions.
 
-**For paperflow:** every skill (`discuss`, `grill-plan`, `paperflow-write-spec`, `paperflow-write-plan`) spawns a subagent to produce the HTML artifact. Main session presents the URL + 1–3 sentence summary.
+**For paperflow:** `paperflow-plan` spawns subagents for draft + grill; `paperflow-build` spawns one per claimed task; `paperflow-review` spawns one per review-task. The orchestrator surfaces the URL + 1–3 sentence summary.
 
 **Default subagent_type:** `general-purpose` for most work. `Explore` for read-only codebase searches. `Plan` for architectural design. Specialized agents when their description fits.
 
 **Brief subagents like a smart colleague:** explain the goal, what's already known, what artifact to produce. Cap response length when relevant.
-
-# Missions
-
-When starting any non-trivial multi-artifact piece of work (will span multiple specs / plans / grills / changelogs), run `mission-create` first. It writes an HTML + JSON pair to `~/docs/paperflow/missions/` and marks the mission active in `~/.paperflow/active-mission`.
-
-When context is filling up, before any big handoff, or before invoking `mission-continue`, run `mission-snapshot`. It refreshes the active mission's HTML + JSON sidecar with the current artifacts, progress, decisions, open questions, and a fresh `resume_prompt`.
-
-Use `mission-continue` to spawn a fresh Claude Code session in a new tab with the full mission context (it calls snapshot first, then invokes `~/.local/bin/paperflow-continue <slug>`). The launcher detects tmux / iTerm / Apple Terminal and runs `claude --dangerously-skip-permissions <resume_prompt>` in the new tab. Phase 1 only — kitty / WezTerm / Ghostty fall back to opening a new Apple Terminal window.
 
 # OpenClaw delegation
 

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Mock bd binary for statusline fixture tests.
+#
+# Returns canned JSON for the bd verbs the statusline calls:
+#
+#   bd show <id> --json
+#       Returns a single JSON object with .id + .labels[].
+#       Known IDs:
+#           bd-a1b2     → goal-task with kind:goal + goal-onboarding-revamp
+#           bd-a1b2.1   → phase-task pre-flight
+#           bd-a1b2.2   → phase-task build (the active phase)
+#           bd-a1b2.3   → phase-task review
+#       Anything else: prints empty + exits 1 (statusline treats this as
+#       "pointer references a deleted task" and falls through silently).
+#
+#   bd list --label kind:phase --label goal-<slug> --json
+#       Returns a 3-element array of phase-tasks for the goal, ordered
+#       pre-flight / build / review (matches creation order = id order).
+#
+#   bd list --label phase-<name> --label goal-<slug> --status doing --json
+#       Returns the currently-doing work-task — bd-a1b2.2.3 wire-bridge for
+#       phase-build, empty array otherwise.
+#
+#   bd list --label phase-<name> --label goal-<slug> --json
+#       Returns the work-tasks for the named phase — used for tasks-done /
+#       tasks-total counts. phase-build has 9 tasks, 4 closed.
+#
+# The shim never speaks Beads' real protocol. It's just enough to drive the
+# statusline through its goal/phase/task code paths without spinning up a
+# real Beads database in the test environment.
+
+set -eu
+
+# Helper: emit JSON + exit 0.
+emit() { printf '%s' "$1"; exit 0; }
+
+# Parse subcommand.
+sub="${1:-}"
+shift || true
+
+case "$sub" in
+    show)
+        # First positional is the id, then we ignore --json (always present).
+        id="${1:-}"
+        case "$id" in
+            bd-a1b2)
+                emit '{"id":"bd-a1b2","title":"Revamp onboarding","labels":["kind:goal","goal-onboarding-revamp"],"status":"open"}'
+                ;;
+            bd-a1b2.1)
+                emit '{"id":"bd-a1b2.1","title":"pre-flight","labels":["kind:phase","goal-onboarding-revamp","phase-pre-flight"],"status":"closed"}'
+                ;;
+            bd-a1b2.2)
+                emit '{"id":"bd-a1b2.2","title":"build","labels":["kind:phase","goal-onboarding-revamp","phase-build"],"status":"open"}'
+                ;;
+            bd-a1b2.3)
+                emit '{"id":"bd-a1b2.3","title":"review","labels":["kind:phase","goal-onboarding-revamp","phase-review"],"status":"open"}'
+                ;;
+            *)
+                # Unknown id — exit 1 with empty stdout.
+                exit 1
+                ;;
+        esac
+        ;;
+    list)
+        # Parse the labels + status off the remaining args.
+        labels=""
+        status=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --label)
+                    shift
+                    labels="${labels}|${1:-}"
+                    ;;
+                --status)
+                    shift
+                    status="${1:-}"
+                    ;;
+                --json|*) ;;
+            esac
+            shift || true
+        done
+        # Match against known label combos.
+        case "$labels" in
+            *"|kind:phase"*"|goal-onboarding-revamp"*|*"|goal-onboarding-revamp"*"|kind:phase"*)
+                emit '[{"id":"bd-a1b2.1","title":"pre-flight","labels":["kind:phase","goal-onboarding-revamp","phase-pre-flight"],"status":"closed"},{"id":"bd-a1b2.2","title":"build","labels":["kind:phase","goal-onboarding-revamp","phase-build"],"status":"open"},{"id":"bd-a1b2.3","title":"review","labels":["kind:phase","goal-onboarding-revamp","phase-review"],"status":"open"}]'
+                ;;
+        esac
+        case "$labels" in
+            *"|phase-build"*"|goal-onboarding-revamp"*|*"|goal-onboarding-revamp"*"|phase-build"*)
+                if [ "$status" = "doing" ]; then
+                    emit '[{"id":"bd-a1b2.2.3","title":"wire-bridge","status":"doing","labels":["phase-build","goal-onboarding-revamp"]}]'
+                else
+                    # All work-tasks under phase-build: 9 total, 4 closed.
+                    emit '[{"id":"bd-a1b2.2.1","title":"inventory","status":"closed"},{"id":"bd-a1b2.2.2","title":"sketch","status":"closed"},{"id":"bd-a1b2.2.3","title":"wire-bridge","status":"doing"},{"id":"bd-a1b2.2.4","title":"flow A","status":"open"},{"id":"bd-a1b2.2.5","title":"flow B","status":"open"},{"id":"bd-a1b2.2.6","title":"flow C","status":"open"},{"id":"bd-a1b2.2.7","title":"copy pass","status":"closed"},{"id":"bd-a1b2.2.8","title":"a11y","status":"closed"},{"id":"bd-a1b2.2.9","title":"loose end","status":"open"}]'
+                fi
+                ;;
+        esac
+        # Default: empty list.
+        emit '[]'
+        ;;
+    *)
+        # Unknown verb — exit 0, empty stdout. The statusline treats this as
+        # "no goal info available" and renders the v8 line without segments.
+        exit 0
+        ;;
+esac

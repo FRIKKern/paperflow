@@ -21,6 +21,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 FIXDIR="$REPO/tests/statusline/fixtures"
 SCRIPT="$REPO/lib/statusline.sh"
 LIMITS_SRC="$REPO/lib/statusline-limits.json"
+MOCK_BD_DIR="$REPO/tests/statusline/mock-bd-bin"
 
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -81,6 +82,19 @@ for t in bash cat mktemp tr sed head tail stat date find shasum git printf awk b
     fi
 done
 
+# A bin dir containing every utility EXCEPT bd, for the bd-missing fixture.
+# jq is included so the v8 line still renders; bd is omitted so the
+# statusline's command -v bd check fails and the goal/phase/task code path
+# is silent-skipped.
+NOBD="$SCAFFOLD/nobd-bin"
+mkdir -p "$NOBD"
+for t in bash cat mktemp tr sed head tail stat date find shasum git printf awk basename touch mv rm mkdir cp pwd dirname env id chmod ls cut sleep sort wc jq; do
+    src=$(command -v "$t" 2>/dev/null || true)
+    if [ -n "$src" ] && [ "$(basename "$src")" != "bd" ]; then
+        ln -s "$src" "$NOBD/$t" 2>/dev/null || true
+    fi
+done
+
 # ─── Iterate fixtures ──────────────────────────────────────────────────
 FAIL=0
 PASS=0
@@ -105,14 +119,37 @@ for in_json in "$FIXDIR"/*.in.json; do
     mkdir -p "$tmphome/.paperflow"
     cp "$LIMITS_SRC" "$tmphome/.paperflow/statusline-limits.json"
 
+    # Per-fixture GOALREPO — a fresh git repo named "paperflow" on branch
+    # "main", into which .paperflow/active-goal + .paperflow/active-phase can
+    # be written by the optional <fixture>.setup. Distinct from the shared
+    # GITREPO so pointer files don't leak between fixtures.
+    GOALREPO="$tmphome/paperflow-goal"
+    mkdir -p "$GOALREPO"
+    (
+        cd "$GOALREPO"
+        git init -q -b main . 2>/dev/null || { git init -q . && git checkout -q -b main 2>/dev/null; }
+        git -c user.email=t@t -c user.name=t commit --allow-empty -q -m init >/dev/null 2>&1 || true
+    ) || true
+    mkdir -p "$GOALREPO/.paperflow"
+
+    # Optional per-fixture setup script. Receives GOALREPO + tmphome in env.
+    setup_script="$FIXDIR/$name.setup"
+    if [ -f "$setup_script" ]; then
+        # shellcheck disable=SC1090
+        ( export GOALREPO="$GOALREPO"; export PFHOME="$tmphome"; bash "$setup_script" ) || true
+    fi
+
     # Substitute placeholders.
     substituted=$(mktemp) || { red "FAIL: $name — mktemp substituted"; rm -rf "$tmphome"; FAIL=1; continue; }
     sed -e "s|__REPO__|$REPO|g" \
         -e "s|__GITREPO__|$GITREPO|g" \
+        -e "s|__GOALREPO__|$GOALREPO|g" \
         -e "s|__NOGITDIR__|$NOGITDIR|g" \
         -e "s|__ANSIBIN__|$ANSIBIN|g" \
         -e "s|__UNREADABLE__|$UNREADABLE|g" \
         -e "s|__NOJQ__|$NOJQ|g" \
+        -e "s|__NOBD__|$NOBD|g" \
+        -e "s|__MOCKBD__|$MOCK_BD_DIR|g" \
         "$in_json" > "$substituted"
 
     # Substitute placeholders in env file too (so __ANSIBIN__ becomes a real path).
@@ -122,10 +159,13 @@ for in_json in "$FIXDIR"/*.in.json; do
         if [ -n "$envfile_resolved" ]; then
             sed -e "s|__REPO__|$REPO|g" \
                 -e "s|__GITREPO__|$GITREPO|g" \
+                -e "s|__GOALREPO__|$GOALREPO|g" \
                 -e "s|__NOGITDIR__|$NOGITDIR|g" \
                 -e "s|__ANSIBIN__|$ANSIBIN|g" \
                 -e "s|__UNREADABLE__|$UNREADABLE|g" \
                 -e "s|__NOJQ__|$NOJQ|g" \
+                -e "s|__NOBD__|$NOBD|g" \
+                -e "s|__MOCKBD__|$MOCK_BD_DIR|g" \
                 "$envfile" > "$envfile_resolved"
         fi
     fi
