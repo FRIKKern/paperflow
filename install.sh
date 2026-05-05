@@ -12,8 +12,53 @@
 #
 # After install, open /hooks once in any running Claude Code session
 # (or restart) so hooks are picked up.
+#
+# ── Flags ──────────────────────────────────────────────────────────
+#   --with-openclaw       Append the OpenClaw delegation fragment to
+#                         ~/.claude/CLAUDE.md. Verifies the binary
+#                         exists at /opt/homebrew/bin/openclaw and
+#                         warns (non-fatal) if missing. Does NOT
+#                         install OpenClaw.
+#   --with-browserbase    Append the BrowserBase fragment. No binary
+#                         check — BrowserBase is a cloud API.
+#   --with-unlighthouse   Append the Unlighthouse fragment. Offers to
+#                         `npm i -g @unlighthouse/cli puppeteer` if
+#                         not already on PATH (asks first).
+#   --reset               Tarball ~/.claude/{CLAUDE.md, hooks, skills}
+#                         and ~/.paperflow/ to
+#                         ~/.paperflow/backups/<YYYY-MM-DD-HHMMSS>.tar.gz,
+#                         then DELETE those paths and re-run install
+#                         fresh. Combine with --with-* flags to pick
+#                         the integration set for the new install.
+#
+# Default install (no flags) is lean: only the core paperflow CLAUDE.md
+# is rendered — no integration prose for OpenClaw / BrowserBase /
+# Unlighthouse unless explicitly opted in.
 
 set -euo pipefail
+
+# ── Flag parsing ───────────────────────────────────────────────────
+WITH_OPENCLAW=0
+WITH_BROWSERBASE=0
+WITH_UNLIGHTHOUSE=0
+DO_RESET=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-openclaw)     WITH_OPENCLAW=1 ;;
+        --with-browserbase)  WITH_BROWSERBASE=1 ;;
+        --with-unlighthouse) WITH_UNLIGHTHOUSE=1 ;;
+        --reset)             DO_RESET=1 ;;
+        --help|-h)
+            sed -n '2,40p' "$0"
+            exit 0
+            ;;
+        *)
+            printf 'Unknown flag: %s\n' "$arg" >&2
+            printf 'See --help for the supported flags.\n' >&2
+            exit 1
+            ;;
+    esac
+done
 
 log()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
@@ -22,6 +67,53 @@ err()  { printf '  \033[1;31m✗\033[0m %s\n' "$*" >&2; }
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 USER_NAME="$(id -un)"
+
+# ── Reset: tarball-backup + nuke before fresh install ──────────────
+# Runs BEFORE everything else so the rest of install.sh sees a clean
+# slate and the create-if-missing gate on CLAUDE.md fires fresh.
+if [ "$DO_RESET" -eq 1 ]; then
+    log "Reset"
+    BACKUP_DIR="$HOME/.paperflow/backups"
+    mkdir -p "$BACKUP_DIR"
+    TS="$(date +%Y-%m-%d-%H%M%S)"
+    BACKUP_FILE="$BACKUP_DIR/$TS.tar.gz"
+
+    # Build a list of paths that actually exist; tar with --files-from
+    # so a missing path doesn't abort the whole archive.
+    BACKUP_LIST="$(mktemp)"
+    for p in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/hooks" "$HOME/.claude/skills" "$HOME/.paperflow"; do
+        [ -e "$p" ] && printf '%s\n' "$p" >> "$BACKUP_LIST"
+    done
+    if [ -s "$BACKUP_LIST" ]; then
+        # Use absolute paths in the archive so untar to / restores in place.
+        tar -czf "$BACKUP_FILE" --files-from "$BACKUP_LIST" 2>/dev/null \
+            && ok "backup → $BACKUP_FILE" \
+            || err "backup failed — bailing before any deletions"
+        if [ ! -f "$BACKUP_FILE" ]; then
+            rm -f "$BACKUP_LIST"
+            exit 2
+        fi
+    else
+        skip "nothing to back up (no live state)"
+    fi
+    rm -f "$BACKUP_LIST"
+
+    # Now delete the live state. Skip ~/.paperflow/backups so the
+    # archive we just wrote survives.
+    rm -f "$HOME/.claude/CLAUDE.md"
+    rm -rf "$HOME/.claude/hooks" "$HOME/.claude/skills"
+    if [ -d "$HOME/.paperflow" ]; then
+        find "$HOME/.paperflow" -mindepth 1 -maxdepth 1 \
+             ! -name backups -exec rm -rf {} + 2>/dev/null || true
+    fi
+    ok "wiped live state (CLAUDE.md, hooks, skills, .paperflow/*)"
+
+    # Re-create the major-version flag (also written below by the
+    # migration block, but having it here makes intent explicit).
+    mkdir -p "$HOME/.paperflow"
+    echo 2 > "$HOME/.paperflow/.major-version"
+    ok "version flag re-set to 2"
+fi
 
 # Configurable — defaults are reasonable. Override before running:
 #   LABEL_PREFIX=dev.youralias bash install.sh
@@ -99,6 +191,37 @@ if command -v unlighthouse >/dev/null 2>&1; then
     skip "unlighthouse: present (site audits ready via paperflow-review)"
 else
     skip "unlighthouse: not installed — site audits in paperflow-review need: npm install -g @unlighthouse/cli puppeteer"
+fi
+
+# Integration flag pre-flight — non-fatal, just visibility.
+if [ "$WITH_OPENCLAW" -eq 1 ]; then
+    if [ -x /opt/homebrew/bin/openclaw ]; then
+        ok "openclaw: present at /opt/homebrew/bin/openclaw"
+    else
+        skip "openclaw: --with-openclaw set but /opt/homebrew/bin/openclaw missing — fragment will still ship in CLAUDE.md"
+    fi
+fi
+if [ "$WITH_BROWSERBASE" -eq 1 ]; then
+    skip "browserbase: cloud API — fragment will ship in CLAUDE.md (set BROWSERBASE_API_KEY in your shell env)"
+fi
+if [ "$WITH_UNLIGHTHOUSE" -eq 1 ]; then
+    if ! command -v unlighthouse >/dev/null 2>&1; then
+        # Ask, don't auto-install.
+        if [ -t 0 ]; then
+            printf '  unlighthouse not on PATH. Install @unlighthouse/cli + puppeteer globally now? (y/N) '
+            read -r _ULH_ANSWER || _ULH_ANSWER=""
+            case "$_ULH_ANSWER" in
+                y|Y|yes|YES)
+                    "$(command -v npm)" install -g @unlighthouse/cli puppeteer >/dev/null \
+                        && ok "unlighthouse installed" \
+                        || err "unlighthouse install failed — fragment will still ship"
+                    ;;
+                *) skip "unlighthouse: skipping install — fragment will still ship in CLAUDE.md" ;;
+            esac
+        else
+            skip "unlighthouse: --with-unlighthouse set but stdin not a TTY — skipping auto-install"
+        fi
+    fi
 fi
 
 ok "ready"
@@ -559,13 +682,37 @@ else
 fi
 
 # ─── 11. CLAUDE.md (only if missing) ────────────────────────────────
+# Render lean core + append integration fragments for whichever
+# --with-* flags fired. After --reset the file is gone, so the
+# create-fresh branch fires naturally.
 log "~/.claude/CLAUDE.md"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
+
+render_claude_md() {
+    local dst="$1" tmp
+    tmp="$(mktemp)"
+    render "$REPO/claude-md.tmpl" "$tmp" ""
+    # Append fragments in a stable order: openclaw, browserbase, unlighthouse.
+    if [ "$WITH_OPENCLAW" -eq 1 ] && [ -f "$REPO/claude-md-fragments/openclaw.md" ]; then
+        printf '\n\n' >> "$tmp"
+        cat "$REPO/claude-md-fragments/openclaw.md" >> "$tmp"
+    fi
+    if [ "$WITH_BROWSERBASE" -eq 1 ] && [ -f "$REPO/claude-md-fragments/browserbase.md" ]; then
+        printf '\n\n' >> "$tmp"
+        cat "$REPO/claude-md-fragments/browserbase.md" >> "$tmp"
+    fi
+    if [ "$WITH_UNLIGHTHOUSE" -eq 1 ] && [ -f "$REPO/claude-md-fragments/unlighthouse.md" ]; then
+        printf '\n\n' >> "$tmp"
+        cat "$REPO/claude-md-fragments/unlighthouse.md" >> "$tmp"
+    fi
+    mv "$tmp" "$dst"
+}
+
 if [ -f "$CLAUDE_MD" ]; then
-    skip "exists (not overwriting — edit manually to refresh)"
+    skip "exists (not overwriting — edit manually to refresh, or re-run with --reset)"
 else
-    render "$REPO/claude-md.tmpl" "$CLAUDE_MD" ""
-    ok "written"
+    render_claude_md "$CLAUDE_MD"
+    ok "written (fragments: openclaw=$WITH_OPENCLAW browserbase=$WITH_BROWSERBASE unlighthouse=$WITH_UNLIGHTHOUSE)"
 fi
 
 # ─── 12. Status ─────────────────────────────────────────────────────
