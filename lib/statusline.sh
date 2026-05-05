@@ -31,6 +31,18 @@ SID_SHORT=""
 PROJECT=""
 BRANCH=""
 
+# Goal / phase / task segments — populated by resolve_goal_phase_task() when a
+# repo has .paperflow/active-goal + .paperflow/active-phase pointers and bd is
+# on PATH. Empty otherwise; truncate_to_width() drops them silently.
+GOAL_SLUG=""        # e.g. "onboarding-revamp"
+PHASE_NAME=""       # e.g. "build"
+PHASE_INDEX=""      # e.g. "2"  (1-based position among the goal's phase-tasks)
+PHASE_TOTAL=""      # e.g. "3"  (total phase-tasks under the goal)
+TASK_ID=""          # e.g. "bd-a1b2.2.3"
+TASK_TITLE=""       # e.g. "wire-bridge" (truncated to ~24 chars)
+TASKS_DONE=""       # closed work-tasks under the active phase
+TASKS_TOTAL=""      # total work-tasks under the active phase
+
 CACHE=""
 LIMITS_TSV=""
 LIMITS_DEFAULT=""
@@ -44,6 +56,12 @@ LIMITS_FILE="$PAPERFLOW_DIR/statusline-limits.json"
 LIMITS_CACHE="$CACHE_DIR/.limits-cache.txt"
 CLEANUP_STAMP="$CACHE_DIR/.last-cleanup"
 DEBUG_LOG="$PAPERFLOW_DIR/statusline-debug.log"
+
+# Pre-rendered cache: written by Beads-mutating skills, read here on the hot
+# path. If present and fresh (< 30 s since mtime), the renderer skips live
+# composition entirely and just cats the file.
+PRERENDER_CACHE="$PAPERFLOW_DIR/statusline.txt"
+PRERENDER_MAX_AGE=30
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -391,6 +409,126 @@ format_limit() {
     fi
 }
 
+# Walk up from CWD to nearest .paperflow/ directory; print its parent on stdout
+# (the "repo root" for paperflow purposes), or empty if none found. POSIX-ish.
+find_paperflow_repo_root() {
+    local dir="${1:-$CWD}"
+    [ -z "$dir" ] && return 0
+    [ -d "$dir" ] || return 0
+    while [ "$dir" != "/" ] && [ -n "$dir" ]; do
+        if [ -d "$dir/.paperflow" ]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+        dir=$(dirname "$dir" 2>/dev/null || echo "/")
+    done
+    return 0
+}
+
+# Resolve goal-task slug + phase-task name + phase index/total + claimed task
+# + task counts via `bd show` / `bd list --json`. Every bd call is wrapped to
+# fail silently — if Beads is unreachable, the IDs don't resolve, or any jq
+# pipeline errors, the corresponding globals stay empty and truncate_to_width()
+# drops the segments. The user never sees a "bd: command not found" leak into
+# the statusline.
+resolve_goal_phase_task() {
+    # Hard prerequisite: bd + jq on PATH.
+    command -v bd >/dev/null 2>&1 || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local repo_root
+    repo_root=$(find_paperflow_repo_root "$CWD")
+    [ -z "$repo_root" ] && return 0
+
+    local goal_pointer="$repo_root/.paperflow/active-goal"
+    local phase_pointer="$repo_root/.paperflow/active-phase"
+    [ -r "$goal_pointer" ] || return 0
+    [ -r "$phase_pointer" ] || return 0
+
+    local goal_id phase_id
+    goal_id=$(head -n 1 "$goal_pointer" 2>/dev/null | tr -d '[:space:]')
+    phase_id=$(head -n 1 "$phase_pointer" 2>/dev/null | tr -d '[:space:]')
+    [ -z "$goal_id" ] && return 0
+    [ -z "$phase_id" ] && return 0
+
+    # Goal slug: pick the goal-<slug> label off the goal-task.
+    local goal_json goal_slug
+    goal_json=$(bd show "$goal_id" --json 2>/dev/null) || return 0
+    [ -z "$goal_json" ] && return 0
+    goal_slug=$(printf '%s' "$goal_json" \
+        | jq -r '(.labels // [])[]? | select(startswith("goal-")) | sub("^goal-"; "")' 2>/dev/null \
+        | head -n 1)
+    [ -z "$goal_slug" ] && return 0
+
+    # Phase name: pick the phase-<name> label off the phase-task.
+    local phase_json phase_name
+    phase_json=$(bd show "$phase_id" --json 2>/dev/null) || return 0
+    [ -z "$phase_json" ] && return 0
+    phase_name=$(printf '%s' "$phase_json" \
+        | jq -r '(.labels // [])[]? | select(startswith("phase-")) | sub("^phase-"; "")' 2>/dev/null \
+        | head -n 1)
+    [ -z "$phase_name" ] && return 0
+
+    # Goal + phase resolved — commit them to the globals.
+    GOAL_SLUG="$goal_slug"
+    PHASE_NAME="$phase_name"
+
+    # Phase index/total: enumerate all phase-tasks under the goal in stable
+    # creation order (id sort), find the active phase's 1-based position.
+    local phase_list
+    phase_list=$(bd list --label "kind:phase" --label "goal-$goal_slug" --json 2>/dev/null) || phase_list=""
+    if [ -n "$phase_list" ]; then
+        local phases_total phases_idx
+        phases_total=$(printf '%s' "$phase_list" \
+            | jq -r 'length' 2>/dev/null || echo "")
+        # Position of phase_id in the list, 1-based. jq:
+        phases_idx=$(printf '%s' "$phase_list" \
+            | jq -r --arg pid "$phase_id" '
+                [.[] | .id] | (index($pid) // empty) | . + 1
+            ' 2>/dev/null || echo "")
+        # Numeric guards.
+        case "$phases_total" in ''|*[!0-9]*) phases_total="" ;; esac
+        case "$phases_idx"   in ''|*[!0-9]*) phases_idx=""   ;; esac
+        PHASE_TOTAL="${phases_total:-}"
+        PHASE_INDEX="${phases_idx:-}"
+    fi
+
+    # Claimed work-task within the active phase, if any. The phase-task id
+    # itself is bd-a1b2.2; its work-task children are bd-a1b2.2.* — query by
+    # the phase-<name> label for portability.
+    local doing_json doing_id doing_title
+    doing_json=$(bd list --label "phase-$phase_name" --label "goal-$goal_slug" --status doing --json 2>/dev/null) || doing_json=""
+    if [ -n "$doing_json" ]; then
+        doing_id=$(printf '%s' "$doing_json" \
+            | jq -r '(.[0].id // "")' 2>/dev/null || echo "")
+        doing_title=$(printf '%s' "$doing_json" \
+            | jq -r '(.[0].title // "")' 2>/dev/null || echo "")
+        if [ -n "$doing_id" ]; then
+            TASK_ID="$doing_id"
+            # Truncate to ~24 chars; sanitise control bytes.
+            TASK_TITLE=$(printf '%s' "$doing_title" \
+                | tr -d '\000-\037\177' \
+                | sed 's/[^[:print:]]//g' \
+                | cut -c1-24)
+        fi
+    fi
+
+    # Task progress within the active phase: total + closed.
+    local phase_tasks
+    phase_tasks=$(bd list --label "phase-$phase_name" --label "goal-$goal_slug" --json 2>/dev/null) || phase_tasks=""
+    if [ -n "$phase_tasks" ]; then
+        local t_total t_done
+        t_total=$(printf '%s' "$phase_tasks" \
+            | jq -r 'length' 2>/dev/null || echo "")
+        t_done=$(printf '%s' "$phase_tasks" \
+            | jq -r '[.[] | select(.status == "closed")] | length' 2>/dev/null || echo "")
+        case "$t_total" in ''|*[!0-9]*) t_total="" ;; esac
+        case "$t_done"  in ''|*[!0-9]*) t_done=""  ;; esac
+        TASKS_TOTAL="${t_total:-}"
+        TASKS_DONE="${t_done:-}"
+    fi
+}
+
 # Truncate-aware formatting. Reads $COLUMNS or `tput cols`. Produces stdout.
 truncate_to_width() {
     local cols="${COLUMNS:-}"
@@ -436,16 +574,87 @@ truncate_to_width() {
         fi
     fi
 
-    # Project at >= 60 (dimmed).
-    if [ "$cols" -ge 60 ] && [ -n "$PROJECT" ]; then
+    # Project at >= 60 (dimmed). When a goal is active, prefer the goal slug
+    # over the cwd-derived project name — same screen real estate, more useful
+    # signal. Falls back to PROJECT when GOAL_SLUG is empty.
+    local project_field=""
+    if [ -n "$GOAL_SLUG" ]; then
+        project_field="$GOAL_SLUG"
+    elif [ -n "$PROJECT" ]; then
+        project_field="$PROJECT"
+    fi
+    if [ "$cols" -ge 60 ] && [ -n "$project_field" ]; then
         if [ -n "$out" ]; then
-            out="${out}${sep}${dim}${PROJECT}${reset}"
+            out="${out}${sep}${dim}${project_field}${reset}"
         else
-            out="${dim}${PROJECT}${reset}"
+            out="${dim}${project_field}${reset}"
         fi
     fi
 
-    # Branch at >= 80 (undimmed — secondary signal already).
+    # ▸ task at >= 80 — the actionable segment. Format depends on what we
+    # have: "▸ <id> <title> · <done>/<total>" full, or "▸ <done>/<total>"
+    # bare when no task is claimed.
+    local have_task=0
+    if [ "$cols" -ge 80 ] && [ -n "$GOAL_SLUG" ]; then
+        local task_field=""
+        if [ -n "$TASK_ID" ]; then
+            task_field="▸ ${TASK_ID}"
+            [ -n "$TASK_TITLE" ] && task_field="${task_field} ${TASK_TITLE}"
+            if [ -n "$TASKS_TOTAL" ]; then
+                task_field="${task_field}${sep}${TASKS_DONE:-0}/${TASKS_TOTAL}"
+            fi
+            have_task=1
+        elif [ -n "$TASKS_TOTAL" ]; then
+            task_field="▸ ${TASKS_DONE:-0}/${TASKS_TOTAL}"
+            have_task=1
+        fi
+        if [ "$have_task" = "1" ]; then
+            if [ -n "$out" ]; then
+                out="${out}${sep}${task_field}"
+            else
+                out="$task_field"
+            fi
+        fi
+    fi
+
+    # ▸ phase at >= 120 — full line including phase number/total + name. When
+    # PHASE_INDEX/TOTAL aren't resolvable (phase-list query failed) we still
+    # render "▸ phase: <name>" rather than dropping the phase entirely.
+    if [ "$cols" -ge 120 ] && [ -n "$GOAL_SLUG" ] && [ -n "$PHASE_NAME" ]; then
+        local phase_field=""
+        if [ -n "$PHASE_INDEX" ] && [ -n "$PHASE_TOTAL" ]; then
+            phase_field="▸ phase ${PHASE_INDEX}/${PHASE_TOTAL}: ${PHASE_NAME}"
+        else
+            phase_field="▸ phase: ${PHASE_NAME}"
+        fi
+        # Insert the phase BEFORE the task segment. The append-style build
+        # above placed task right after project; to keep the spec's order
+        # (project · phase · task · branch) we splice phase in between.
+        # Easiest: rebuild from scratch with the same width gates.
+        out="$tokens_field"
+        if [ "$cols" -ge 40 ] && [ -n "$SID_SHORT" ]; then
+            out="${out}${sep}${dim}${SID_SHORT}${reset}"
+        fi
+        if [ -n "$project_field" ]; then
+            out="${out}${sep}${dim}${project_field}${reset}"
+        fi
+        out="${out}${sep}${phase_field}"
+        if [ "$have_task" = "1" ]; then
+            local task_field=""
+            if [ -n "$TASK_ID" ]; then
+                task_field="▸ ${TASK_ID}"
+                [ -n "$TASK_TITLE" ] && task_field="${task_field} ${TASK_TITLE}"
+                if [ -n "$TASKS_TOTAL" ]; then
+                    task_field="${task_field}${sep}${TASKS_DONE:-0}/${TASKS_TOTAL}"
+                fi
+            elif [ -n "$TASKS_TOTAL" ]; then
+                task_field="▸ ${TASKS_DONE:-0}/${TASKS_TOTAL}"
+            fi
+            [ -n "$task_field" ] && out="${out}${sep}${task_field}"
+        fi
+    fi
+
+    # Branch at >= 80 (undimmed — secondary signal already). Always last.
     if [ "$cols" -ge 80 ] && [ -n "$BRANCH" ]; then
         if [ -n "$out" ]; then
             out="${out}${sep}${BRANCH}"
@@ -487,8 +696,42 @@ cleanup_cache() {
     fi
 }
 
+# Pre-render cache fast-path. The Beads-mutating skills (paperflow-build /
+# -plan / -review / -goal / -resume) write the formatted line to
+# ~/.paperflow/statusline.txt on every claim/close/open. If that file exists
+# AND its mtime is within the last $PRERENDER_MAX_AGE seconds, just cat it.
+# Otherwise fall through to live composition.
+#
+# Returns 0 if we cat'd the cache (caller should exit), 1 to fall through.
+try_prerender_cache() {
+    [ -r "$PRERENDER_CACHE" ] || return 1
+    local now mtime age
+    now=$(date +%s 2>/dev/null) || return 1
+    mtime=$(stat -f %m "$PRERENDER_CACHE" 2>/dev/null \
+            || stat -c %Y "$PRERENDER_CACHE" 2>/dev/null \
+            || echo "")
+    [ -z "$mtime" ] && return 1
+    age=$((now - mtime))
+    [ "$age" -lt 0 ] && return 1
+    [ "$age" -ge "$PRERENDER_MAX_AGE" ] && return 1
+    # Cat the file as-is. We trust whoever wrote it (a paperflow skill) to
+    # have produced safe output — no extra sanitising layer here.
+    cat "$PRERENDER_CACHE" 2>/dev/null || return 1
+    return 0
+}
+
 # ─── Main ───────────────────────────────────────────────────────────
 main() {
+    # Pre-rendered cache fast-path. We still read stdin (Claude Code pipes
+    # it) so the script doesn't deadlock, but we discard it on a cache hit.
+    if try_prerender_cache; then
+        # Drain stdin so the caller doesn't see a SIGPIPE on close.
+        cat >/dev/null 2>&1 || true
+        SOURCE="cache-prerender"
+        debug_log ""
+        return 0
+    fi
+
     # Stdin parse — fatal failure produces empty output.
     if ! read_stdin_json; then
         debug_log ""
@@ -511,6 +754,7 @@ main() {
     get_limit
     parse_token_count
     get_branch
+    resolve_goal_phase_task
 
     local rendered
     rendered=$(truncate_to_width)

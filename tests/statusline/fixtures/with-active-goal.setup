@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Populate the goal-repo's .paperflow/ pointers with the mock-bd known IDs.
+echo "bd-a1b2"   > "$GOALREPO/.paperflow/active-goal"
+echo "bd-a1b2.2" > "$GOALREPO/.paperflow/active-phase"
