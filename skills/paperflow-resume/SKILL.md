@@ -61,9 +61,17 @@ The lifecycle-closing skill — equivalent to Claude Code's `/resume`, but for G
 
    Both single-line files. Lookup walks up from cwd to the nearest `.paperflow/` directory.
 
-7. **Trigger the auto-open hook** by writing (or touching) the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. cmux's URL handler de-dupes by URL — `placement=reuse` if the tab is already open, `placement=new` otherwise. Same-URL-same-surface contract.
+7. **Scan for unfinished questionnaires.** Before opening the Goal HTML, look for any questionnaire HTML belonging to this Goal that the user opened but never submitted:
 
-8. **Update statusline cache.** Re-render `~/.paperflow/statusline.txt` so the next prompt cycle reflects the new active goal + phase.
+   ```bash
+   find ~/docs/paperflow/questionnaires -name "${SLUG}-*-questionnaire.html" 2>/dev/null
+   ```
+
+   For each match, check whether a sibling `<filename>-answered.json` exists. **If absent, the questionnaire is unfinished** — surface its live-reload URL alongside the Goal HTML in the resume output so the user can pick up where they left off. The "answered" sidecar is written by `lib/grill.js` on successful submit (single line: `{"submitted_at": "<iso>"}`); its absence is the canonical signal for "still owes answers".
+
+8. **Trigger the auto-open hook** by writing (or touching) the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. cmux's URL handler de-dupes by URL — `placement=reuse` if the tab is already open, `placement=new` otherwise. Same-URL-same-surface contract.
+
+9. **Update statusline cache.** Re-render `~/.paperflow/statusline.txt` so the next prompt cycle reflects the new active goal + phase.
 
 ## Optional: cross-repo (v1.x)
 

@@ -63,6 +63,23 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
 7. **Render the Goal HTML.** Read the full subtree via `bd show $GOAL_ID --json` + `bd list --label goal-<slug> --json`. Write `~/docs/paperflow/goals/<slug>/index.html` with: ingress (vision + overall progress), one section per phase in order (active phase highlighted, per-phase progress bar), tasks listed under their phase, action bar at the bottom routing through the bridge. The auto-open hook fires on Write and reuses the existing tab via cmux.
 
+## Questionnaire on open
+
+When the Goal lacks shape — broad scope, multiple axes of variation, or expensive to redo — write a **questionnaire** before drafting any plan. Skip for trivially-shaped work. The trigger is judgment, not a rule; anchor against these case → outcome pairs:
+
+- *Case: "add a button to clear the form"* → **skip** (clear shape, single axis, cheap to reverse).
+- *Case: "fix the off-by-one in date parser"* → **skip** (well-defined, has tests).
+- *Case: "bump mermaid from 10 to 11"* → **skip** (single-axis dependency upgrade).
+- *Case: "redesign the onboarding flow"* → **write** (broad scope, multiple axes, expensive to redo).
+- *Case: "make paperflow work for teams"* → **write** (success criteria fuzzy, preferences unknown).
+- *Case: "choose between server-side and edge rendering"* → **write** (architectural, hard to undo).
+
+**The artifact:** `~/docs/paperflow/questionnaires/<YYYY-MM-DD>-<slug>-questionnaire.html`. Reuses `/paperflow/_lib/grill.{css,js}` — set `window.GRILL.kind = "questionnaire"` and `window.GRILL.goalId = "$GOAL_ID"`. Six categories: *scope · constraints · preferences · context · success criteria · open decisions*. 5–10 questions; `recommendation` is optional (omit when you genuinely don't have a pick). The shape is locked in `examples/example-questionnaire.html` — copy that file as the starting template.
+
+**Stall handling:** open the questionnaire URL alongside the Goal HTML and wait. If the user goes silent past the next prompt, **nudge once** by repeating the URL. If still no answers, proceed without and append one JSONL line to `~/.paperflow/questionnaire-skips.log`: `{"ts": "<iso>", "goal_id": "<id>", "questionnaire_path": "<abs path>", "reason": "stall"}`.
+
+**Output routing:** when answers come back through the bridge ("Questionnaire answers for…" header + `Goal: <id>` line), fold them into the Goal vision via `bd update $GOAL_ID --description "<refined>"` and re-snapshot the Goal HTML. The questionnaire bears `<filename>-answered.json` after successful submit — `paperflow-resume` uses that sidecar to detect unfinished forms across sessions.
+
 ## Sub-actions
 
 - **Snapshot** — re-run step 7 against the live Beads state. No mutations to Beads. Refreshes the Goal HTML.
