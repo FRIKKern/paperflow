@@ -3,3 +3,15 @@
 *.bak
 *.log
 node_modules/
+
+# Beads — per-repo state. paperflow itself doesn't track its own Beads DB;
+# users get their own .beads/ in whichever repo they bootstrap into.
+.beads/
+.dolt/
+*.db
+.beads-credential-key
+
+# bd init creates these per-repo; don't commit them in paperflow's own tree.
+AGENTS.md
+CLAUDE.md
+.claude/
