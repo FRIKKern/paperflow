@@ -120,6 +120,27 @@ Six categories: **scope · constraints · preferences · context · success crit
 
 Artifact: `~/docs/paperflow/questionnaires/<date>-<slug>-questionnaire.html`. Reuses `/paperflow/_lib/grill.{css,js}` verbatim; differentiated via `window.GRILL.kind = "questionnaire"` (which flips the bridge-message header to "Questionnaire answers for…") and `window.GRILL.goalId = "<beads-id>"` (appended as a `Goal:` line so the orchestrator can route answers correctly when the user has switched contexts). The submit bar is `position: sticky; bottom: 0` — once the user scrolls past Q1, the button stays pinned to the viewport. See `examples/example-questionnaire.html` for the canonical shape.
 
+# paperflow Dock
+
+paperflow surfaces its working memory in cmux's right-side Dock via four feeds rendered by a single long-running daemon. The daemon (`~/.local/bin/paperflow-dock-daemon`, Node.js, no deps) polls Beads on a 2-second internal cadence and serves cached output on a UNIX socket at `~/.paperflow/dock.sock`. Each Dock pane runs `watch -n 5 paperflow-dock-feed <name>` — the client is ~15 LOC of bash that `nc -U`s the socket and prints. The four feeds:
+
+| Feed | What it shows |
+|---|---|
+| `active-context` | active Goal, active Phase, currently claimed Task |
+| `bd-ready` | top of `bd ready --label phase-<active>` |
+| `goal-path` | recent `kind:event` rows for goal+phase, sorted desc |
+| `auto-open-log` | tail of `~/.paperflow/auto-open.log` |
+
+Config lives at `${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json` — installed skip-on-existing; pass `bash install.sh --reset-dock` to overwrite (backup at `dock.json.bak.<ts>`). Daemon liveness is probed via the socket; install.sh respawns when unresponsive (via `cmux new-workspace --command` if cmux is available, else `nohup` background).
+
+Debug:
+
+    paperflow-dock-feed active-context        # query directly
+    cat ~/.paperflow/dock-daemon.pid          # PID file (0 bytes if down)
+    tail /tmp/paperflow-dock-daemon.log       # non-cmux stderr
+    kill $(cat ~/.paperflow/dock-daemon.pid)  # graceful shutdown
+    bash install.sh                           # respawns daemon
+
 # Statusline
 
 When this repo has an active goal (`<repo>/.paperflow/active-goal` exists), the bottom-bar statusline shows the goal slug, the active phase + position in the phase sequence, and the currently claimed Task with progress through the active phase. No setup needed beyond `paperflow-goal` having created the pointer files. The shape, at full width:
