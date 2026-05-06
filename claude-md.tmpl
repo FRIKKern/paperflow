@@ -104,6 +104,14 @@ Per-page opt-out: `<script>window.PAPERFLOW_NO_RAIL = true;</script>` before the
 
 Grills are the stress-test phase of `paperflow-plan` — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
 
+## Simplify
+
+Every plan, spec, and grill HTML carries a **Simplify** button. One click runs a leaning-pass subagent against the doc; the candidate goes through a two-tier verification gate (structural diff-checks + a verification subagent) before it lands as a new event on `branch:simplified-<n>` in the goal-path rail. The original is always one click-jump away. Accept on the rail merges the candidate to the source HTML on disk; reject closes the branch event with a reason.
+
+The gate is the never-worse guarantee — Mermaid figures, H2 hierarchy, bound decisions, and outbound URLs must all survive. Failures don't create rail noise; they append one line to `~/.paperflow/simplify-failures.log`.
+
+Implementation lives in `paperflow-plan` (Simplify sub-action). No new skill — the 6/6 cap holds.
+
 ## Questionnaires (upfront discovery)
 
 Questionnaires are the *pre-draft* sibling of grills — same form renderer, opposite role. A grill stress-tests a plan that already exists; a questionnaire discovers what the user wants before there is anything to test. Fired by `paperflow-goal` on Goal opening (the common case) or by `paperflow-plan` when the user lobs in a complex task without shape. **Questionnaire and grill never compose on the same artifact** — the linear order is questionnaire → plan-draft → grill, never both flanking the same plan.
