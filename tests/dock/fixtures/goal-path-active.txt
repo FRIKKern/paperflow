@@ -1,0 +1,3 @@
+# Fixture: goal-path with an active goal.
+# Acceptable: "Recent events" header (zero or more rows).
+SUBSTRING: Recent events

@@ -1,0 +1,317 @@
+#!/usr/bin/env node
+//
+// paperflow-dock-daemon — UNIX socket server that polls Beads on a 2 s
+// internal cadence and serves four cached feeds to thin bash clients.
+//
+// Feeds: active-context · bd-ready · goal-path · auto-open-log.
+//
+// Lifecycle: writes ~/.paperflow/dock-daemon.pid; listens on
+// ~/.paperflow/dock.sock; SIGTERM/SIGINT close socket + remove PID + exit 0.
+// On uncaught exception logs to stderr and exits 1 — install.sh respawns.
+//
+// bd is spawned ASYNC (child_process.spawn) so the event loop stays responsive
+// while polling — first-tick clients connecting during a poll are accepted
+// immediately and read whatever the feeds cache holds (the boot fillers
+// "starting…" / "No active goal." until the first poll completes).
+//
+// Pure Node built-ins (net, fs, child_process, os, path). No external deps.
+
+"use strict";
+
+const net  = require("net");
+const fs   = require("fs");
+const os   = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
+
+const HOME    = os.homedir();
+const PF_DIR  = path.join(HOME, ".paperflow");
+const SOCK    = process.env.PAPERFLOW_DOCK_SOCK || path.join(PF_DIR, "dock.sock");
+const PID_FILE = path.join(PF_DIR, "dock-daemon.pid");
+const ACTIVE_GOAL_FILE  = path.join(PF_DIR, "active-goal");
+const ACTIVE_PHASE_FILE = path.join(PF_DIR, "active-phase");
+const AUTO_OPEN_LOG     = path.join(PF_DIR, "auto-open.log");
+const POLL_MS = 2000;
+
+// ──────────────────────────────────────────────────────────────────────
+// PID file: refuse to start if another live daemon owns it.
+// ──────────────────────────────────────────────────────────────────────
+function pidIsAlive(pid) {
+  if (!pid || isNaN(pid)) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code === "EPERM"; }
+}
+
+function ensureSingleton() {
+  try { fs.mkdirSync(PF_DIR, { recursive: true }); } catch (_) {}
+  if (fs.existsSync(PID_FILE)) {
+    const prior = parseInt(fs.readFileSync(PID_FILE, "utf8").trim(), 10);
+    if (pidIsAlive(prior) && prior !== process.pid) {
+      console.log(`paperflow-dock-daemon already running (pid ${prior})`);
+      process.exit(0);
+    }
+  }
+  fs.writeFileSync(PID_FILE, String(process.pid));
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// State + bd helpers.
+// ──────────────────────────────────────────────────────────────────────
+const NO_GOAL = "No active goal.\n  paperflow-resume to pick one.";
+
+let feeds = {
+  "active-context": NO_GOAL,
+  "bd-ready":       NO_GOAL,
+  "goal-path":      NO_GOAL,
+  "auto-open-log":  "auto-open.log: starting up…",
+};
+
+function readFileSafe(p) {
+  try { return fs.readFileSync(p, "utf8"); } catch (_) { return ""; }
+}
+
+// Async bd. Resolves to {ok:true, out} or {ok:false, err}.
+function bd(args, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const proc = spawn("bd", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    let done = false;
+    const finish = (result) => { if (!done) { done = true; resolve(result); } };
+    const t = setTimeout(() => { try { proc.kill("SIGKILL"); } catch (_) {} finish({ ok: false, err: "bd timeout" }); }, timeoutMs);
+    proc.stdout.on("data", (b) => { out += b.toString("utf8"); });
+    proc.stderr.on("data", (b) => { err += b.toString("utf8"); });
+    proc.on("error", (e) => { clearTimeout(t); finish({ ok: false, err: e.message }); });
+    proc.on("close", (code) => {
+      clearTimeout(t);
+      if (code === 0) finish({ ok: true, out });
+      else finish({ ok: false, err: (err || "").trim() || `bd exit ${code}` });
+    });
+  });
+}
+
+async function bdJson(args, timeoutMs = 5000) {
+  const r = await bd(args, timeoutMs);
+  if (!r.ok) throw new Error(r.err);
+  try { return JSON.parse(r.out); }
+  catch (e) { throw new Error(`bd json parse: ${e.message}`); }
+}
+
+function trunc(s, n) {
+  if (!s) return "";
+  s = String(s);
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function pad(s, n) {
+  s = String(s || "");
+  return s.length >= n ? s : s + " ".repeat(n - s.length);
+}
+
+// Active-goal pointer is the single source of truth.
+function readActiveGoal() {
+  return readFileSafe(ACTIVE_GOAL_FILE).trim() || null;
+}
+
+async function goalSlugLabel(goalId) {
+  const arr = await bdJson(["show", goalId, "--json"]);
+  const t = Array.isArray(arr) ? arr[0] : arr;
+  const labels = (t && t.labels) || [];
+  return labels.find(l => l.startsWith("goal-")) || null;
+}
+
+// Active phase: prefer global mirror, fall back to goal's first phase.
+async function readActivePhase(goalSlugLbl) {
+  const mirror = readFileSafe(ACTIVE_PHASE_FILE).trim();
+  if (mirror) return mirror;
+  if (!goalSlugLbl) return "";
+  try {
+    const phases = await bdJson(["list", "--label", "kind:phase", "--label", goalSlugLbl, "--json"]);
+    if (phases && phases.length) return phases[0].id;
+  } catch (_) {}
+  return "";
+}
+
+async function phaseTask(phaseId) {
+  if (!phaseId) return null;
+  try {
+    const arr = await bdJson(["show", phaseId, "--json"]);
+    return Array.isArray(arr) ? arr[0] : arr;
+  } catch (_) { return null; }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Feed renderers.
+// ──────────────────────────────────────────────────────────────────────
+async function renderActiveContext(goalId, goalSlugLbl, phaseId, phaseTaskObj) {
+  if (!goalId) return NO_GOAL;
+  const phName = (phaseTaskObj && phaseTaskObj.title) || "";
+  let claimedLine = "        (no claimed task)";
+  try {
+    const claimed = await bdJson([
+      "list", "--status", "in_progress",
+      "--label", goalSlugLbl || "goal-unknown",
+      "--exclude-label", "kind:phase",
+      "--exclude-label", "kind:goal",
+      "--exclude-label", "kind:event",
+      "--json",
+    ]);
+    if (claimed && claimed.length) {
+      const t = claimed[0];
+      claimedLine = `        ${t.id} · ${trunc(t.title, 50)}`;
+    }
+  } catch (e) { claimedLine = `        (bd error: ${trunc(e.message, 40)})`; }
+  return [
+    `Goal:   ${goalId} · ${(goalSlugLbl || "").replace(/^goal-/, "")}`,
+    `Phase:  ${phaseId || "?"} · ${phName || "?"}`,
+    `Task:`,
+    claimedLine,
+  ].join("\n");
+}
+
+async function renderBdReady(phaseLbl) {
+  if (!phaseLbl) return NO_GOAL;
+  let rows;
+  try {
+    rows = await bdJson(["ready", "--label", phaseLbl, "--json"]);
+  } catch (e) { return `bd error: ${trunc(e.message, 70)}`; }
+  if (!rows || !rows.length) return "Ready (0): nothing waiting in this phase.";
+  rows = rows.slice(0, 10);
+  const lines = [`Ready (${rows.length}):`];
+  for (const r of rows) {
+    const pri = (r.priority === undefined || r.priority === null) ? "?" : `P${r.priority}`;
+    lines.push(`  ${pad(r.id, 16)} ${pad(pri, 3)} ${trunc(r.title, 56)}`);
+  }
+  return lines.join("\n");
+}
+
+async function renderGoalPath(goalSlugLbl, phaseLbl) {
+  if (!goalSlugLbl) return NO_GOAL;
+  let rows;
+  try {
+    const args = ["list", "--label", "kind:event", "--label", goalSlugLbl, "--status", "open", "--json"];
+    if (phaseLbl) args.push("--label", phaseLbl);
+    rows = await bdJson(args);
+  } catch (e) { return `bd error: ${trunc(e.message, 70)}`; }
+  if (!rows || !rows.length) return "Recent events (0): no events for this phase yet.";
+  rows.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  rows = rows.slice(0, 10);
+  const lines = [`Recent events (${rows.length}):`];
+  for (const r of rows) {
+    const ts = (r.created_at || "").slice(11, 16) || "--:--";
+    const ev = (r.labels || []).find(l => l.startsWith("event:")) || "event:?";
+    const detail = (r.title.split(" · ")[1] || r.title);
+    lines.push(`  ${ts}  ${pad(ev.replace(/^event:/, ""), 22)} ${trunc(detail, 44)}`);
+  }
+  return lines.join("\n");
+}
+
+function renderAutoOpenLog() {
+  const raw = readFileSafe(AUTO_OPEN_LOG);
+  if (!raw) return "auto-open.log: empty (or rotated).";
+  const lines = raw.trim().split(/\n+/).slice(-20);
+  const out = ["Auto-open events (last 20):"];
+  for (const ln of lines) {
+    let rec; try { rec = JSON.parse(ln); } catch (_) { continue; }
+    const ts = (rec.ts || "").slice(11, 16) || "--:--";
+    const url = String(rec.url || "");
+    let short = url.replace(/^https?:\/\/[^/]+/, "");
+    short = short.replace(/^\/paperflow\//, "");
+    out.push(`  ${ts}  ${trunc(short, 60)}`);
+  }
+  return out.join("\n");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Poll loop. Async so the event loop stays free during bd spawns.
+// ──────────────────────────────────────────────────────────────────────
+let POLLING = false;
+async function pollOnce() {
+  if (POLLING) return;
+  POLLING = true;
+  try {
+    const goalId = readActiveGoal();
+    let goalSlugLbl = null, phaseId = "", phaseTaskObj = null, phaseLbl = "";
+    if (goalId) {
+      try { goalSlugLbl = await goalSlugLabel(goalId); } catch (_) {}
+      if (goalSlugLbl) {
+        phaseId = await readActivePhase(goalSlugLbl);
+        phaseTaskObj = await phaseTask(phaseId);
+        if (phaseTaskObj && phaseTaskObj.labels) {
+          phaseLbl = phaseTaskObj.labels.find(l => l.startsWith("phase-")) || "";
+        }
+      }
+    }
+    const [ac, br, gp] = await Promise.all([
+      renderActiveContext(goalId, goalSlugLbl, phaseId, phaseTaskObj),
+      renderBdReady(phaseLbl),
+      renderGoalPath(goalSlugLbl, phaseLbl),
+    ]);
+    feeds = {
+      "active-context": ac,
+      "bd-ready":       br,
+      "goal-path":      gp,
+      "auto-open-log":  renderAutoOpenLog(),
+    };
+  } finally {
+    POLLING = false;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Socket server.
+// ──────────────────────────────────────────────────────────────────────
+function startServer() {
+  try { fs.unlinkSync(SOCK); } catch (_) {}
+  const server = net.createServer((conn) => {
+    let buf = "";
+    conn.setEncoding("utf8");
+    conn.on("data", (chunk) => {
+      buf += chunk;
+      const nl = buf.indexOf("\n");
+      if (nl === -1 && buf.length < 64) return;
+      const name = (nl === -1 ? buf : buf.slice(0, nl)).trim();
+      if (Object.prototype.hasOwnProperty.call(feeds, name)) {
+        conn.end(feeds[name] + "\n");
+      } else {
+        conn.end(`unknown feed: ${name}\n`);
+      }
+    });
+    conn.on("error", () => {});
+  });
+  server.on("error", (e) => { console.error("socket error:", e.message); });
+  server.listen(SOCK, () => {
+    try { fs.chmodSync(SOCK, 0o600); } catch (_) {}
+    console.error(`paperflow-dock-daemon listening on ${SOCK} (pid ${process.pid})`);
+    // Kick the first poll on the next tick — async, doesn't block accept().
+    pollOnce().catch((e) => console.error("first poll error:", e.message));
+    POLL_TIMER = setInterval(() => {
+      pollOnce().catch((e) => console.error("poll error:", e.message));
+    }, POLL_MS);
+  });
+  return server;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Shutdown.
+// ──────────────────────────────────────────────────────────────────────
+let SERVER = null, POLL_TIMER = null;
+function shutdown(code) {
+  try { if (POLL_TIMER) clearInterval(POLL_TIMER); } catch (_) {}
+  try { if (SERVER) SERVER.close(); } catch (_) {}
+  try { fs.unlinkSync(SOCK); } catch (_) {}
+  try { fs.unlinkSync(PID_FILE); } catch (_) {}
+  process.exit(code || 0);
+}
+
+process.on("SIGTERM", () => shutdown(0));
+process.on("SIGINT",  () => shutdown(0));
+process.on("uncaughtException", (e) => {
+  console.error("uncaughtException:", e && e.stack || e);
+  shutdown(1);
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Boot.
+// ──────────────────────────────────────────────────────────────────────
+ensureSingleton();
+SERVER = startServer();

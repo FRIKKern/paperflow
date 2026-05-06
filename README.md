@@ -58,6 +58,7 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 | Validate hook | `~/.claude/hooks/validate-paperflow-doc.sh` | PostToolUse(Write\|Edit) — runs `paperflow-validate` on any paperflow doc and surfaces failures via system-reminder |
 | Review skill | `~/.claude/skills/paperflow-review-doc/SKILL.md` | Final-step skill called by every doc-writer; Layer 1 = static, Layer 2 = optional browser visual review |
 | Statusline | `~/.claude/statusline.sh` + `~/.paperflow/statusline-limits.json` | One-line bottom bar wired into Claude Code's `statusLine`. See [Statusline](#statusline). |
+| paperflow Dock | `~/.local/bin/paperflow-dock-{daemon,feed}` + `~/.config/cmux/dock.json` | cmux Dock integration: one Node daemon polls Beads on a 2 s internal cadence and serves four feeds — `active-context`, `bd-ready`, `goal-path`, `auto-open-log` — over `~/.paperflow/dock.sock`. Each Dock pane runs `watch -n 5 paperflow-dock-feed <name>`. Skip-on-existing; `bash install.sh --reset-dock` to overwrite. |
 
 ### Statusline
 

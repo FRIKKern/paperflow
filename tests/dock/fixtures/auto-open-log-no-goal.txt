@@ -1,0 +1,4 @@
+# Fixture: auto-open-log with no active-goal pointer.
+# Sandboxed HOME means ~/.paperflow/auto-open.log doesn't exist —
+# daemon serves the empty-or-rotated message.
+SUBSTRING: auto-open.log
