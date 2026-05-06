@@ -1,0 +1,158 @@
+#!/usr/bin/env node
+// paperflow-simplify-verify <original-html> <candidate-html>
+//
+// Pure-Node structural diff between an original paperflow doc and a leaning-
+// pass candidate. Prints JSON {ok, checks: [...]}.
+//
+// Always exits 0; the JSON is the truth — { ok: true } when every check passed,
+// { ok: false, checks: [...failed...] } otherwise. (Exit 0 keeps the bridge's
+// execFile call simple — it parses the JSON regardless.)
+//
+// Checks (all regex-tolerant string parsing, no DOM, no deps):
+//   1. mermaid_count   — candidate must have ≥ original count of <pre class="mermaid">
+//   2. h2_sequence     — every <h2> in original must appear (substring or
+//                        first-4-words fuzzy match) in candidate
+//   3. bound_decisions — bullets in a "Decisions made" / "Decisions" section
+//                        must all survive in candidate (substring match)
+//   4. no_new_links    — URLs in candidate must be a subset of original's URLs
+
+'use strict';
+
+const fs = require('fs');
+
+function readOrDie(p) {
+  try { return fs.readFileSync(p, 'utf8'); }
+  catch (e) {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      checks: [{ name: 'read', passed: false, reason: `cannot read ${p}: ${e.message}` }]
+    }));
+    process.exit(0);
+  }
+}
+
+// Strip HTML tags and decode the small set of entities we care about.
+function stripTags(s) {
+  return s.replace(/<[^>]+>/g, '')
+          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+          .replace(/\s+/g, ' ').trim();
+}
+
+function countMermaid(html) {
+  // Both <pre class="mermaid"> and <pre class='mermaid'> survive Prettier.
+  const re = /<pre[^>]*class\s*=\s*["'][^"']*\bmermaid\b[^"']*["'][^>]*>/gi;
+  return (html.match(re) || []).length;
+}
+
+function extractH2(html) {
+  const re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
+  const out = [];
+  let m;
+  while ((m = re.exec(html)) !== null) out.push(stripTags(m[1]));
+  return out;
+}
+
+function firstWords(s, n) {
+  return s.split(/\s+/).slice(0, n).join(' ').toLowerCase();
+}
+
+// Find a "Decisions" section's first <ol> or <ul> and return each top-level
+// <li>'s stripped text. Tolerates "Decisions", "Decisions made", "Bound
+// decisions" etc. in the H2.
+function extractDecisionBullets(html) {
+  const h2re = /<h2\b[^>]*>([\s\S]*?)<\/h2>([\s\S]*?)(?=<h2\b|$)/gi;
+  let m;
+  while ((m = h2re.exec(html)) !== null) {
+    const heading = stripTags(m[1]).toLowerCase();
+    if (!/decisions?\b/.test(heading)) continue;
+    const body = m[2];
+    const list = body.match(/<(?:ol|ul)\b[^>]*>([\s\S]*?)<\/(?:ol|ul)>/i);
+    if (!list) return [];
+    const items = list[1].match(/<li\b[^>]*>([\s\S]*?)<\/li>/gi) || [];
+    return items.map(li => stripTags(li.replace(/^<li\b[^>]*>|<\/li>$/gi, '')))
+                .filter(t => t.length);
+  }
+  return [];
+}
+
+function extractUrls(html) {
+  // href="..." and src="..." forms; ignore relative paths (no scheme).
+  const out = new Set();
+  const re = /\b(?:href|src)\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const u = m[1];
+    if (/^[a-z][a-z0-9+.-]*:/i.test(u) || u.startsWith('//')) out.add(u);
+  }
+  return out;
+}
+
+function check(name, passed, extra) {
+  return Object.assign({ name, passed }, extra || {});
+}
+
+function main() {
+  const [, , origPath, candPath] = process.argv;
+  if (!origPath || !candPath) {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      checks: [{ name: 'usage', passed: false,
+                 reason: 'usage: paperflow-simplify-verify <original.html> <candidate.html>' }]
+    }));
+    process.exit(0);
+  }
+
+  const orig = readOrDie(origPath);
+  const cand = readOrDie(candPath);
+  const checks = [];
+
+  // 1. mermaid_count
+  const origMer = countMermaid(orig);
+  const candMer = countMermaid(cand);
+  checks.push(check('mermaid_count', candMer >= origMer,
+    { original: origMer, candidate: candMer,
+      reason: candMer >= origMer ? undefined
+        : `candidate dropped ${origMer - candMer} Mermaid figure(s)` }));
+
+  // 2. h2_sequence — every original H2 must appear (substring or 4-word fuzzy)
+  const origH2 = extractH2(orig);
+  const candH2 = extractH2(cand);
+  const candHay = candH2.join(' \n ').toLowerCase();
+  const missing = origH2.filter(h => {
+    const lc = h.toLowerCase();
+    if (!lc) return false;
+    if (candHay.includes(lc)) return false;
+    const fw = firstWords(h, 4);
+    return fw && !candHay.includes(fw);
+  });
+  checks.push(check('h2_sequence', missing.length === 0,
+    { original_count: origH2.length, candidate_count: candH2.length,
+      missing,
+      reason: missing.length ? `candidate is missing H2(s): ${missing.join(' | ')}` : undefined }));
+
+  // 3. bound_decisions
+  const origDec = extractDecisionBullets(orig);
+  const candHayLc = stripTags(cand).toLowerCase();
+  const lostDec = origDec.filter(d => {
+    const fw = firstWords(d, 6);
+    return fw && !candHayLc.includes(fw);
+  });
+  checks.push(check('bound_decisions', lostDec.length === 0,
+    { original_count: origDec.length, lost: lostDec,
+      reason: lostDec.length ? `candidate dropped ${lostDec.length} bound decision(s)` : undefined }));
+
+  // 4. no_new_links — candidate URLs ⊆ original URLs
+  const origUrls = extractUrls(orig);
+  const candUrls = extractUrls(cand);
+  const fabricated = [...candUrls].filter(u => !origUrls.has(u));
+  checks.push(check('no_new_links', fabricated.length === 0,
+    { fabricated,
+      reason: fabricated.length ? `candidate fabricated URL(s): ${fabricated.join(' ')}` : undefined }));
+
+  const ok = checks.every(c => c.passed);
+  process.stdout.write(JSON.stringify({ ok, checks }));
+  process.exit(0);
+}
+
+main();

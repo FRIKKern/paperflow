@@ -18,11 +18,18 @@
 //   POST /event                  create a kind:event Beads task + sidecar
 //   POST /event/active           write <repo>/.paperflow/active-event-base
 //   GET  /diff?from=<id>&to=<id> bridge-side line-level diff between two events
+//   POST /simplify               kick off a leaning-pass + verification job;
+//                                returns {ok, job_id} immediately
+//   GET  /simplify/status?job=   poll a Simplify job; returns {state, …}
+//   POST /simplify/accept        promote a simplified-<n> event to branch:main
+//                                (also overwrites the source HTML on disk)
+//   POST /simplify/reject        close a simplified-<n> event with a reason
 
 const http = require('http');
 const path = require('path');
 const fs   = require('fs');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
+const crypto = require('crypto');
 
 const PORT = 8766;
 const HOST = '127.0.0.1';
@@ -199,6 +206,24 @@ function collectBody(req, cb) {
     catch (e) { return cb(e); }
     cb(null, payload);
   });
+}
+
+// ── Simplify state (in-memory) ──────────────────────────────────────
+// job_id → {state, event_id?, branch?, reason?, started_at, doc_path, goal_id}
+// Bridge restart abandons in-flight jobs (acceptable for v1 — see plan).
+const SIMPLIFY_JOBS = new Map();
+const SIMPLIFY_FAIL_LOG = path.join(process.env.HOME, '.paperflow', 'simplify-failures.log');
+const SIMPLIFY_BRIEF_LEAN   = path.join(__dirname, '..', 'lib', 'simplify-leaning-pass-brief.md');
+const SIMPLIFY_BRIEF_VERIFY = path.join(__dirname, '..', 'lib', 'simplify-verification-brief.md');
+const SIMPLIFY_VERIFIER     = path.join(__dirname, 'paperflow-simplify-verify');
+const DOCS_ROOT             = path.join(process.env.HOME, 'docs', 'paperflow');
+
+function logSimplifyFailure(entry) {
+  try {
+    fs.mkdirSync(path.dirname(SIMPLIFY_FAIL_LOG), { recursive: true });
+    fs.appendFileSync(SIMPLIFY_FAIL_LOG,
+      JSON.stringify(Object.assign({ ts: new Date().toISOString() }, entry)) + '\n');
+  } catch (_) { /* */ }
 }
 
 // Internal: create a kind:event Beads task + (optional) sidecar. Used by
@@ -518,8 +543,350 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // POST /simplify — body: {doc_path, goal_id}. Spawns a leaning-pass + verify
+  // pipeline asynchronously, returns {ok, job_id} immediately.
+  if (req.method === 'POST' && url.pathname === '/simplify') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+      const { doc_path, goal_id } = payload || {};
+      if (!doc_path || !goal_id) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'need {doc_path, goal_id}' }));
+      }
+      if (!safeRelPath(doc_path)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'doc_path must be relative under ~/docs/paperflow/' }));
+      }
+      const job_id = crypto.randomBytes(6).toString('hex');
+      SIMPLIFY_JOBS.set(job_id, {
+        state: 'running', started_at: new Date().toISOString(),
+        doc_path, goal_id
+      });
+      // Fire-and-forget. The pipeline writes back to SIMPLIFY_JOBS.
+      runSimplifyPipeline(job_id, doc_path, goal_id);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, job_id }));
+    });
+    return;
+  }
+
+  // GET /simplify/status?job=<id>
+  if (req.method === 'GET' && url.pathname === '/simplify/status') {
+    const job = url.searchParams.get('job');
+    if (!job || !SIMPLIFY_JOBS.has(job)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'unknown job' }));
+    }
+    const j = SIMPLIFY_JOBS.get(job);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(j));
+  }
+
+  // POST /simplify/accept — body: {simplified_event_id}.
+  // Reads the simplified payload, overwrites the source HTML on disk,
+  // relabels the event branch from simplified-<n> to main.
+  if (req.method === 'POST' && url.pathname === '/simplify/accept') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+      const { simplified_event_id } = payload || {};
+      if (!simplified_event_id || typeof simplified_event_id !== 'string'
+          || simplified_event_id.includes('/') || simplified_event_id.includes('..')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'bad simplified_event_id' }));
+      }
+      acceptSimplified(simplified_event_id, (err, info) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...info }));
+      });
+    });
+    return;
+  }
+
+  // POST /simplify/reject — body: {simplified_event_id, reason?}. Closes the
+  // event-task via bd close.
+  if (req.method === 'POST' && url.pathname === '/simplify/reject') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+      const { simplified_event_id, reason } = payload || {};
+      if (!simplified_event_id || typeof simplified_event_id !== 'string'
+          || simplified_event_id.includes('/') || simplified_event_id.includes('..')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'bad simplified_event_id' }));
+      }
+      const args = ['close', simplified_event_id];
+      if (reason) args.push('--reason', String(reason).slice(0, 280));
+      execFile('bd', args, { cwd: BD_CWD }, (err) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, closed: simplified_event_id }));
+      });
+    });
+    return;
+  }
+
   res.writeHead(404); res.end();
 });
+
+// ── Simplify pipeline ─────────────────────────────────────────────────
+function setJob(jobId, patch) {
+  const cur = SIMPLIFY_JOBS.get(jobId) || {};
+  SIMPLIFY_JOBS.set(jobId, Object.assign(cur, patch));
+}
+
+// Read the prior leaning-pass briefs from disk once at boot. We re-read on
+// every job so authors can iterate the brief without restarting the bridge.
+function readBrief(p) {
+  try { return fs.readFileSync(p, 'utf8'); } catch (_) { return ''; }
+}
+
+// Spawn `claude --print` with stdin = brief + payload. cb(err, stdout).
+function runClaudePrint(stdinPayload, cb) {
+  let claudeBin;
+  try {
+    claudeBin = require('child_process').execSync('command -v claude', { encoding: 'utf8' }).trim();
+  } catch (_) { claudeBin = 'claude'; }
+  const proc = spawn(claudeBin, ['--print', '--dangerously-skip-permissions'], {
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  let out = '', err = '';
+  proc.stdout.on('data', d => { out += d; });
+  proc.stderr.on('data', d => { err += d; });
+  proc.on('error', e => cb(e));
+  proc.on('close', code => {
+    if (code !== 0) return cb(new Error(`claude --print exited ${code}: ${err.slice(0, 400)}`));
+    cb(null, out);
+  });
+  proc.stdin.write(stdinPayload);
+  proc.stdin.end();
+}
+
+// Pick the next simplified-N branch number. Scans existing events for this
+// goal+source_doc and looks for branch:simplified-* labels.
+function nextSimplifiedBranch(goal_id, source_doc, cb) {
+  resolveGoalSlug(goal_id, (slugErr, slugLabel) => {
+    if (slugErr) return cb(slugErr);
+    execFile('bd',
+      ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json', '--no-default-args'],
+      { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+      (err, stdout) => {
+        const tryFallback = err
+          ? cb2 => execFile('bd',
+              ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json'],
+              { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD }, cb2)
+          : cb2 => cb2(null, stdout);
+        tryFallback((e2, s2) => {
+          if (e2) return cb(e2);
+          let arr = [];
+          try { arr = JSON.parse(s2 || '[]'); } catch (_) { /* */ }
+          let max = 0;
+          for (const it of (Array.isArray(arr) ? arr : [])) {
+            for (const l of (it.labels || [])) {
+              const m = /^branch:simplified-(\d+)$/.exec(l);
+              if (m) max = Math.max(max, parseInt(m[1], 10));
+            }
+          }
+          cb(null, max + 1, slugLabel);
+        });
+      });
+  });
+}
+
+// Find the most recent event-task on the source doc's goal-path lineage.
+// Returns the event-task ID (or null when none — fall back to the goal-task).
+function findLatestSourceEvent(goal_id, source_doc, cb) {
+  resolveGoalSlug(goal_id, (slugErr, slugLabel) => {
+    if (slugErr) return cb(slugErr);
+    execFile('bd',
+      ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json', '--no-default-args'],
+      { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+      (err, stdout) => {
+        const finish = (s) => {
+          let arr = [];
+          try { arr = JSON.parse(s || '[]'); } catch (_) { /* */ }
+          if (!Array.isArray(arr) || !arr.length) return cb(null, null);
+          arr.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+          cb(null, arr[arr.length - 1].id);
+        };
+        if (err) {
+          execFile('bd',
+            ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json'],
+            { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+            (e2, s2) => { if (e2) return cb(e2); finish(s2); });
+          return;
+        }
+        finish(stdout);
+      });
+  });
+}
+
+function runSimplifyPipeline(jobId, doc_path, goal_id) {
+  const ts = () => new Date().toISOString();
+  const docAbs = path.join(DOCS_ROOT, doc_path);
+  let originalHtml;
+  try { originalHtml = fs.readFileSync(docAbs, 'utf8'); }
+  catch (e) {
+    setJob(jobId, { state: 'failed', reason: `cannot read source doc: ${e.message}` });
+    logSimplifyFailure({ job: jobId, doc_path, reason: 'read', error: e.message });
+    return;
+  }
+
+  // 1. Run the leaning-pass subagent.
+  const leanBrief = readBrief(SIMPLIFY_BRIEF_LEAN);
+  if (!leanBrief) {
+    setJob(jobId, { state: 'failed', reason: 'leaning-pass brief missing' });
+    return;
+  }
+  console.log(`[${ts()}] simplify ${jobId} → leaning-pass starting (${doc_path})`);
+  runClaudePrint(leanBrief + originalHtml, (err, candidate) => {
+    if (err) {
+      setJob(jobId, { state: 'failed', reason: `leaning-pass: ${err.message}` });
+      logSimplifyFailure({ job: jobId, doc_path, reason: 'leaning-pass', error: err.message });
+      return;
+    }
+    candidate = String(candidate || '').trim();
+    if (!candidate || candidate.length < 100) {
+      setJob(jobId, { state: 'failed', reason: 'leaning-pass returned empty/tiny output' });
+      logSimplifyFailure({ job: jobId, doc_path, reason: 'lean-empty', size: candidate.length });
+      return;
+    }
+
+    // 2. Structural verifier — write to a tmp file pair, exec the verifier.
+    const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'pf-simplify-'));
+    const origTmp = path.join(tmpDir, 'orig.html');
+    const candTmp = path.join(tmpDir, 'cand.html');
+    fs.writeFileSync(origTmp, originalHtml);
+    fs.writeFileSync(candTmp, candidate);
+    execFile(SIMPLIFY_VERIFIER, [origTmp, candTmp], { maxBuffer: 4 * 1024 * 1024 }, (vErr, vOut) => {
+      if (vErr) {
+        setJob(jobId, { state: 'failed', reason: `verifier: ${vErr.message}` });
+        logSimplifyFailure({ job: jobId, doc_path, reason: 'verifier-exec', error: vErr.message });
+        return;
+      }
+      let v;
+      try { v = JSON.parse(vOut); }
+      catch (e) {
+        setJob(jobId, { state: 'failed', reason: 'verifier: invalid JSON' });
+        logSimplifyFailure({ job: jobId, doc_path, reason: 'verifier-json', error: e.message });
+        return;
+      }
+      if (!v.ok) {
+        const failNames = (v.checks || []).filter(c => !c.passed).map(c => c.name).join(',');
+        setJob(jobId, { state: 'failed', reason: `structural-fail: ${failNames}` });
+        logSimplifyFailure({ job: jobId, doc_path, reason: 'structural', checks: v.checks });
+        return;
+      }
+
+      // 3. Verification subagent.
+      const verBrief = readBrief(SIMPLIFY_BRIEF_VERIFY);
+      const verPayload = verBrief
+        + '\nORIGINAL:\n' + originalHtml
+        + '\n---\nCANDIDATE:\n' + candidate
+        + '\n---\n';
+      console.log(`[${ts()}] simplify ${jobId} → verification subagent`);
+      runClaudePrint(verPayload, (e2, vsOut) => {
+        if (e2) {
+          setJob(jobId, { state: 'failed', reason: `verification-subagent: ${e2.message}` });
+          logSimplifyFailure({ job: jobId, doc_path, reason: 'verification-subagent', error: e2.message });
+          return;
+        }
+        const verdict = String(vsOut || '').trim().split('\n').find(Boolean) || '';
+        if (!/^PASS\b/i.test(verdict)) {
+          setJob(jobId, { state: 'failed', reason: `verification-fail: ${verdict.slice(0, 200)}` });
+          logSimplifyFailure({ job: jobId, doc_path, reason: 'verification', verdict });
+          return;
+        }
+
+        // 4. Branch counter + parent-event resolution.
+        nextSimplifiedBranch(goal_id, doc_path, (bErr, n /*, slugLabel */) => {
+          if (bErr) {
+            setJob(jobId, { state: 'failed', reason: `branch-counter: ${bErr.message}` });
+            logSimplifyFailure({ job: jobId, doc_path, reason: 'branch-counter', error: bErr.message });
+            return;
+          }
+          findLatestSourceEvent(goal_id, doc_path, (lErr, parentEventId) => {
+            // Non-fatal — when no prior event exists, omit parent-event.
+            const branch = `simplified-${n}`;
+            createEvent({
+              goal_id,
+              event_type: 'plan-simplified',
+              source_doc: doc_path,
+              parent_event: parentEventId || undefined,
+              branch,
+              payload_html: candidate
+            }, (cErr, result) => {
+              if (cErr) {
+                setJob(jobId, { state: 'failed', reason: `event-create: ${cErr.message}` });
+                logSimplifyFailure({ job: jobId, doc_path, reason: 'event-create', error: cErr.message });
+                return;
+              }
+              setJob(jobId, {
+                state: 'done', event_id: result.event_id, branch,
+                verdict: verdict.slice(0, 200)
+              });
+              console.log(`[${ts()}] simplify ${jobId} → done (${result.event_id} ${branch})`);
+            });
+          });
+        });
+      });
+    });
+  });
+}
+
+// Accept a simplified-<n> event: read its sidecar, write to source doc,
+// relabel the Beads task's branch from simplified-<n> to main.
+function acceptSimplified(eventId, cb) {
+  loadSidecar(eventId, (sErr, side) => {
+    if (sErr) return cb(sErr);
+    if (side.ext !== '.html') return cb(new Error('sidecar is not HTML: ' + side.ext));
+    execFile('bd', ['show', eventId, '--json'], { maxBuffer: 4 * 1024 * 1024, cwd: BD_CWD },
+      (eErr, eOut) => {
+        if (eErr) return cb(eErr);
+        let arr;
+        try { arr = JSON.parse(eOut); } catch (e) { return cb(e); }
+        if (!Array.isArray(arr) || !arr.length) return cb(new Error('no event-task ' + eventId));
+        const labels = arr[0].labels || [];
+        const sourceLabel = labels.find(l => typeof l === 'string' && l.startsWith('source:'));
+        if (!sourceLabel) return cb(new Error('event has no source: label'));
+        const sourceRel = sourceLabel.slice('source:'.length);
+        if (!safeRelPath(sourceRel)) return cb(new Error('unsafe source rel-path'));
+        const dst = path.join(DOCS_ROOT, sourceRel);
+        fs.writeFile(dst, side.content, wErr => {
+          if (wErr) return cb(wErr);
+          // Relabel branch:simplified-<n> → branch:main.
+          const branchLabel = labels.find(l => typeof l === 'string' && /^branch:simplified-/.test(l));
+          if (!branchLabel) return cb(null, { source_doc: sourceRel, written: dst, relabeled: false });
+          execFile('bd',
+            ['update', eventId, '--remove-label', branchLabel, '--add-label', 'branch:main'],
+            { cwd: BD_CWD },
+            (uErr) => {
+              // Older Beads may not support --remove-label / --add-label;
+              // fall through quietly — the source HTML write is the load-bearing
+              // piece, the relabel is a nicety.
+              if (uErr) {
+                return cb(null, { source_doc: sourceRel, written: dst, relabeled: false, relabel_error: uErr.message });
+              }
+              cb(null, { source_doc: sourceRel, written: dst, relabeled: true });
+            });
+        });
+      });
+  });
+}
 
 // Format the goal-path response: parse `bd list --json`, normalise events
 // into a chronological array with branch + parent-event fields hoisted out

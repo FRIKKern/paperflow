@@ -156,6 +156,27 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 | `bd dep add <child> <parent>` | Encode intra-phase order. |
 | `bd update <id> --close` / `--delete` | Drop steps removed during revise. |
 
+## Simplify (sub-action)
+
+A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-action of `paperflow-plan`, not a separate skill (the 6/6 cap holds). One click triggers a leaning-pass subagent that returns a tighter version of the doc; a two-tier verification gate decides whether the candidate lands as a new branch on the goal-path rail.
+
+| Step | What happens |
+|---|---|
+| 1. Click | Browser POSTs to `localhost:8766/simplify` with `{doc_path, goal_id}` |
+| 2. Bridge | Spawns leaning-pass subagent (`claude --print` + `lib/simplify-leaning-pass-brief.md`) |
+| 3. Structural gate | `bin/paperflow-simplify-verify` checks Mermaid count, H2 hierarchy, bound decisions, no fabricated URLs |
+| 4. Verification gate | Second subagent (`lib/simplify-verification-brief.md`) returns `PASS:` / `FAIL:` |
+| 5. Land | Both PASS → `kind:event` task on `branch:simplified-<n>` parented to the source doc's last event; sidecar HTML at `~/.paperflow/events/<id>.html` |
+| 6. Reject path | Any FAIL → no event; one line appended to `~/.paperflow/simplify-failures.log` |
+
+**Trim categories the leaning pass attempts** (verbatim from `lib/simplify-leaning-pass-brief.md`): verbose phrasing, redundancy, example bloat, low-signal bullet sub-items, hedging words. **Never cut**: Mermaid figures, H2 headings, bound decisions, outbound URLs, the ingress.
+
+**Idempotence.** Re-running Simplify on an already-simplified doc may yield further reduction or none — the gate fails the no-meaningful-change case as a structural-fail or a verification `FAIL: no reduction`.
+
+**Accept / Reject.** When a `branch:simplified-*` node is selected on the rail, the rail surfaces Accept / Reject controls. Accept calls `POST /simplify/accept` — bridge writes the simplified payload back to the source doc on disk and relabels the event from `branch:simplified-<n>` to `branch:main`. Reject calls `POST /simplify/reject` with an optional reason — bridge runs `bd close <event-id> --reason …`.
+
+**Recoverability.** The parent event is always click-jump-recoverable from the rail; the source HTML on disk is unchanged until the user explicitly accepts.
+
 ## Don't
 
 - Don't skip the grill silently. If a plan ships without a grill, the user must have opted out by name.

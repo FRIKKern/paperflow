@@ -478,7 +478,7 @@ fi
 
 # ─── 6. Shared renderers in ~/docs/paperflow/_lib/ ──────────────────
 log "Renderers"
-for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js live-render.css live-render.js goal-path-rail.css goal-path-rail.js diff-modal.js text-diff.js; do
+for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js live-render.css live-render.js goal-path-rail.css goal-path-rail.js diff-modal.js text-diff.js simplify-button.js; do
     cp "$REPO/lib/$f" "$HOME/docs/paperflow/_lib/$f"
     ok "$f"
 done
