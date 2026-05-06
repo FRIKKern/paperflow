@@ -7,6 +7,50 @@ description: Use when the user says "build", "execute the plan", "next step", "s
 
 Implement a plan, step-by-step, phase-by-phase. The orchestrator's claim-execute-verify-close loop, scoped to the active phase. The subagent does the actual work; the orchestrator owns context, claims, and Beads mutations.
 
+<!-- BEGIN paperflow-thresholds -->
+## Subagent enforcement (paperflow-thresholds v1)
+
+paperflow's orchestrator delegates non-trivial work to subagents. The rule has hard thresholds and a pre-write checkpoint — not just guidance.
+
+**Hard thresholds** — above ANY of these, the orchestrator MUST dispatch a subagent:
+
+- **> 30 LOC** of new code (across all files in one logical unit)
+- **> 50 lines** of new prose / markdown
+- **> 500 tokens** of raw tool output captured / synthesised
+
+**Bash-glue carve-out**: bash glue scripts ≤ **25 LOC** stay inline. Other languages (JS, Python, etc.) hold the 30 LOC gate.
+
+**Pre-write checkpoint**: before any inline `Write` or `Edit` of more than 30 LOC of code OR 50 lines of prose, the orchestrator prints a one-line justification:
+
+    Doing inline because: <reason>. Above threshold would be <subagent-reason>.
+
+Visible self-correction, not silent inlining.
+
+**Recursion depth = 1**: subagent briefs themselves are orchestrator-direct, no matter their length. The orchestrator can write a 600-token brief without dispatching to write the brief — otherwise infinite recursion.
+
+**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `paperflow-build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
+
+**Commit-message marker**: any commit touching > 30 LOC includes a structured trailer:
+
+    Subagent-Run: <task-id>
+
+`bin/paperflow-audit-orchestrator-budget` flags over-threshold commits that lack this trailer.
+
+**Always orchestrator-direct (exempt list)** — never dispatch a subagent for:
+
+- Beads bookkeeping (`bd create / claim / close / update --description`)
+- Pointer-file writes (`<repo>/.paperflow/active-{goal,phase}`)
+- `Read` (always free)
+- Short verification commands (`curl` probes, `find … | wc -l`, single-shot greps)
+- Single-line edits to live docs to bump pointers / status
+- Snapshot writes that change ≤ 5 lines of an existing HTML
+- `bd` comments and `bd update --description` (any size)
+- Pasting verbatim subagent output (the subagent already did the work)
+- Bash glue scripts ≤ 25 LOC (carve-out above)
+
+When in doubt, dispatch.
+<!-- END paperflow-thresholds -->
+
 ## When to fire
 
 | Use this skill when | Skip when |
@@ -60,6 +104,37 @@ The loop is small and unforgiving. Each iteration: read the active phase, ask Be
    _Subsection structure adapted from `obra/superpowers/skills/verification-before-completion` (MIT) — see `THIRD-PARTY-CREDITS.md`._
 
    The subagent's return must include evidence the work landed: `git diff --stat`, test output, a built artifact's path, or a screenshot. The orchestrator inspects evidence before closing the task. If evidence is missing or insufficient, dispatch a debugging-shaped subagent (see "Failure / debug").
+
+### Verification-subagent dispatch
+
+Verification is symmetric to writing: when the build subagent returns more than the **500-token raw-output gate** of evidence (diffs, test output, screenshots, audit reports), the orchestrator MUST dispatch a SECOND subagent — a `verification-subagent` — instead of absorbing the evidence inline.
+
+**Brief for the verification-subagent (`subagent_type: general-purpose`):**
+
+> Verify this evidence against this Task's acceptance gate. Return only PASS/FAIL + one-sentence reason. Reject if evidence is missing.
+
+Inputs to the brief: the Task ID + description, the build subagent's returned artefact paths, and the verification gate the task declared at dispatch.
+
+The orchestrator only sees the one-line verdict. `bd update <id> --close` fires only on `PASS`. `FAIL` routes to **Failure / debug** below; the build-task stays claimed.
+
+```mermaid
+flowchart LR
+    Sub["build subagent<br/>completes task<br/>returns artefacts"]
+    G{"evidence<br/>&gt; 500 tok?"}
+    O["orchestrator<br/>reads inline"]
+    V["verification-subagent<br/>reads artefacts<br/>returns PASS/FAIL"]
+    Close["orchestrator<br/>bd update --close"]
+    Reopen["orchestrator<br/>route to debug<br/>(task stays claimed)"]
+    Sub --> G
+    G -->|no| O
+    G -->|yes| V
+    O --> Close
+    V -->|PASS| Close
+    V -->|FAIL| Reopen
+    style V stroke:#a23925,stroke-width:3px
+```
+
+The two-subagent flow keeps the orchestrator's context lean — the build subagent burns its context on producing the work, the verification-subagent burns its context on judging the evidence, and the orchestrator only ever holds a verdict.
 
 6. **Close on verified completion:**
 
