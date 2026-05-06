@@ -90,7 +90,7 @@ while IFS= read -r sha; do
     short=$(git rev-parse --short "$sha")
     printf '%s⚠%s  %s  +%s -%s  no Subagent-Run trailer  %s\n' \
         "$YEL" "$RST" "$short" "$adds" "$dels" "$subject"
-done < <(git log "$RANGE" --pretty=format:'%H')
+done < <(git log "$RANGE" --format='%H')
 
 printf '\n%s%d commits scanned, %d flagged for missing Subagent-Run trailer.%s\n' \
     "$GRN" "$scanned" "$flagged" "$RST"
