@@ -1,0 +1,4 @@
+# Fixture: active-context with no active-goal pointer.
+# Daemon should serve the per-feed "No active goal." fallback.
+SUBSTRING: No active goal.
+SUBSTRING: paperflow-resume

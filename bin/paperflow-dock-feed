@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# paperflow-dock-feed — thin UNIX-socket client for paperflow-dock-daemon.
+# Usage: paperflow-dock-feed <feed-name>
+#
+# Prints the cached output the daemon currently serves for <feed-name>. On any
+# transport error we exit 0 and print a diagnostic — `watch` displaying an
+# error is more useful than a blank pane. The 4 known feeds are:
+# active-context · bd-ready · goal-path · auto-open-log.
+
+set -eu
+SOCK="${PAPERFLOW_DOCK_SOCK:-$HOME/.paperflow/dock.sock}"
+FEED="${1:?usage: paperflow-dock-feed <feed-name>}"
+
+if [ ! -S "$SOCK" ]; then
+  echo "paperflow-dock daemon down · run: bash install.sh"
+  exit 0
+fi
+# bsd-nc on macOS uses -w for total timeout. -U selects a UNIX socket.
+printf '%s\n' "$FEED" | /usr/bin/nc -U -w 2 "$SOCK" 2>/dev/null || {
+  echo "paperflow-dock daemon timeout (>2s) on feed: $FEED"
+  exit 0
+}

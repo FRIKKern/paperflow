@@ -1,0 +1,5 @@
+# Fixture: active-context with an active goal.
+# Format: "Goal:   <id> · <slug>" / "Phase:" / "Task:".
+SUBSTRING: Goal:
+SUBSTRING: Phase:
+SUBSTRING: Task:

@@ -1,0 +1,3 @@
+# Fixture: bd-ready with no active-goal pointer.
+# Without a goal, no phase label exists, so the feed falls back.
+SUBSTRING: No active goal.

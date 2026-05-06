@@ -1,0 +1,4 @@
+# Fixture: auto-open-log with an active goal.
+# Same sandboxed HOME as no-goal — file doesn't exist — daemon serves
+# the empty/rotated diagnostic. We assert the feed is at least responsive.
+SUBSTRING: auto-open
