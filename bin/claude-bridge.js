@@ -228,6 +228,7 @@ function createEvent(opts, cb) {
       '-d', description,
       '--parent', goal_id,
       '-l', labels.join(','),
+      '--no-inherit-labels',
       '--silent'
     ];
     execFile('bd', args, { maxBuffer: 4 * 1024 * 1024, cwd: BD_CWD }, (err, stdout) => {
