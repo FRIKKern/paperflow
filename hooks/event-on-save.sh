@@ -57,10 +57,17 @@ case "$FILE_PATH" in
   *)                  EVT="doc-written" ;;
 esac
 
-# ── Find the active-goal pointer by walking up from the file's directory.
-# Stops at /, $HOME, or the first .paperflow/active-goal we find.
-find_active_goal() {
-  local dir="$(/usr/bin/dirname "$1")"
+# ── Resolve the active-goal pointer in three strategies (first hit wins):
+#   1. Walk up from the saved file's directory looking for
+#      `.paperflow/active-goal`. Catches docs that live INSIDE a repo
+#      that uses paperflow.
+#   2. Walk up from $PWD (the shell's cwd, which when paperflow is being
+#      driven by the orchestrator is the dev repo root).
+#   3. Fall back to ~/.paperflow/active-goal — a global pointer the
+#      paperflow-goal skill mirrors on open and clears on close.
+# If none resolves, the rail can't render anyway, so quiet exit 0.
+walk_up_for_active_goal() {
+  local dir="$1"
   while [ -n "$dir" ] && [ "$dir" != "/" ]; do
     if [ -f "$dir/.paperflow/active-goal" ]; then
       printf '%s' "$dir"
@@ -71,14 +78,35 @@ find_active_goal() {
   return 1
 }
 
-REPO_DIR="$(find_active_goal "$FILE_PATH" || true)"
-if [ -z "$REPO_DIR" ]; then
-  # No active Goal anywhere in the ancestry — the rail wouldn't render
-  # anyway. Nothing to do; quiet exit.
+REPO_DIR=""
+ACTIVE_GOAL_FILE=""
+
+# Strategy 1: walk up from the saved file's directory.
+REPO_DIR="$(walk_up_for_active_goal "$(/usr/bin/dirname "$FILE_PATH")" || true)"
+if [ -n "$REPO_DIR" ]; then
+  ACTIVE_GOAL_FILE="$REPO_DIR/.paperflow/active-goal"
+fi
+
+# Strategy 2: walk up from $PWD.
+if [ -z "$ACTIVE_GOAL_FILE" ] && [ -n "$PWD" ]; then
+  REPO_DIR="$(walk_up_for_active_goal "$PWD" || true)"
+  if [ -n "$REPO_DIR" ]; then
+    ACTIVE_GOAL_FILE="$REPO_DIR/.paperflow/active-goal"
+  fi
+fi
+
+# Strategy 3: global fallback.
+if [ -z "$ACTIVE_GOAL_FILE" ] && [ -f "$HOME/.paperflow/active-goal" ]; then
+  ACTIVE_GOAL_FILE="$HOME/.paperflow/active-goal"
+  REPO_DIR="$HOME"
+fi
+
+if [ -z "$ACTIVE_GOAL_FILE" ]; then
+  # No active Goal anywhere — the rail wouldn't render anyway.
   exit 0
 fi
 
-GOAL_ID="$(/usr/bin/head -n1 "$REPO_DIR/.paperflow/active-goal" | /usr/bin/tr -d '[:space:]')"
+GOAL_ID="$(/usr/bin/head -n1 "$ACTIVE_GOAL_FILE" | /usr/bin/tr -d '[:space:]')"
 [ -n "$GOAL_ID" ] || exit 0
 
 # Optional walk-back parent. If non-empty, we forward it so the bridge can

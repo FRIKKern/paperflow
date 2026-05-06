@@ -14,6 +14,8 @@
 //                                event:questionnaire-answered when active goal
 //                                is known)
 //   GET  /goal-path?goal=<id>    Goal-path event subtree (paperflow-e5v rail)
+//   GET  /goal-path?source=<rel> Resolve goal_id by latest event with
+//                                source:<rel> label, then return its path
 //   GET  /event/<task-id>        sidecar payload for one event-task
 //   POST /event                  create a kind:event Beads task + sidecar
 //   POST /event/active           write <repo>/.paperflow/active-event-base
@@ -171,6 +173,42 @@ function resolveGoalSlug(goalId, cb) {
       const slugLabel = labels.find(l => typeof l === 'string' && l.startsWith('goal-'));
       if (!slugLabel) return cb(new Error('no goal-<slug> label on ' + goalId));
       cb(null, slugLabel);
+    });
+}
+
+// Resolve a goal-task id from a doc-relative source path. Lists every
+// kind:event whose labels include `source:<rel>`, picks the most recent
+// one (lexicographic created_at sort, last entry wins), then derives
+// the goal-task by stripping the trailing segment from the event-task's
+// hierarchical Beads ID. Events are created with `--parent <goal_id>`
+// (see createEvent), so an event id like `bd-a1b2.7` belongs to goal
+// `bd-a1b2`. Returns null when no matching event exists.
+function resolveGoalIdFromSource(sourceRel, cb) {
+  execFile('bd',
+    ['list', '--label', 'kind:event', '--label', `source:${sourceRel}`, '--json', '--no-default-args'],
+    { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+    (err, stdout) => {
+      const finish = (s) => {
+        let arr = [];
+        try { arr = JSON.parse(s || '[]'); } catch (_) { /* */ }
+        if (!Array.isArray(arr) || !arr.length) return cb(null, null);
+        arr.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+        const latest = arr[arr.length - 1];
+        const id = String(latest.id || '');
+        const parts = id.split('.');
+        if (parts.length < 2) {
+          // Not hierarchical — fall back to the id itself.
+          return cb(null, id || null);
+        }
+        cb(null, parts.slice(0, parts.length - 1).join('.'));
+      };
+      if (err) {
+        return execFile('bd',
+          ['list', '--label', 'kind:event', '--label', `source:${sourceRel}`, '--json'],
+          { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+          (e2, s2) => { if (e2) return cb(e2); finish(s2); });
+      }
+      finish(stdout);
     });
 }
 
@@ -383,13 +421,60 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // GET /goal-path?goal=<task-id>
+  // GET /goal-path?goal=<task-id>  OR  /goal-path?source=<rel-path>
   // Returns the event subtree for a Goal as JSON, sorted by created-at.
+  // The ?source= form is a fallback used by lib/goal-path-rail.js when the
+  // doc didn't set window.PAPERFLOW_GOAL_ID — it walks Beads for any
+  // kind:event whose `source:<rel>` matches, takes the latest one's parent
+  // (the goal-task) and resolves from there. Path-traversal guarded.
   if (req.method === 'GET' && url.pathname === '/goal-path') {
     const goalId = url.searchParams.get('goal');
-    if (!goalId) {
+    const source = url.searchParams.get('source');
+    if (!goalId && !source) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'need ?goal=<task-id>' }));
+      return res.end(JSON.stringify({ error: 'need ?goal=<task-id> or ?source=<rel-path>' }));
+    }
+    if (!goalId) {
+      // Resolve the goal_id from the most recent matching source-event.
+      if (!safeRelPath(source)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'source must be a relative path under ~/docs/paperflow/' }));
+      }
+      return resolveGoalIdFromSource(source, (rErr, resolvedGoalId) => {
+        if (rErr) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: rErr.message }));
+        }
+        if (!resolvedGoalId) {
+          // Same shape as a hit with zero events — keeps the rail hidden.
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: true, slug_label: null, events: [] }));
+        }
+        resolveGoalSlug(resolvedGoalId, (slugErr, slugLabel) => {
+          if (slugErr) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: slugErr.message }));
+          }
+          execFile('bd',
+            ['list', '--label', 'kind:event', '--label', slugLabel, '--json', '--no-default-args'],
+            { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+            (lErr, lOut) => {
+              if (lErr) {
+                return execFile('bd',
+                  ['list', '--label', 'kind:event', '--label', slugLabel, '--json'],
+                  { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+                  (l2Err, l2Out) => {
+                    if (l2Err) {
+                      res.writeHead(500, { 'Content-Type': 'application/json' });
+                      return res.end(JSON.stringify({ error: l2Err.message }));
+                    }
+                    respondGoalPath(res, slugLabel, l2Out);
+                  });
+              }
+              respondGoalPath(res, slugLabel, lOut);
+            });
+        });
+      });
     }
     resolveGoalSlug(goalId, (slugErr, slugLabel) => {
       if (slugErr) {

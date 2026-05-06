@@ -129,6 +129,10 @@ The site audit reuses the review-task wrapper:
 
 The audit HTML is the verifiable artifact even when the verdict is "needs work".
 
+### Changelog HTML
+
+When a review approves a build that ships UI work, the changelog HTML lands at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html`. **Every paperflow HTML you write MUST include** `<script>window.PAPERFLOW_GOAL_ID = "<goal-id>";</script>` near the existing `window.DOC_PATH` block. The goal-path rail reads this to know which Goal's events to show; without it the rail can't anchor the changelog into the Goal's path.
+
 ## Artifact
 
 - A review-task in Beads linked to the build-task and to the review phase-task. Closed on approval; closed (with build-task re-opened) on rejection.
