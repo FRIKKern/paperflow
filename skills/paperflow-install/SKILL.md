@@ -51,6 +51,12 @@ Visible self-correction, not silent inlining.
 When in doubt, dispatch.
 <!-- END paperflow-thresholds -->
 
+## Dock trust prompt
+
+`bash install.sh` now writes a personal `${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json` with paperflow's four feeds (active-context · bd-ready · goal-path · auto-open-log) and spawns the long-running daemon at `~/.paperflow/dock.sock`. cmux has no `trust` subcommand or per-config trust verb (verified at build time via `cmux --help` and `cmux help` — no match for "trust" or "dock"). Personal-scope dock configs at `~/.config/cmux/` load without a per-repo prompt; commands run inside the user's normal login shell.
+
+If a future cmux release prompts on first dock load (per-repo `.cmux/dock.json` is the case the cmux team has reserved this for), accept the prompt — paperflow's dock.json contains only paperflow-managed `watch -n 5 paperflow-dock-feed <name>` entries that talk to the local daemon. Nothing in the dock invokes a remote.
+
 ## Refreshing the threshold block
 
 `lib/shared-thresholds.md` in the paperflow repo is the single source of truth for the block above. On every `bash install.sh` run, the **Refresh threshold blocks** step regenerates the content between `<!-- BEGIN paperflow-thresholds -->` and `<!-- END paperflow-thresholds -->` in each non-exempt skill body — `paperflow-{goal,plan,build,review,install}`. `paperflow-resume` is exempt (read-only on Beads, never authors prose against the threshold).

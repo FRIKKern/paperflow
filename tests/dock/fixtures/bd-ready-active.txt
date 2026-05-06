@@ -1,0 +1,5 @@
+# Fixture: bd-ready with an active goal.
+# Acceptable shapes: "Ready (N):" header, OR "bd error:" if the test goal
+# id doesn't resolve. Either case proves the feed is being served — not
+# the daemon-down fallback.
+SUBSTRING: Ready

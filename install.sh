@@ -30,6 +30,12 @@
 #                         then DELETE those paths and re-run install
 #                         fresh. Combine with --with-* flags to pick
 #                         the integration set for the new install.
+#   --reset-dock          Overwrite an existing
+#                         ${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json
+#                         with paperflow's rendered template (after
+#                         backing up to dock.json.bak.<ts>). Without
+#                         this flag, the install skips a pre-existing
+#                         dock config and prints a status row.
 #
 # Default install (no flags) is lean: only the core paperflow CLAUDE.md
 # is rendered — no integration prose for OpenClaw / BrowserBase /
@@ -42,12 +48,14 @@ WITH_OPENCLAW=0
 WITH_BROWSERBASE=0
 WITH_UNLIGHTHOUSE=0
 DO_RESET=0
+DO_RESET_DOCK=0
 for arg in "$@"; do
     case "$arg" in
         --with-openclaw)     WITH_OPENCLAW=1 ;;
         --with-browserbase)  WITH_BROWSERBASE=1 ;;
         --with-unlighthouse) WITH_UNLIGHTHOUSE=1 ;;
         --reset)             DO_RESET=1 ;;
+        --reset-dock)        DO_RESET_DOCK=1 ;;
         --help|-h)
             sed -n '2,40p' "$0"
             exit 0
@@ -551,6 +559,68 @@ else
     ok "merged PostToolUse event-on-save"
 fi
 
+# ─── 8b. paperflow Dock (cmux) ──────────────────────────────────────
+# Daemon + thin feed client + XDG-compliant dock.json. Skip-on-existing
+# default; --reset-dock overwrites after backing up to .bak.<ts>.
+log "paperflow Dock"
+
+# (1) install daemon + feed client to ~/.local/bin/
+cp "$REPO/bin/paperflow-dock-daemon" "$HOME/.local/bin/paperflow-dock-daemon"
+chmod +x "$HOME/.local/bin/paperflow-dock-daemon"
+ok "daemon → ~/.local/bin/paperflow-dock-daemon"
+
+cp "$REPO/bin/paperflow-dock-feed" "$HOME/.local/bin/paperflow-dock-feed"
+chmod +x "$HOME/.local/bin/paperflow-dock-feed"
+ok "feed client → ~/.local/bin/paperflow-dock-feed"
+
+# (2) render lib/dock.json.tmpl with __HOME__ substituted; resolve XDG path.
+DOCK_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cmux"
+DOCK_CONFIG_FILE="$DOCK_CONFIG_DIR/dock.json"
+mkdir -p "$DOCK_CONFIG_DIR"
+
+if [ -f "$DOCK_CONFIG_FILE" ] && [ "$DO_RESET_DOCK" -ne 1 ]; then
+    skip "dock config exists at $DOCK_CONFIG_FILE — pass --reset-dock to overwrite"
+else
+    if [ -f "$DOCK_CONFIG_FILE" ] && [ "$DO_RESET_DOCK" -eq 1 ]; then
+        DOCK_BACKUP="$DOCK_CONFIG_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$DOCK_CONFIG_FILE" "$DOCK_BACKUP"
+        ok "backup → $DOCK_BACKUP"
+    fi
+    render "$REPO/lib/dock.json.tmpl" "$DOCK_CONFIG_FILE" ""
+    ok "wrote $DOCK_CONFIG_FILE"
+fi
+
+# (3) daemon liveness — only spawn if socket isn't responsive.
+DOCK_SOCK="$HOME/.paperflow/dock.sock"
+mkdir -p "$HOME/.paperflow"
+DOCK_DAEMON_RUNNING=0
+if [ -S "$DOCK_SOCK" ] \
+   && printf 'active-context\n' | /usr/bin/nc -U -w 1 "$DOCK_SOCK" >/dev/null 2>&1; then
+    skip "daemon already running (socket responsive)"
+    DOCK_DAEMON_RUNNING=1
+else
+    if [ -S "$DOCK_SOCK" ]; then rm -f "$DOCK_SOCK" 2>/dev/null || true; fi
+    if [ -n "${CMUX_SOCKET:-}" ] && [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "$CMUX_BUNDLED_CLI_PATH" ]; then
+        "$CMUX_BUNDLED_CLI_PATH" new-workspace \
+            --name "paperflow-dock-daemon" \
+            --command "$NODE_BIN $HOME/.local/bin/paperflow-dock-daemon" \
+            >/dev/null 2>&1 \
+                && ok "daemon spawned via cmux new-workspace" \
+                || err "cmux new-workspace failed for paperflow-dock-daemon"
+    else
+        nohup "$NODE_BIN" "$HOME/.local/bin/paperflow-dock-daemon" \
+            </dev/null >/tmp/paperflow-dock-daemon.log 2>&1 &
+        disown
+        ok "daemon spawned in background (non-cmux) → /tmp/paperflow-dock-daemon.log"
+    fi
+    # Brief wait for the socket to come up.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -S "$DOCK_SOCK" ] && DOCK_DAEMON_RUNNING=1 && break
+        sleep 0.5
+    done
+    [ "$DOCK_DAEMON_RUNNING" -eq 1 ] || skip "daemon socket did not appear within 5 s — check the spawn"
+fi
+
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
 for s in paperflow-goal paperflow-plan paperflow-build paperflow-review paperflow-install paperflow-resume; do
@@ -856,6 +926,15 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-bd-init" ]               && ok "bd-init helper : executable" || err "bd-init helper : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
+    [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
+    [ -x "$HOME/.local/bin/paperflow-dock-feed" ]              && ok "dock feed     : executable" || err "dock feed     : missing"
+    [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json" ]  && ok "dock config   : present"    || skip "dock config   : missing"
+    if [ -S "$HOME/.paperflow/dock.sock" ] \
+       && printf 'active-context\n' | /usr/bin/nc -U -w 1 "$HOME/.paperflow/dock.sock" >/dev/null 2>&1; then
+        ok "dock daemon   : running    (~/.paperflow/dock.sock)"
+    else
+        skip "dock daemon   : not running (re-run install.sh to respawn)"
+    fi
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \
