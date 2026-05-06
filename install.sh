@@ -548,6 +548,50 @@ for s in paperflow-goal paperflow-plan paperflow-build paperflow-review paperflo
     fi
 done
 
+# ─── 9a. Refresh threshold blocks ──────────────────────────────────
+# Splice lib/shared-thresholds.md between the BEGIN/END sentinels in
+# each non-exempt skill body. Idempotent — running twice produces no
+# diff. paperflow-resume is exempt (read-only on Beads).
+log "Refresh threshold blocks"
+SHARED="$REPO/lib/shared-thresholds.md"
+SKILLS_DIR="$HOME/.claude/skills"
+NON_EXEMPT="paperflow-goal paperflow-plan paperflow-build paperflow-review paperflow-install"
+if [ ! -f "$SHARED" ]; then
+    err "missing source: $SHARED"
+else
+    for s in $NON_EXEMPT; do
+        SKILL_FILE="$SKILLS_DIR/$s/SKILL.md"
+        [ -f "$SKILL_FILE" ] || { skip "$s — SKILL.md not installed"; continue; }
+        if ! grep -q '<!-- BEGIN paperflow-thresholds -->' "$SKILL_FILE"; then
+            skip "$s — no BEGIN sentinel (block not declared in this skill)"
+            continue
+        fi
+        TMP="$(mktemp)"
+        trap 'rm -f "$TMP"' EXIT
+        # Anchor sentinel matches to lines whose ONLY content is the
+        # sentinel — otherwise prose that mentions the marker (as in
+        # paperflow-install's "Refreshing the threshold block" subsection)
+        # falsely triggers the splice and truncates the file.
+        awk -v shared="$SHARED" '
+          /^<!-- BEGIN paperflow-thresholds -->$/ {
+              print
+              while ((getline line < shared) > 0) print line
+              close(shared)
+              skip = 1
+              next
+          }
+          /^<!-- END paperflow-thresholds -->$/ {
+              skip = 0
+              print
+              next
+          }
+          !skip { print }
+        ' "$SKILL_FILE" > "$TMP" && mv "$TMP" "$SKILL_FILE"
+        trap - EXIT
+        ok "refreshed $s"
+    done
+fi
+
 # ─── 9b. Statusline ────────────────────────────────────────────────
 # One bash script + one editable JSON, wired into ~/.claude/settings.json.
 # Sidecar SHA tracking — overwrite only when the live file matches the SHA we
@@ -674,6 +718,12 @@ cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrat
 chmod +x "$HOME/.local/bin/paperflow-migrate-legacy-goals"
 ok "installed at ~/.local/bin/paperflow-migrate-legacy-goals"
 
+# ─── 10f2. Subagent-Run audit helper ───────────────────────────────
+log "Helper: paperflow-audit-orchestrator-budget"
+cp "$REPO/bin/paperflow-audit-orchestrator-budget" "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
+chmod +x "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
+ok "installed at ~/.local/bin/paperflow-audit-orchestrator-budget"
+
 # ─── 10g. Migration: legacy goals → Beads ──────────────────────────
 log "Migration: legacy goals → Beads"
 if "$HOME/.local/bin/paperflow-migrate-legacy-goals"; then
@@ -758,6 +808,7 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
     [ -x "$HOME/.local/bin/paperflow-bd-init" ]               && ok "bd-init helper : executable" || err "bd-init helper : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
+    [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \

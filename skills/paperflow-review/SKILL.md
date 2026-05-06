@@ -7,6 +7,50 @@ description: Use when the user says "request review", "receive review on PR #N",
 
 Request + receive code review, finish a development branch, run a site audit. Lives naturally in the `review` phase. The orchestrator opens a review-task linked to a build-task; the subagent runs the review (or audit); the result determines whether the parent build-task stays closed or re-opens.
 
+<!-- BEGIN paperflow-thresholds -->
+## Subagent enforcement (paperflow-thresholds v1)
+
+paperflow's orchestrator delegates non-trivial work to subagents. The rule has hard thresholds and a pre-write checkpoint — not just guidance.
+
+**Hard thresholds** — above ANY of these, the orchestrator MUST dispatch a subagent:
+
+- **> 30 LOC** of new code (across all files in one logical unit)
+- **> 50 lines** of new prose / markdown
+- **> 500 tokens** of raw tool output captured / synthesised
+
+**Bash-glue carve-out**: bash glue scripts ≤ **25 LOC** stay inline. Other languages (JS, Python, etc.) hold the 30 LOC gate.
+
+**Pre-write checkpoint**: before any inline `Write` or `Edit` of more than 30 LOC of code OR 50 lines of prose, the orchestrator prints a one-line justification:
+
+    Doing inline because: <reason>. Above threshold would be <subagent-reason>.
+
+Visible self-correction, not silent inlining.
+
+**Recursion depth = 1**: subagent briefs themselves are orchestrator-direct, no matter their length. The orchestrator can write a 600-token brief without dispatching to write the brief — otherwise infinite recursion.
+
+**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `paperflow-build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
+
+**Commit-message marker**: any commit touching > 30 LOC includes a structured trailer:
+
+    Subagent-Run: <task-id>
+
+`bin/paperflow-audit-orchestrator-budget` flags over-threshold commits that lack this trailer.
+
+**Always orchestrator-direct (exempt list)** — never dispatch a subagent for:
+
+- Beads bookkeeping (`bd create / claim / close / update --description`)
+- Pointer-file writes (`<repo>/.paperflow/active-{goal,phase}`)
+- `Read` (always free)
+- Short verification commands (`curl` probes, `find … | wc -l`, single-shot greps)
+- Single-line edits to live docs to bump pointers / status
+- Snapshot writes that change ≤ 5 lines of an existing HTML
+- `bd` comments and `bd update --description` (any size)
+- Pasting verbatim subagent output (the subagent already did the work)
+- Bash glue scripts ≤ 25 LOC (carve-out above)
+
+When in doubt, dispatch.
+<!-- END paperflow-thresholds -->
+
 ## When to fire
 
 | Use this skill when | Skip when |
@@ -58,6 +102,21 @@ bd update <review-task> --close   # the review itself is done; the work isn't
 ```
 
 `paperflow-build` will pick the re-opened build-task up via `bd ready` on the next iteration.
+
+### Subagent-Run audit
+
+Every review-task includes a run of `~/.local/bin/paperflow-audit-orchestrator-budget` against the build-phase commits being reviewed. The audit script flags any commit whose net LOC change exceeds 30 and lacks at least one `Subagent-Run: <task-id>` trailer in the commit message body.
+
+```bash
+~/.local/bin/paperflow-audit-orchestrator-budget --since main
+```
+
+For each flagged commit, the review subagent must either:
+
+1. **Justify it** — add a one-paragraph note to the review-task explaining why the threshold was exceeded inline (e.g. the orchestrator's pre-write checkpoint line is in the transcript, the work was a single coherent edit that fragmented poorly), OR
+2. **Reopen the build-task** — `bd update <build-task> --reopen` and brief the next builder to retry with proper subagent dispatch + the trailer convention.
+
+The audit is informational (`exit 0` always). The discipline lives in the review judgement: a flagged commit without a justification fails the review.
 
 ### Site audit sub-flow
 

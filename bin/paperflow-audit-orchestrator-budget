@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# paperflow-audit-orchestrator-budget — informational audit for the
+# Subagent-Run: <task-id> commit-message convention.
+#
+# Heuristic: any commit whose net LOC change exceeds 30 SHOULD carry at
+# least one `Subagent-Run: <task-id>` trailer in the commit message body.
+# This script flags commits over the threshold that lack the trailer.
+#
+# Soft-enforce posture: exits 0 always. The trailer is the discipline;
+# this script is the audit. Use the output to nudge the convention.
+#
+# Usage:
+#   paperflow-audit-orchestrator-budget [--since <ref>]
+#
+# Defaults to --since main. Run from inside any git repo.
+
+set -euo pipefail
+
+SINCE="main"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --since)
+            SINCE="${2:-}"
+            shift 2
+            ;;
+        --help|-h)
+            sed -n '2,17p' "$0"
+            exit 0
+            ;;
+        *)
+            printf 'Unknown flag: %s\n' "$1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Color helpers (only when stdout is a TTY).
+if [ -t 1 ]; then
+    YEL=$'\033[1;33m'
+    GRN=$'\033[1;32m'
+    DIM=$'\033[2m'
+    RST=$'\033[0m'
+else
+    YEL=""
+    GRN=""
+    DIM=""
+    RST=""
+fi
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'Not in a git repo.\n' >&2
+    exit 1
+fi
+
+# Resolve range. If SINCE doesn't exist, audit the whole history.
+if git rev-parse --verify --quiet "$SINCE" >/dev/null; then
+    RANGE="$SINCE..HEAD"
+else
+    RANGE="HEAD"
+    printf '%s(no ref %s — auditing full history)%s\n' "$DIM" "$SINCE" "$RST"
+fi
+
+scanned=0
+flagged=0
+
+while IFS= read -r sha; do
+    [ -z "$sha" ] && continue
+    scanned=$((scanned + 1))
+
+    # Net LOC: sum of additions+deletions across the commit's diffstat.
+    stats=$(git show --shortstat --format= "$sha" 2>/dev/null | tail -n1)
+    adds=$(printf '%s' "$stats" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || true)
+    dels=$(printf '%s' "$stats" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || true)
+    adds="${adds:-0}"
+    dels="${dels:-0}"
+    net=$((adds + dels))
+
+    if [ "$net" -le 30 ]; then
+        continue  # under threshold; ignore
+    fi
+
+    # Look for the structured trailer in the message body.
+    msg=$(git log -1 --format='%B' "$sha")
+    if printf '%s' "$msg" | grep -qE '^Subagent-Run:[[:space:]]+'; then
+        continue  # compliant
+    fi
+
+    flagged=$((flagged + 1))
+    subject=$(git log -1 --format='%s' "$sha")
+    short=$(git rev-parse --short "$sha")
+    printf '%s⚠%s  %s  +%s -%s  no Subagent-Run trailer  %s\n' \
+        "$YEL" "$RST" "$short" "$adds" "$dels" "$subject"
+done < <(git log "$RANGE" --pretty=format:'%H')
+
+printf '\n%s%d commits scanned, %d flagged for missing Subagent-Run trailer.%s\n' \
+    "$GRN" "$scanned" "$flagged" "$RST"
+
+exit 0
