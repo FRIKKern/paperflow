@@ -6,12 +6,35 @@
 //
 // Foreground for testing:    node claude-bridge.js
 // Logs:                      stdout / stderr
+//
+// Endpoints:
+//   GET  /                       liveness ping
+//   POST /build                  dispatch a message to the originating terminal
+//   POST /marker                 questionnaire-answered sidecar (also fires an
+//                                event:questionnaire-answered when active goal
+//                                is known)
+//   GET  /goal-path?goal=<id>    Goal-path event subtree (paperflow-e5v rail)
+//   GET  /event/<task-id>        sidecar payload for one event-task
+//   POST /event                  create a kind:event Beads task + sidecar
+//   POST /event/active           write <repo>/.paperflow/active-event-base
+//   GET  /diff?from=<id>&to=<id> bridge-side line-level diff between two events
 
 const http = require('http');
+const path = require('path');
+const fs   = require('fs');
 const { execFile } = require('child_process');
 
 const PORT = 8766;
 const HOST = '127.0.0.1';
+
+// Vendored line-level diff. The bridge is the diff engine; the modal is a
+// dumb viewer. See lib/text-diff.js (paperflow-e5v.2.2).
+const textDiff = require(path.join(__dirname, '..', 'lib', 'text-diff.js'));
+
+// Beads invocations cd into the bridge's own checkout root so they find the
+// .beads/ db deterministically. Cmux spawns the bridge with whatever cwd the
+// terminal happened to have — relying on inheritance is fragile.
+const BD_CWD = path.resolve(__dirname, '..');
 
 // ── AppleScript string escape (\" and \\) ──────────────────────────
 const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -113,6 +136,119 @@ function dispatch(target, message, cb) {
   cb(new Error('unsupported target: ' + JSON.stringify(target)));
 }
 
+// ── Goal-path helpers ────────────────────────────────────────────────
+//
+// Sidecar files live at ~/.paperflow/events/<event-task-id>.{html,md,json}.
+// The directory is paperflow-wide (single-user) — same scope as the
+// statusline cache.
+const EVENTS_DIR = path.join(process.env.HOME, '.paperflow', 'events');
+
+function ensureEventsDir() {
+  try { fs.mkdirSync(EVENTS_DIR, { recursive: true }); } catch (_) { /* */ }
+}
+
+// Resolve `goal-<slug>` from a goal-task ID by asking Beads for its labels.
+// `bd show <id> --json` returns an array of issues. The first label that
+// starts with "goal-" wins.
+function resolveGoalSlug(goalId, cb) {
+  execFile('bd', ['show', goalId, '--json'], { maxBuffer: 8 * 1024 * 1024, cwd: BD_CWD },
+    (err, stdout) => {
+      if (err) return cb(err);
+      let arr;
+      try { arr = JSON.parse(stdout); }
+      catch (e) { return cb(new Error('bd show: invalid JSON: ' + e.message)); }
+      if (!Array.isArray(arr) || !arr.length) {
+        return cb(new Error('bd show: no issue: ' + goalId));
+      }
+      const labels = arr[0].labels || [];
+      const slugLabel = labels.find(l => typeof l === 'string' && l.startsWith('goal-'));
+      if (!slugLabel) return cb(new Error('no goal-<slug> label on ' + goalId));
+      cb(null, slugLabel);
+    });
+}
+
+// Load a sidecar by event-task ID. Tries .html, then .md, then .json.
+function loadSidecar(eventId, cb) {
+  const exts = ['.html', '.md', '.json'];
+  let i = 0;
+  function tryNext() {
+    if (i >= exts.length) return cb(new Error('no sidecar for ' + eventId));
+    const p = path.join(EVENTS_DIR, eventId + exts[i++]);
+    fs.readFile(p, 'utf8', (err, data) => {
+      if (err) return tryNext();
+      cb(null, { ext: exts[i - 1], path: p, content: data });
+    });
+  }
+  tryNext();
+}
+
+// Repo-relative path-traversal guard — same shape as /marker uses for `plan`.
+function safeRelPath(p) {
+  return typeof p === 'string'
+      && !p.includes('..')
+      && !p.startsWith('/');
+}
+
+// Body collect helper.
+function collectBody(req, cb) {
+  let body = '';
+  req.on('data', c => (body += c));
+  req.on('end', () => {
+    let payload;
+    try { payload = body ? JSON.parse(body) : {}; }
+    catch (e) { return cb(e); }
+    cb(null, payload);
+  });
+}
+
+// Internal: create a kind:event Beads task + (optional) sidecar. Used by
+// POST /event AND by /marker so questionnaire submits leave an event trail.
+function createEvent(opts, cb) {
+  const { goal_id, event_type, source_doc, parent_event, branch, payload_html } = opts;
+  if (!goal_id || !event_type) {
+    return cb(new Error('createEvent: need {goal_id, event_type}'));
+  }
+  resolveGoalSlug(goal_id, (slugErr, slugLabel) => {
+    if (slugErr) return cb(slugErr);
+    const labels = [
+      'kind:event',
+      slugLabel,
+      `event:${event_type}`,
+      `branch:${branch || 'main'}`
+    ];
+    if (source_doc)   labels.push(`source:${source_doc}`);
+    if (parent_event) labels.push(`parent-event:${parent_event}`);
+    const title = `${event_type}${source_doc ? ' · ' + source_doc : ''}`;
+    const description = `${event_type} for goal ${goal_id} at ${new Date().toISOString()}`
+      + (source_doc ? `\nsource: ${source_doc}` : '')
+      + (parent_event ? `\nparent-event: ${parent_event}` : '');
+    const args = [
+      'create',
+      title,
+      '-d', description,
+      '--parent', goal_id,
+      '-l', labels.join(','),
+      '--silent'
+    ];
+    execFile('bd', args, { maxBuffer: 4 * 1024 * 1024, cwd: BD_CWD }, (err, stdout) => {
+      if (err) return cb(err);
+      const eventId = String(stdout || '').trim();
+      if (!eventId) return cb(new Error('bd create: empty id from --silent'));
+      // Optional sidecar.
+      if (payload_html) {
+        ensureEventsDir();
+        const dst = path.join(EVENTS_DIR, eventId + '.html');
+        fs.writeFile(dst, payload_html, w => {
+          if (w) return cb(w);
+          cb(null, { event_id: eventId, sidecar: dst });
+        });
+      } else {
+        cb(null, { event_id: eventId });
+      }
+    });
+  });
+}
+
 // ── HTTP server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   // CORS for browser access from http://localhost:8765/...
@@ -121,18 +257,16 @@ const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-  if (req.method === 'GET' && req.url === '/') {
+  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+
+  if (req.method === 'GET' && url.pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('claude-bridge ok\n');
   }
 
-  if (req.method === 'POST' && req.url === '/build') {
-    let body = '';
-    req.on('data', c => (body += c));
-    req.on('end', () => {
-      let payload;
-      try { payload = JSON.parse(body); }
-      catch (e) {
+  if (req.method === 'POST' && url.pathname === '/build') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'invalid JSON' }));
       }
@@ -157,42 +291,33 @@ const server = http.createServer((req, res) => {
   }
 
   // POST /marker — write a small sidecar file so paperflow-resume can detect
-  // submitted questionnaires. Body: { kind, plan, submitted_at? }.
+  // submitted questionnaires. Body: { kind, plan, submitted_at?, goal_id? }.
   // The marker file is written next to the doc HTML, named
   // "<plan-stem>-answered.json". `plan` must be a relative path (no '..',
   // no leading '/') under ~/docs/paperflow/ — anything else is rejected so
-  // the browser can't write outside the docs tree.
-  if (req.method === 'POST' && req.url === '/marker') {
-    let body = '';
-    req.on('data', c => (body += c));
-    req.on('end', () => {
-      const path = require('path');
-      const fs   = require('fs');
-      let payload;
-      try { payload = JSON.parse(body); }
-      catch (e) {
+  // the browser can't write outside the docs tree. When goal_id is set, an
+  // event:questionnaire-answered event is also recorded.
+  if (req.method === 'POST' && url.pathname === '/marker') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'invalid JSON' }));
       }
-      const { kind, plan, submitted_at } = payload || {};
+      const { kind, plan, submitted_at, goal_id } = payload || {};
       if (!plan || typeof plan !== 'string') {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'need {plan}' }));
       }
-      // Reject path traversal + absolute paths.
       if (plan.includes('..') || plan.startsWith('/')) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'plan must be a relative path under ~/docs/paperflow/' }));
       }
       const docsRoot = path.join(process.env.HOME, 'docs', 'paperflow');
-      // Resolve plan relative to questionnaires/ first; fall back to
-      // grills/ for the symmetrical use case.
       const stem = plan.replace(/\.html$/, '');
       const candidates = [
         path.join(docsRoot, 'questionnaires', `${stem}-answered.json`),
         path.join(docsRoot, 'grills',         `${stem}-answered.json`)
       ];
-      // Pick the first whose parent directory exists.
       const target = candidates.find(p => {
         try { return fs.statSync(path.dirname(p)).isDirectory(); }
         catch { return false; }
@@ -213,6 +338,18 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ error: err.message }));
         }
         console.log(`[${ts}] marker → ${target}`);
+        // Best-effort event-trail entry. If no goal_id was supplied or Beads
+        // is unhappy, the marker still succeeds — events are auxiliary.
+        const sourceRel = plan.replace(/^\/+/, '');
+        if (goal_id && typeof goal_id === 'string') {
+          createEvent({
+            goal_id,
+            event_type: 'questionnaire-answered',
+            source_doc: 'questionnaires/' + sourceRel
+          }, eErr => {
+            if (eErr) console.warn(`[${ts}] marker event skipped:`, eErr.message);
+          });
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, path: target }));
       });
@@ -220,8 +357,202 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /goal-path?goal=<task-id>
+  // Returns the event subtree for a Goal as JSON, sorted by created-at.
+  if (req.method === 'GET' && url.pathname === '/goal-path') {
+    const goalId = url.searchParams.get('goal');
+    if (!goalId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'need ?goal=<task-id>' }));
+    }
+    resolveGoalSlug(goalId, (slugErr, slugLabel) => {
+      if (slugErr) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: slugErr.message }));
+      }
+      execFile('bd',
+        ['list', '--label', 'kind:event', '--label', slugLabel, '--json', '--no-default-args'],
+        { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+        (err, stdout) => {
+          // --no-default-args is best-effort: bd may not know the flag on
+          // older versions. Retry once without it on EUSAGE-style failure.
+          if (err) {
+            execFile('bd',
+              ['list', '--label', 'kind:event', '--label', slugLabel, '--json'],
+              { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
+              (err2, stdout2) => {
+                if (err2) {
+                  res.writeHead(500, { 'Content-Type': 'application/json' });
+                  return res.end(JSON.stringify({ error: err2.message }));
+                }
+                respondGoalPath(res, slugLabel, stdout2);
+              });
+            return;
+          }
+          respondGoalPath(res, slugLabel, stdout);
+        });
+    });
+    return;
+  }
+
+  // GET /event/<task-id>
+  if (req.method === 'GET' && url.pathname.startsWith('/event/')) {
+    const eventId = decodeURIComponent(url.pathname.slice('/event/'.length));
+    if (!eventId || eventId.includes('/') || eventId.includes('..')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'bad event id' }));
+    }
+    loadSidecar(eventId, (err, side) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
+      const ct = side.ext === '.html' ? 'text/html'
+               : side.ext === '.json' ? 'application/json'
+               :                        'text/markdown';
+      res.writeHead(200, { 'Content-Type': ct + '; charset=utf-8' });
+      res.end(side.content);
+    });
+    return;
+  }
+
+  // POST /event — create a new event-task + optional sidecar.
+  // Body: {goal_id, event_type, source_doc?, parent_event?, branch?, payload_html?}
+  if (req.method === 'POST' && url.pathname === '/event') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+      const { goal_id, event_type } = payload || {};
+      if (!goal_id || !event_type) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'need {goal_id, event_type}' }));
+      }
+      createEvent(payload, (err, result) => {
+        const ts = new Date().toISOString();
+        if (err) {
+          console.error(`[${ts}] event error:`, err.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+        console.log(`[${ts}] event → ${result.event_id} (${event_type})`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      });
+    });
+    return;
+  }
+
+  // POST /event/active — write <repo>/.paperflow/active-event-base.
+  // Body: {repo_path, event_id}. Path-traversal guarded: repo_path must
+  // be absolute and contain a .paperflow dir; event_id is a flat token.
+  if (req.method === 'POST' && url.pathname === '/event/active') {
+    collectBody(req, (parseErr, payload) => {
+      if (parseErr) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+      }
+      const { repo_path, event_id } = payload || {};
+      if (!repo_path || typeof repo_path !== 'string'
+          || !repo_path.startsWith('/')
+          || repo_path.includes('..')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'bad repo_path' }));
+      }
+      if (typeof event_id !== 'string'
+          || event_id.includes('/')
+          || event_id.includes('..')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'bad event_id' }));
+      }
+      const dir = path.join(repo_path, '.paperflow');
+      try {
+        if (!fs.statSync(dir).isDirectory()) throw new Error('not a directory');
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'no .paperflow dir at ' + dir }));
+      }
+      const dst = path.join(dir, 'active-event-base');
+      fs.writeFile(dst, event_id + '\n', err => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, path: dst }));
+      });
+    });
+    return;
+  }
+
+  // GET /diff?from=<id>&to=<id> — line-level diff between two sidecars.
+  if (req.method === 'GET' && url.pathname === '/diff') {
+    const fromId = url.searchParams.get('from');
+    const toId   = url.searchParams.get('to');
+    if (!fromId || !toId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'need ?from=&to=' }));
+    }
+    if ([fromId, toId].some(id => id.includes('/') || id.includes('..'))) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'bad id' }));
+    }
+    loadSidecar(fromId, (e1, s1) => {
+      if (e1) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'from: ' + e1.message }));
+      }
+      loadSidecar(toId, (e2, s2) => {
+        if (e2) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'to: ' + e2.message }));
+        }
+        const chunks = textDiff.diff(s1.content, s2.content);
+        const html = textDiff.formatDiffHtml(chunks);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, from: fromId, to: toId, diffHtml: html }));
+      });
+    });
+    return;
+  }
+
   res.writeHead(404); res.end();
 });
+
+// Format the goal-path response: parse `bd list --json`, normalise events
+// into a chronological array with branch + parent-event fields hoisted out
+// of the labels for client convenience.
+function respondGoalPath(res, slugLabel, stdout) {
+  let arr;
+  try { arr = JSON.parse(stdout || '[]'); }
+  catch (e) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'bd list: invalid JSON: ' + e.message }));
+  }
+  const events = (Array.isArray(arr) ? arr : [])
+    .filter(it => Array.isArray(it.labels) && it.labels.includes('kind:event'))
+    .map(it => {
+      const ls = it.labels || [];
+      const findPrefix = pre => {
+        const l = ls.find(x => typeof x === 'string' && x.startsWith(pre));
+        return l ? l.slice(pre.length) : null;
+      };
+      return {
+        id: it.id,
+        title: it.title,
+        created_at: it.created_at,
+        event_type: findPrefix('event:'),
+        branch: findPrefix('branch:') || 'main',
+        parent_event: findPrefix('parent-event:'),
+        source_doc: findPrefix('source:'),
+        labels: ls
+      };
+    })
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, slug_label: slugLabel, events }));
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`claude-bridge listening on http://${HOST}:${PORT}`);
