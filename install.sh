@@ -297,6 +297,7 @@ mkdir -p "$HOME/docs/paperflow/specs" \
          "$HOME/docs/paperflow/audits/_archive" \
          "$HOME/docs/paperflow/_lib" \
          "$HOME/.paperflow" \
+         "$HOME/.paperflow/events" \
          "$HOME/.local/bin" \
          "$HOME/.local/log" \
          "$HOME/.openclaw/logs" \
@@ -477,14 +478,14 @@ fi
 
 # ─── 6. Shared renderers in ~/docs/paperflow/_lib/ ──────────────────
 log "Renderers"
-for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js live-render.css live-render.js; do
+for f in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js live-render.css live-render.js goal-path-rail.css goal-path-rail.js diff-modal.js text-diff.js; do
     cp "$REPO/lib/$f" "$HOME/docs/paperflow/_lib/$f"
     ok "$f"
 done
 
 # ─── 7. Hooks ───────────────────────────────────────────────────────
 log "Hooks"
-for f in inject-principles.sh auto-open-doc.sh validate-paperflow-doc.sh; do
+for f in inject-principles.sh auto-open-doc.sh validate-paperflow-doc.sh event-on-save.sh; do
     cp "$REPO/hooks/$f" "$HOME/.claude/hooks/$f"
     chmod +x "$HOME/.claude/hooks/$f"
     ok "$f"
@@ -534,6 +535,20 @@ else
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
     ok "merged PostToolUse validate"
+fi
+
+if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command? | type == "string" and endswith("event-on-save.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+    skip "PostToolUse event-on-save hook already present"
+else
+    TMP="$(mktemp)"
+    jq '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+        matcher: "Write|Edit",
+        hooks: [{ type: "command",
+                  command: "$HOME/.claude/hooks/event-on-save.sh",
+                  timeout: 5 }]
+    }])' "$SETTINGS" > "$TMP"
+    mv "$TMP" "$SETTINGS"
+    ok "merged PostToolUse event-on-save"
 fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
@@ -724,6 +739,34 @@ cp "$REPO/bin/paperflow-audit-orchestrator-budget" "$HOME/.local/bin/paperflow-a
 chmod +x "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
 ok "installed at ~/.local/bin/paperflow-audit-orchestrator-budget"
 
+# ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
+# Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
+# two alias blocks to ~/.beads/aliases.toml so `bd list` and `bd ready` filter
+# them out by default. Idempotent — only writes when the exact block isn't
+# already present. Override per-call with `bd list --no-default-args` (or
+# explicitly `bd list --label kind:event` to view them).
+log "Beads aliases: filter kind:event"
+BD_ALIASES="$HOME/.beads/aliases.toml"
+mkdir -p "$HOME/.beads"
+[ -f "$BD_ALIASES" ] || : > "$BD_ALIASES"
+# `bd alias` may exist on newer Beads — but writing the toml directly is
+# the supported documented path on 1.0.3, where the verb isn't shipped yet.
+if /usr/bin/grep -q 'paperflow-e5v: hide kind:event' "$BD_ALIASES" 2>/dev/null; then
+    skip "alias block already present"
+else
+    {
+        printf '\n# paperflow-e5v: hide kind:event from default bd list/ready\n'
+        printf '[[alias]]\n'
+        printf 'name = "list"\n'
+        printf 'default-args = ["--exclude-label", "kind:event"]\n'
+        printf '[[alias]]\n'
+        printf 'name = "ready"\n'
+        printf 'default-args = ["--exclude-label", "kind:event"]\n'
+    } >> "$BD_ALIASES"
+    ok "appended kind:event filter blocks to $BD_ALIASES"
+    skip "if your bd version ignores ~/.beads/aliases.toml, run: bd list --exclude-label kind:event"
+fi
+
 # ─── 10g. Migration: legacy goals → Beads ──────────────────────────
 log "Migration: legacy goals → Beads"
 if "$HOME/.local/bin/paperflow-migrate-legacy-goals"; then
@@ -802,6 +845,10 @@ log "Status"
     [ -f "$HOME/.claude/skills/paperflow-resume/SKILL.md" ]   && ok "resume skill  : present"    || err "resume skill  : missing"
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
+    [ -x "$HOME/.claude/hooks/event-on-save.sh" ]             && ok "event hook    : executable" || err "event hook    : missing"
+    [ -d "$HOME/.paperflow/events" ]                          && ok "events dir    : ready"      || err "events dir    : missing"
+    [ -f "$HOME/docs/paperflow/_lib/goal-path-rail.js" ]      && ok "rail renderer : present"    || err "rail renderer : missing"
+    [ -f "$HOME/docs/paperflow/_lib/text-diff.js" ]           && ok "text-diff lib : present"    || err "text-diff lib : missing"
     [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
     [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
     [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"

@@ -88,6 +88,18 @@ Live-render is **mandatory and on by default** for every paperflow HTML — `doc
 
 …before the `doc.js` include.
 
+## Goal path (right-rail)
+
+Every paperflow doc loaded with an active Goal in scope renders a 240px sticky right-rail showing the Goal's lifecycle as a Mermaid `gitGraph`. The rail tracks **events**, not doc revisions — `goal-opened`, `questionnaire-written`, `questionnaire-answered`, `plan-written`, `plan-grilled`, `phase-advanced`, `goal-snapshot`, `goal-closed`. Events live as `kind:event` Beads tasks parented to the goal-task, with HTML payloads at `~/.paperflow/events/<event-task-id>.html`. The bridge's `GET /goal-path?goal=<id>` wraps the `bd list` query; `GET /event/<id>` serves a sidecar; `GET /diff?from=&to=` computes line-level diffs via the vendored `lib/text-diff.js` (no CDN, no jsdiff).
+
+Walk-back: clicking an older event in the rail writes its id to `<repo>/.paperflow/active-event-base` (a tiny pointer file alongside `active-goal` / `active-phase`). The next save reads the pointer, parents the new event there, and lands it on a fresh `branch:alt-<n>`. The hook clears the pointer after the branched event is created. Shift-click two distinct nodes to open the diff modal.
+
+Cross-doc lineage: when a doc carries `<meta name="paperflow-spawned-from" content="<rel-path>">`, the rail shows `↳ from <basename>` at the top — one level only, no transitive chain.
+
+Filtering `kind:event` from `bd list`: `install.sh` appends two alias blocks to `~/.beads/aliases.toml` so `bd list` and `bd ready` use `--exclude-label kind:event` by default. To peek at events anyway: `bd list --label kind:event` (or `--no-default-args`). On Beads versions that don't honor the alias file, the manual flag is the documented fallback.
+
+Per-page opt-out: `<script>window.PAPERFLOW_NO_RAIL = true;</script>` before the `doc.js` include.
+
 ## Grills (plan stress-tests)
 
 Grills are the stress-test phase of `paperflow-plan` — generate 8–15 specific questions across categories (architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions). Each question must include `rationale`, `recommendation`, `recommendationReason`, and (almost always) a Mermaid `diagram`. Use the shared renderer at `/paperflow/_lib/grill.{css,js}`.
