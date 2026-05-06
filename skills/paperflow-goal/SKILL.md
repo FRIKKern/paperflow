@@ -105,7 +105,23 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
    `pre-flight` is the active-phase default at goal creation. `paperflow-build` advances the pointer when the phase empties.
 
+   **Mirror to the global pointer.** The `event-on-save.sh` hook walks up from the saved file's dir and from `$PWD`, but neither traversal reaches the dev repo when paperflow docs are saved under `~/docs/paperflow/...`. Mirror the active-goal id to a global pointer the hook also reads:
+
+   ```bash
+   mkdir -p "$HOME/.paperflow"
+   echo "$GOAL_ID" > "$HOME/.paperflow/active-goal"
+   ```
+
+   On goal close (`bd update $GOAL_ID --close`) clear BOTH files:
+
+   ```bash
+   : > <repo>/.paperflow/active-goal
+   : > "$HOME/.paperflow/active-goal"
+   ```
+
 7. **Render the Goal HTML.** Read the full subtree via `bd show $GOAL_ID --json` + `bd list --label goal-<slug> --json`. Write `~/docs/paperflow/goals/<slug>/index.html` with: ingress (vision + overall progress), one section per phase in order (active phase highlighted, per-phase progress bar), tasks listed under their phase, action bar at the bottom routing through the bridge. The auto-open hook fires on Write and reuses the existing tab via cmux.
+
+   **Every paperflow HTML you write MUST include** `<script>window.PAPERFLOW_GOAL_ID = "<goal-id>";</script>` near the existing `window.DOC_PATH` block. The goal-path rail (`lib/goal-path-rail.js`) reads this to know which Goal's events to show. Without it the rail falls back to a server-side `?source=<doc-path>` lookup — slower, and silent on freshly-created docs that don't yet have any events.
 
 ## Questionnaire on open
 

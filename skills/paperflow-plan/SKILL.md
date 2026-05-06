@@ -103,6 +103,8 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
    ~/docs/paperflow/plans/<YYYY-MM-DD>-<slug>.html
    ```
 
+   **Every paperflow HTML the subagent writes MUST include** `<script>window.PAPERFLOW_GOAL_ID = "<goal-id>";</script>` near the existing `window.DOC_PATH` block — applies to plans, grills, and questionnaires alike. The goal-path rail reads this to know which Goal's events to show. (Questionnaires also continue to set `window.GRILL.goalId` for the existing submit-routing path; the two coexist.)
+
    The subagent returns the URL plus a JSON list of plan steps: `[{ id, title, deps: [step-id…] }]`.
 
 4. **Materialise plan steps as Beads work-tasks.** For each step in the returned list, run:
