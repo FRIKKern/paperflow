@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# paperflow-active-scope — resolve which active-goal/active-phase pointer
+# files belong to *this* paperflow instance. Cmux workspace first, Claude
+# session second, unscoped legacy fallback last.
+#
+# Subcommands:
+#   --resolve            print scope token: cmux-<wsid> | session-<sid> | unscoped
+#   --read goal|phase    print scoped pointer (with unscoped fallback on miss)
+#   --write goal|phase <id>   write scoped pointer
+#   --clear              remove both pointers for current scope (not unscoped)
+#   --list-all           JSON map of every scope's pointer pair
+#   --migrate-legacy     copy unscoped → current-scope pointers (preserve legacy)
+#   --help               this text
+#
+# Exit codes: 0 ok · 1 empty --read · 2 args · 3 fatal write.
+
+set -eu
+
+PF_DIR="${PAPERFLOW_DIR:-$HOME/.paperflow}"
+SCOPE_CACHE="$PF_DIR/scope-of-pid-$$"
+trap 'rm -f "$SCOPE_CACHE" 2>/dev/null || true' EXIT
+
+usage() {
+  cat <<'EOF'
+Usage: paperflow-active-scope <subcommand> [args]
+
+  --resolve              print current scope token (cmux-<wsid> | session-<sid> | unscoped)
+  --read goal|phase      print active goal/phase id for current scope (with unscoped fallback)
+  --write goal|phase ID  write scoped pointer for current scope
+  --clear                clear scoped pointers for current scope (legacy untouched)
+  --list-all             JSON of every scope's {goal, phase}
+  --migrate-legacy       copy unscoped pointers into current scope (one-shot)
+  --help                 show this text
+
+Examples:
+  paperflow-active-scope --resolve
+  paperflow-active-scope --read goal
+EOF
+}
+
+# Try cmux first (500ms timeout), then $CLAUDE_SESSION_ID, then unscoped.
+_detect_scope() {
+  local cmux="/Applications/cmux.app/Contents/Resources/bin/cmux"
+  if [ -x "$cmux" ] || command -v cmux >/dev/null 2>&1; then
+    [ -x "$cmux" ] || cmux="$(command -v cmux)"
+    local out=""
+    if command -v gtimeout >/dev/null 2>&1; then
+      out="$(gtimeout 0.5 "$cmux" identify 2>/dev/null || true)"
+    else
+      out="$("$cmux" identify 2>/dev/null </dev/null & cmux_pid=$!; ( sleep 0.5; kill -9 "$cmux_pid" 2>/dev/null ) & guard_pid=$!; wait "$cmux_pid" 2>/dev/null; kill -9 "$guard_pid" 2>/dev/null || true)" || true
+    fi
+    if [ -n "$out" ]; then
+      local wsref=""
+      if command -v jq >/dev/null 2>&1; then
+        wsref="$(printf '%s' "$out" | jq -r '.focused.workspace_ref // empty' 2>/dev/null || true)"
+      else
+        wsref="$(printf '%s' "$out" | sed -n 's/.*"workspace_ref"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+      fi
+      if [ -n "$wsref" ]; then
+        printf 'cmux-%s' "$(printf '%s' "$wsref" | tr ':' '-')"
+        return 0
+      fi
+    fi
+  fi
+  if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+    printf 'session-%s' "$CLAUDE_SESSION_ID"
+    return 0
+  fi
+  printf 'unscoped'
+}
+
+_resolve() {
+  if [ -r "$SCOPE_CACHE" ]; then
+    cat "$SCOPE_CACHE"
+    return 0
+  fi
+  mkdir -p "$PF_DIR" 2>/dev/null || true
+  local s; s="$(_detect_scope)"
+  printf '%s' "$s" > "$SCOPE_CACHE" 2>/dev/null || true
+  printf '%s' "$s"
+}
+
+_path_for() { # kind, scope
+  local kind="$1" scope="$2"
+  if [ "$scope" = "unscoped" ]; then
+    printf '%s/active-%s' "$PF_DIR" "$kind"
+  else
+    printf '%s/active-%s-%s' "$PF_DIR" "$kind" "$scope"
+  fi
+}
+
+cmd_resolve() { _resolve; printf '\n'; }
+
+cmd_read() {
+  local kind="${1:-}"
+  case "$kind" in goal|phase) ;; *) echo "usage: --read goal|phase" >&2; exit 2 ;; esac
+  local scope; scope="$(_resolve)"
+  local p; p="$(_path_for "$kind" "$scope")"
+  local val=""
+  [ -r "$p" ] && val="$(head -n1 "$p" 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$val" ]; then printf '%s\n' "$val"; return 0; fi
+  if [ "$scope" != "unscoped" ]; then
+    local legacy; legacy="$(_path_for "$kind" "unscoped")"
+    [ -r "$legacy" ] && val="$(head -n1 "$legacy" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$val" ]; then printf '%s\n' "$val"; return 0; fi
+  fi
+  printf ''
+  exit 1
+}
+
+cmd_write() {
+  local kind="${1:-}" id="${2:-}"
+  case "$kind" in goal|phase) ;; *) echo "usage: --write goal|phase <id>" >&2; exit 2 ;; esac
+  [ -n "$id" ] || { echo "missing id" >&2; exit 2; }
+  mkdir -p "$PF_DIR" 2>/dev/null || { echo "fatal: mkdir $PF_DIR" >&2; exit 3; }
+  local scope; scope="$(_resolve)"
+  local p; p="$(_path_for "$kind" "$scope")"
+  printf '%s\n' "$id" > "$p" || { echo "fatal: write $p" >&2; exit 3; }
+}
+
+cmd_clear() {
+  local scope; scope="$(_resolve)"
+  [ "$scope" = "unscoped" ] && return 0
+  rm -f "$(_path_for goal "$scope")" "$(_path_for phase "$scope")" 2>/dev/null || true
+}
+
+cmd_list_all() {
+  mkdir -p "$PF_DIR" 2>/dev/null || true
+  # Collect scope tokens from existing files.
+  local tokens=""
+  local f base
+  for f in "$PF_DIR"/active-goal-* "$PF_DIR"/active-phase-*; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    case "$base" in
+      active-goal-*)  tokens="$tokens
+${base#active-goal-}" ;;
+      active-phase-*) tokens="$tokens
+${base#active-phase-}" ;;
+    esac
+  done
+  [ -e "$PF_DIR/active-goal" ] || [ -e "$PF_DIR/active-phase" ] && tokens="$tokens
+unscoped"
+  # De-dup.
+  tokens="$(printf '%s\n' "$tokens" | awk 'NF && !seen[$0]++')"
+  # Emit JSON.
+  printf '{\n'
+  local first=1 g p tok
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    g="$(head -n1 "$(_path_for goal "$tok")" 2>/dev/null | tr -d '[:space:]' || true)"
+    p="$(head -n1 "$(_path_for phase "$tok")" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ $first -eq 0 ]; then printf ',\n'; fi
+    first=0
+    # Quote tok safely (no embedded quotes expected — scope tokens are alnum+dashes).
+    printf '  "%s": {\n    "goal": "%s",\n    "phase": "%s"\n  }' "$tok" "${g:-}" "${p:-}"
+  done <<EOF
+$tokens
+EOF
+  printf '\n}\n'
+}
+
+cmd_migrate_legacy() {
+  local scope; scope="$(_resolve)"
+  if [ "$scope" = "unscoped" ]; then
+    echo "Nothing to migrate (current scope is unscoped)"
+    return 0
+  fi
+  local moved=0 g="" p=""
+  local lg lp tg tp
+  lg="$(_path_for goal unscoped)"
+  lp="$(_path_for phase unscoped)"
+  tg="$(_path_for goal "$scope")"
+  tp="$(_path_for phase "$scope")"
+  if [ -s "$lg" ] && [ ! -e "$tg" ]; then
+    cp "$lg" "$tg" && moved=1 && g="$(head -n1 "$tg" | tr -d '[:space:]')"
+  fi
+  if [ -s "$lp" ] && [ ! -e "$tp" ]; then
+    cp "$lp" "$tp" && moved=1 && p="$(head -n1 "$tp" | tr -d '[:space:]')"
+  fi
+  if [ "$moved" -eq 1 ]; then
+    echo "Migrated ${scope}: goal=${g} phase=${p}"
+  else
+    echo "Nothing to migrate"
+  fi
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────
+case "${1:-}" in
+  --resolve)        cmd_resolve ;;
+  --read)           shift; cmd_read "${1:-}" ;;
+  --write)          shift; cmd_write "${1:-}" "${2:-}" ;;
+  --clear)          cmd_clear ;;
+  --list-all)       cmd_list_all ;;
+  --migrate-legacy) cmd_migrate_legacy ;;
+  --help|-h|"")     usage ;;
+  *) echo "unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
+esac

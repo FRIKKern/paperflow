@@ -34,6 +34,14 @@ The lifecycle-closing skill — equivalent to Claude Code's `/resume`, but for G
    3.   docs-ia-cleanup · closed · 3 days ago
    ```
 
+   **Cross-instance scope hints.** paperflow's active-goal pointer is per-instance (per cmux workspace, or per Claude Code session). Two instances can hold different active Goals at once without colliding. To surface that, fold the scope map into the listing:
+
+   ```bash
+   paperflow-active-scope --list-all   # JSON of every scope's {goal, phase}
+   ```
+
+   Annotate each Goal in the numbered list with the scopes it's currently active in (e.g. "paperflow-j08 — last active in cmux-workspace-16"). The `bd list --label kind:goal --status open` output is the source of truth for which Goals exist; the scope map is annotation only.
+
 3. **Wait for the user's pick** — by number, by slug, or by partial-match. Resolve to a goal-task ID.
 
 4. **Read the chosen goal's metadata + slug:**
@@ -52,14 +60,16 @@ The lifecycle-closing skill — equivalent to Claude Code's `/resume`, but for G
 
    That phase-task ID becomes the new active-phase. If all phases are closed, the active-phase points at the last phase (review by default) and the orchestrator surfaces "Goal complete; nothing to resume." If zero phases exist, the active-phase pointer is left empty (Goal-level `bd ready` applies).
 
-6. **Write the two pointer files:**
+6. **Write the pointer files** — per-repo (unchanged) plus the per-instance scoped global pointers via the helper:
 
    ```bash
    echo "<goal-task-id>"  > <repo>/.paperflow/active-goal
    echo "<phase-task-id>" > <repo>/.paperflow/active-phase
+   paperflow-active-scope --write goal  "<goal-task-id>"
+   paperflow-active-scope --write phase "<phase-task-id>"
    ```
 
-   Both single-line files. Lookup walks up from cwd to the nearest `.paperflow/` directory.
+   The per-repo files stay single-line; lookup walks up from cwd to the nearest `.paperflow/` directory. The scoped writes target this Claude Code instance only — sibling instances (other cmux workspaces, other terminals) keep their own active goals.
 
 7. **Scan for unfinished questionnaires.** Before opening the Goal HTML, look for any questionnaire HTML belonging to this Goal that the user opened but never submitted:
 

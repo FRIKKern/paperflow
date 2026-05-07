@@ -22,14 +22,17 @@ const net  = require("net");
 const fs   = require("fs");
 const os   = require("os");
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const HOME    = os.homedir();
 const PF_DIR  = path.join(HOME, ".paperflow");
 const SOCK    = process.env.PAPERFLOW_DOCK_SOCK || path.join(PF_DIR, "dock.sock");
 const PID_FILE = path.join(PF_DIR, "dock-daemon.pid");
-const ACTIVE_GOAL_FILE  = path.join(PF_DIR, "active-goal");
-const ACTIVE_PHASE_FILE = path.join(PF_DIR, "active-phase");
+const SCOPE_HELPER = (() => {
+  const local = path.join(HOME, ".local", "bin", "paperflow-active-scope");
+  try { fs.accessSync(local, fs.constants.X_OK); return local; } catch (_) {}
+  return "paperflow-active-scope";
+})();
 const AUTO_OPEN_LOG     = path.join(PF_DIR, "auto-open.log");
 const POLL_MS = 2000;
 
@@ -107,9 +110,21 @@ function pad(s, n) {
   return s.length >= n ? s : s + " ".repeat(n - s.length);
 }
 
-// Active-goal pointer is the single source of truth.
+// Active-goal pointer goes through paperflow-active-scope so the daemon
+// honours the per-instance scope priority (cmux workspace → CLAUDE_SESSION_ID
+// → unscoped legacy fallback). The helper has a PID-keyed cache, so this
+// boils down to one cache-hit read after the first call in this daemon's
+// lifetime.
+function readScopePointer(kind) {
+  try {
+    const r = spawnSync(SCOPE_HELPER, ["--read", kind], { encoding: "utf8", timeout: 1000 });
+    if (r.status === 0) return (r.stdout || "").trim() || null;
+  } catch (_) {}
+  return null;
+}
+
 function readActiveGoal() {
-  return readFileSafe(ACTIVE_GOAL_FILE).trim() || null;
+  return readScopePointer("goal");
 }
 
 async function goalSlugLabel(goalId) {
@@ -119,9 +134,9 @@ async function goalSlugLabel(goalId) {
   return labels.find(l => l.startsWith("goal-")) || null;
 }
 
-// Active phase: prefer global mirror, fall back to goal's first phase.
+// Active phase: prefer scoped pointer (via helper), fall back to goal's first phase.
 async function readActivePhase(goalSlugLbl) {
-  const mirror = readFileSafe(ACTIVE_PHASE_FILE).trim();
+  const mirror = readScopePointer("phase");
   if (mirror) return mirror;
   if (!goalSlugLbl) return "";
   try {
