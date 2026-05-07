@@ -270,20 +270,17 @@ label .rec-star { color: var(--accent); font-weight: 700; margin-left: .25rem; }
   margin-top: .5rem;
 }
 
-/* Submit — sticky at the bottom of the viewport so the button stays
-   reachable as the user scrolls past Q1. Benefits long grills and
-   questionnaires alike. */
+/* Submit — lives at the natural end of the form. Was sticky-bottom until
+   2026-05-06, but the chunky bar covered viewport real estate while reading
+   questions. Scroll-to-reach is fine; the progress pill at top tells you
+   how far you have left. */
 .submit-bar {
-  position: sticky;
-  bottom: 0;
   margin: 3rem 0 1rem;
   padding: 1.5rem;
   background: var(--paper);
   border: 1px solid var(--rule);
-  border-top: 1px solid var(--rule);
   border-radius: 6px;
   text-align: center;
-  z-index: 10;
 }
 .submit-bar .label {
   font-family: var(--sans);

@@ -29,7 +29,7 @@
 <div class="byline">
   <span>2026-05-05</span>
   <span>Goal: <code>paperflow-XXXX</code></span>
-  <span>7 questions</span>
+  <span>8 questions</span>
   <span>Pre-draft discovery</span>
 </div>
 
@@ -92,6 +92,15 @@ window.GRILL = {
       rationale: "Affects the toggle's persistence model. If light stays default, we need an explicit user opt-in; otherwise we follow `prefers-color-scheme`.",
       recommendation: "Yes",
       recommendationReason: "All existing screenshots, changelogs, and shared URLs are calibrated against the light palette. Switching defaults silently breaks visual recognition."
+    },
+    {
+      id: "q2a",
+      category: "Constraints",
+      type: "open",
+      text: "How should first-time visitors discover that dark mode exists at all?",
+      rationale: "If light remains the default (Q2 = Yes), dark mode is opt-in — which means an undiscovered toggle is a feature that doesn't ship to most users. This question only makes sense in the light-default branch; it's gated on Q2.",
+      dependsOn: { question: "q2", answer: "Yes" },
+      hint: "e.g. one-time tooltip on the toggle, banner on first paint, mention in onboarding doc."
     },
     {
       id: "q3",
