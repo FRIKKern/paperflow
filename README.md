@@ -1,71 +1,48 @@
 # paperflow
 
-> One Claude Code instance, running as orchestrator, that designs the work, dispatches subagents to do it, and tracks the whole thing in Beads. The artefacts are HTML articles you read in your browser; the buttons on those articles route back into the same Claude session.
+*structured Claude Code workflow — Goals · Phases · Tasks*
 
-paperflow is a workflow, not a chat wrapper. It assumes you give Claude meaningful work — not one-shot questions — and it gives Claude the structure to plan, build, and review that work without losing the thread across sessions. Goals live as long as you need them. Tasks are atomic. Plans get stress-tested before you build. The orchestrator never does long-form work itself; it briefs subagents and synthesises their returns.
+```bash
+curl -fsSL https://raw.githubusercontent.com/FRIKKern/paperflow/main/scripts/quickstart.sh | bash
+```
+
+Auto-installs missing prereqs (jq, Beads) on macOS via Homebrew. Idempotent — re-run any time to upgrade.
+
+`macOS only · ~60 seconds · idempotent`
+
+---
+
+## What you get
+
+| Component | What it does |
+|---|---|
+| Six skills `/paperflow-{goal,plan,build,review,install,resume}` | Open a Goal, plan it, build it, review it, install/upgrade, resume later |
+| Article-style HTML docs | Specs, plans, grills, questionnaires, changelogs — typography, captioned figures, Mermaid throughout |
+| Goal-path right rail | Sticky 240 px panel showing the Goal's lifecycle as a Mermaid `gitGraph`; click to jump, shift-click to diff |
+| paperflow Dock (cmux) | Four live feeds in cmux's sidebar: active context, ready tasks, recent events, auto-open log |
+| Subagent enforcement | Hard 30 LOC / 50 line / 500 token thresholds, structured `Subagent-Run:` commit trailers, audited in review |
+| Live-render server | `~/docs/` served on port 8765 with WebSocket hot reload (~200 ms refresh, scroll-preserving) |
+
+---
+
+## The loop
 
 ```mermaid
 flowchart LR
-    User["You"]
-    Orch["Claude Code<br/>(orchestrator)"]
-    Subs["Subagents<br/>(general-purpose,<br/>verification, etc.)"]
-    Beads["Beads<br/>(bd) — system<br/>of record"]
-    Docs["~/docs/paperflow/<br/>specs · plans · grills ·<br/>questionnaires · goals ·<br/>changelog · audits"]
-    LR["docs-livereload<br/>:8765"]
-    Browser["Browser tab<br/>(article + rail +<br/>action buttons)"]
-    Bridge["claude-bridge<br/>:8766"]
-    Dock["paperflow Dock<br/>(cmux right rail)"]
+    G["paperflow-goal"]
+    Q["questionnaire<br/>(when useful)"]
+    P["paperflow-plan<br/>draft → grill → revise"]
+    B["paperflow-build<br/>claim → dispatch →<br/>verify → close"]
+    R["paperflow-review"]
+    Done(["Goal done"])
 
-    User -->|"natural language"| Orch
-    Orch -->|"focused brief"| Subs
-    Subs -->|"verified output"| Orch
-    Orch <-->|"goals · phases · tasks · events"| Beads
-    Subs -->|"writes"| Docs
-    Docs -->|"fswatch"| LR
-    LR -->|"WS reload"| Browser
-    User -->|"reads + clicks"| Browser
-    Browser -->|"POST /build, /simplify, …"| Bridge
-    Bridge -->|"types prompt back<br/>into your tab"| Orch
-    Beads -.->|"polled 2s"| Dock
+    G --> Q --> P --> B --> R
+    G -->|"trivial shape"| P
+    R -->|"approved"| Done
+    R -->|"rejected"| B
 ```
 
-The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgents (or two cmux workspaces), one daemon, six skills, one task store.
-
----
-
-## Table of contents
-
-- [At a glance](#at-a-glance)
-- [Install](#install)
-- [The loop](#the-loop)
-- [Goals · Phases · Tasks](#goals--phases--tasks)
-- [The six skills](#the-six-skills)
-- [Beads — the system of record](#beads--the-system-of-record)
-- [Goal-path right rail](#goal-path-right-rail)
-- [paperflow Dock (cmux)](#paperflow-dock-cmux)
-- [Simplify](#simplify)
-- [Subagent enforcement](#subagent-enforcement)
-- [The bridge](#the-bridge)
-- [Live-render server](#live-render-server)
-- [Statusline](#statusline)
-- [Hooks](#hooks)
-- [Authoring docs](#authoring-docs)
-- [Repo layout](#repo-layout)
-- [Troubleshooting](#troubleshooting)
-- [License + credits](#license--credits)
-
----
-
-## At a glance
-
-- **One orchestrator, many subagents.** The main Claude session keeps context; subagents do the writing, coding, reviewing. Past ~50% context utilisation, model behaviour degrades — paperflow's hard subagent-dispatch rule keeps the ceiling far away.
-- **Goals · Phases · Tasks** mapped 1:1 to Beads' hierarchical IDs. `paperflow-a1b2 → .1 pre-flight → .2 build → .2.3 wire-bridge`.
-- **Six skills, capped.** `paperflow-{goal,plan,build,review,install,resume}`. CI fails the 7th. A new skill must displace an existing one in the same PR.
-- **Article-style HTML docs**, not Markdown — ingress, byline, captioned figures, serif body, Mermaid diagrams throughout. Hot-reload at ~200 ms.
-- **Grill loop on every plan.** 8–15 pointed questions with rationale, recommendation, per-question diagram. Mandatory by default; opt-out by name.
-- **Goal-path right rail.** Sticky 240 px panel on every doc; Mermaid `gitGraph` of the Goal's lifecycle events; click to jump, shift-click two events to diff.
-- **paperflow Dock.** Four feeds in cmux's sidebar: active context, ready tasks, recent events, auto-open log. One Node daemon polls Beads on a 2 s cadence.
-- **Simplify.** One-click leaning pass on any plan/spec/grill, gated by a structural check + a verification subagent before it lands as a `branch:simplified-*` event.
+paperflow's lifecycle. The orchestrator opens a Goal, optionally runs a questionnaire when shape is unclear, drafts a plan, grills it with 8–15 pointed questions, revises, then loops `build → review` until the active phase empties. Rejection re-opens the build-task on the same `branch:main`. The orchestrator is one Claude Code instance; every non-trivial step is delegated to a subagent.
 
 ---
 
@@ -75,87 +52,40 @@ The whole loop runs locally on your Mac. No cloud, no telemetry. Two LaunchAgent
 curl -fsSL https://raw.githubusercontent.com/FRIKKern/paperflow/main/scripts/quickstart.sh | bash
 ```
 
-About a minute. The quickstart clones the repo to `~/Documents/GitHub/paperflow` (or pulls if already there), then runs `install.sh`. Re-run any time to upgrade — idempotent.
+### What the installer does
 
-### What you get
+- Clones (or pulls) the repo to `~/Documents/GitHub/paperflow`
+- Auto-installs `jq` and `beads` via Homebrew when missing; falls back to `npm i -g beads` if brew install fails
+- Writes two LaunchAgents (or, under cmux, two cmux workspaces): `docs-livereload` on port 8765, `claude-bridge` on port 8766
+- Drops the six skills under `~/.claude/skills/paperflow-*/`, the four hooks under `~/.claude/hooks/`, the renderers under `~/docs/paperflow/_lib/`
+- Creates `~/.claude/CLAUDE.md` from the template if missing (lean by default — integration prose is opt-in)
+- Wires `~/.claude/settings.json` for hooks + statusline; dedups by exact command path
+- Runs a self-test on the active-scope resolver, the bridge port, and the live-server port — hard-fails the install if any service is unhealthy
 
-| Component | Path | Purpose |
-|---|---|---|
-| `docs-livereload` LaunchAgent | `~/Library/LaunchAgents/dev.<user>.docs-livereload.plist` | Hot reload for `~/docs/` on port 8765 |
-| `claude-bridge` LaunchAgent (or cmux workspace) | `~/Library/LaunchAgents/dev.<user>.claude-bridge.plist` | Routes browser button clicks back to your terminal on port 8766 |
-| Six skills | `~/.claude/skills/paperflow-{goal,plan,build,review,install,resume}/SKILL.md` | Claude invokes on demand |
-| Renderers | `~/docs/paperflow/_lib/{doc,grill,goal-path-rail,live-render,mermaid-zoom,simplify-button,diff-modal,text-diff}.{css,js}` | Per-doc-type buttons, grill forms, the rail, hot-reload, Simplify |
-| Hooks | `~/.claude/hooks/{inject-principles,auto-open-doc,validate-paperflow-doc,event-on-save}.sh` | Wired into `~/.claude/settings.json` |
-| Statusline | `~/.claude/statusline.sh` + `~/.paperflow/statusline-limits.json` | One-line bottom bar |
-| Standing principles | `~/.claude/CLAUDE.md` | Created if missing; opt-in fragments via `--with-*` |
-| Helpers | `~/.local/bin/paperflow-{target,validate,bd-init,audit-site,audit-orchestrator-budget,continue,migrate-legacy-goals,dock-daemon,dock-feed}` | Each does one thing |
-| Dock daemon | `~/.local/bin/paperflow-dock-daemon` + `~/.paperflow/dock.sock` | Polls Beads on a 2 s cadence; serves the four cmux feeds |
-| Dock config | `${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json` | Skip-on-existing; pass `--reset-dock` to overwrite |
+### Prereqs
 
-### Pre-reqs
+- **macOS only.** Linux is an explicit non-goal — `paperflow-target` and the cmux integration are mac-specific.
+- **Node 22+.** Install with `brew install node` or `brew install nvm && nvm install 22`. The installer pre-flights this and bails with a hint if missing.
+- **Homebrew.** Auto-install of `jq` + `beads` requires brew. No brew? Install it first at https://brew.sh, then re-run.
+- **git** + **xcode-select tools** (`xcode-select --install` if missing).
 
-| Need | Install |
+### Optional flags
+
+| Flag | Effect |
 |---|---|
-| Node 22+ | `brew install node` (or `brew install nvm && nvm install 22`) |
-| `jq` | `brew install jq` |
-| Beads (`bd`) | `brew install beads` or `npm i -g beads` |
-| Xcode CLI | `xcode-select --install` |
+| `--yes` | Skip all confirmations. Auto-set when stdin is not a TTY (CI, unattended runs). |
+| `--merge` | Append new `--with-*` fragments to an existing `~/.claude/CLAUDE.md` without rebuilding it. Each fragment carries a sentinel comment, so re-merging is safe. |
+| `--reset` | Tarball `~/.claude/{CLAUDE.md,hooks,skills}` and `~/.paperflow/` to `~/.paperflow/backups/<ts>.tar.gz`, then rebuild from scratch. Existing customizations lost. |
+| `--with-openclaw` | Append the OpenClaw delegation fragment (local LLM agent). Verifies `/opt/homebrew/bin/openclaw`; warns non-fatally if missing. Does not install OpenClaw. |
+| `--with-unlighthouse` | Append the Unlighthouse fragment. Offers to `npm i -g @unlighthouse/cli puppeteer`. |
+| `--with-browserbase` | Append the BrowserBase fragment (cloud parallel browsing — future). No binary check. |
+| `--reset-dock` | Rebuild `${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json` from the template (after backing up to `dock.json.bak.<ts>`). Without this, the install skips a pre-existing dock config. |
 
-The installer pre-flights all four. Beads is required — paperflow has no fallback task store. The Beads version baseline is `1.0.3`; below that, some verbs may differ.
+### After install
 
-### Flags
-
-| Flag | What it does |
-|---|---|
-| `--with-openclaw` | Append the OpenClaw delegation fragment to `~/.claude/CLAUDE.md`. Verifies `/opt/homebrew/bin/openclaw`; warns (non-fatal) if missing. Does not install OpenClaw. |
-| `--with-browserbase` | Append the BrowserBase fragment. No binary check — BrowserBase is a cloud API. |
-| `--with-unlighthouse` | Append the Unlighthouse fragment. Offers to `npm i -g @unlighthouse/cli puppeteer` (asks first). |
-| `--reset` | Tarball `~/.claude/{CLAUDE.md,hooks,skills}` and `~/.paperflow/` to `~/.paperflow/backups/<ts>.tar.gz`, delete those paths, install fresh. Combine with `--with-*` to pick a new integration set. |
-| `--reset-dock` | Overwrite an existing `~/.config/cmux/dock.json` (after backing up to `dock.json.bak.<ts>`). Without this, the install skips a pre-existing dock config. |
-
-Default install (no flags) is lean. `~/.claude/CLAUDE.md` carries only the core paperflow doc; integration prose ships only when the flag is passed.
-
-### Verify
-
-```bash
-curl -s http://127.0.0.1:8765/   # docs-livereload — directory listing
-curl -s http://127.0.0.1:8766/   # claude-bridge   — "claude-bridge ok"
-find ~/.claude/skills -name 'SKILL.md' -path '*paperflow-*' | wc -l   # 6
-```
-
-In any **already-running** Claude Code session run `/hooks` once (or restart) so the hooks are picked up. Skills + `CLAUDE.md` require a restart.
-
----
-
-## The loop
-
-```mermaid
-flowchart LR
-    G["paperflow-goal<br/>opens Goal +<br/>3 default phases"]
-    Q["questionnaire<br/>(when shape unclear)"]
-    P["paperflow-plan<br/>draft → grill → revise"]
-    B["paperflow-build<br/>claim → dispatch →<br/>verify → close"]
-    R["paperflow-review<br/>review-task or<br/>site audit"]
-    Re["paperflow-resume<br/>switch Goals later"]
-
-    G --> Q
-    Q --> P
-    G -->|"trivial shape"| P
-    P --> B
-    B -->|"phase empties"| B
-    B --> R
-    R -->|"approved"| Done(["Goal done"])
-    R -->|"rejected"| B
-    Re -.->|"any time"| G
-    Re -.->|"any time"| B
-```
-
-1. **`paperflow-goal`** opens the Goal. Auto-creates three phases (`pre-flight`, `build`, `review`), writes the two pointer files, renders the Goal HTML.
-2. **Questionnaire** (when the shape isn't obvious): six categories — scope, constraints, preferences, context, success criteria, open decisions. 5–10 questions with rationale and optional recommendation. Reuses the grill renderer.
-3. **`paperflow-plan`** drafts → grills → revises. The plan HTML becomes work-tasks under the active phase via `bd create` + `bd dep add`.
-4. **`paperflow-build`** loops: read active phase, `bd ready`, claim, dispatch a subagent with task context, verify evidence, close. When the phase empties, advance the active-phase pointer.
-5. **`paperflow-review`** opens a review-task linked to its parent build-task. Approval closes; rejection re-opens the build-task. Site audits live here too.
-6. **`paperflow-resume`** mirrors Claude Code's `/resume` — pick a Goal, the pointer flips, the Goal HTML opens via the cmux tab-reuse contract.
+1. **Restart Claude Code** (or run `/hooks` in any already-running session) so hooks, skills, and `CLAUDE.md` get picked up.
+2. Open Claude Code in any terminal — a cmux pane is best, since the bridge inherits cmux's socket trust there.
+3. Run `/paperflow-goal "your first goal vision"`. Click through the Goal HTML, plan, grill — paperflow handles the rest.
 
 ---
 
@@ -163,11 +93,29 @@ flowchart LR
 
 The hierarchy maps 1:1 to Beads' native hierarchical IDs.
 
+```mermaid
+flowchart TD
+    G["Goal<br/>kind:goal<br/>paperflow-a1b2"]
+    P1["Phase: pre-flight<br/>kind:phase<br/>paperflow-a1b2.1"]
+    P2["Phase: build<br/>kind:phase<br/>paperflow-a1b2.2"]
+    P3["Phase: review<br/>kind:phase<br/>paperflow-a1b2.3"]
+    T21["work-task<br/>paperflow-a1b2.2.1"]
+    T22["work-task<br/>paperflow-a1b2.2.2"]
+    T23["work-task<br/>paperflow-a1b2.2.3"]
+
+    G --> P1
+    G --> P2
+    G --> P3
+    P2 --> T21
+    P2 --> T22
+    P2 --> T23
+```
+
 | Layer | Beads kind | Example ID | Lives at |
 |---|---|---|---|
-| Goal  | `kind:goal`  | `paperflow-a1b2`     | top-level Beads task |
-| Phase | `kind:phase` | `paperflow-a1b2.2`   | child of the goal-task |
-| Task  | (work-task)  | `paperflow-a1b2.2.3` | child of the phase-task |
+| Goal | `kind:goal` | `paperflow-a1b2` | top-level Beads task |
+| Phase | `kind:phase` | `paperflow-a1b2.2` | child of the goal-task |
+| Task | (work-task) | `paperflow-a1b2.2.3` | child of the phase-task |
 | Event | `kind:event` | `paperflow-a1b2.evt` | sidecar history; hidden from default `bd list`/`bd ready` |
 
 Two pointer files in `<repo>/.paperflow/` say what's active in this checkout:
@@ -189,12 +137,12 @@ Six, exact. `scripts/check-skill-count.sh` fails CI if a 7th lands without a dis
 
 | Skill | One-line purpose |
 |---|---|
-| `paperflow-goal` | Open / refresh / archive a Goal — creates the goal-task, three default phases, both pointer files, renders the Goal HTML. Snapshot and archive are sub-actions of the same skill. |
-| `paperflow-plan` | The signature paperflow move — draft a plan, grill it with 8–15 pointed questions, revise. Materialises plan steps as Beads work-tasks under the active phase. Simplify is a sub-action here. |
-| `paperflow-build` | Claim the next ready task in the active phase, dispatch a subagent, verify on return, close. Loop the phase, advance when empty. TDD / parallel agents / worktrees are opt-in modes; verification-before-completion is always on. |
-| `paperflow-review` | Open a review-task linked to a build-task; delegate the review (or site audit) to a subagent. Approval closes; rejection re-opens the build-task. Includes a Subagent-Run audit on the build-phase commits. |
-| `paperflow-install` | The meta-skill. Install / upgrade / reset, integration opt-in (`--with-openclaw/--with-browserbase/--with-unlighthouse`), authoring a new SKILL.md (subject to the 6-skill cap), writing paperflow's own release changelogs. The "what is paperflow?" entry point. |
-| `paperflow-resume` | Mirrors Claude Code's `/resume` for Goals. Lists Goals via Beads, presents a numbered menu, flips the two pointers on pick, surfaces unfinished questionnaires. Read-only on Beads. |
+| `/paperflow-goal` | Open / refresh / archive a Goal — creates the goal-task, three default phases, both pointer files, renders the Goal HTML. Snapshot and archive are sub-actions of the same skill. |
+| `/paperflow-plan` | Draft a plan, grill it with 8–15 pointed questions, revise. Materialises plan steps as Beads work-tasks under the active phase. Simplify is a sub-action here. |
+| `/paperflow-build` | Claim the next ready task, dispatch a subagent, verify on return, close. Loop the phase, advance when empty. TDD / parallel agents / worktrees are opt-in; verification-before-completion is always on. |
+| `/paperflow-review` | Open a review-task linked to a build-task; delegate the review (or site audit) to a subagent. Approval closes; rejection re-opens the build-task. Includes a Subagent-Run audit on the build-phase commits. |
+| `/paperflow-install` | The meta-skill. Install / upgrade / reset, integration opt-in (`--with-openclaw/--with-browserbase/--with-unlighthouse`), authoring a new SKILL.md (subject to the 6-skill cap), writing release changelogs. The "what is paperflow?" entry point. |
+| `/paperflow-resume` | Mirrors Claude Code's `/resume` for Goals. Lists Goals via Beads, presents a numbered menu, flips the two pointers on pick, surfaces unfinished questionnaires. Read-only on Beads. |
 
 Each non-exempt skill carries an inlined copy of `lib/shared-thresholds.md` between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels. `install.sh` re-splices on every run. `paperflow-resume` is exempt (read-only).
 
@@ -202,12 +150,7 @@ Each non-exempt skill carries an inlined copy of `lib/shared-thresholds.md` betw
 
 ## Beads — the system of record
 
-paperflow uses Beads (`bd`) as the single source of truth for goals, phases, tasks, and events. No JSON sidecars, no parallel state.
-
-```bash
-brew install beads        # macOS
-npm i -g beads            # cross-platform
-```
+paperflow uses Beads (`bd`) as the single source of truth for goals, phases, tasks, and events. No JSON sidecars, no parallel state. The quickstart auto-installs Beads via Homebrew on macOS — you don't need to install it manually.
 
 Per-repo init: `paperflow-bd-init` runs `bd init` once on the first Goal in a repo. `paperflow-build` claims with `bd update <id> --claim` and closes with `bd update <id> --close`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase.
 
@@ -231,6 +174,18 @@ To peek at events anyway: `bd list --label kind:event`. On Beads versions that d
 ## Goal-path right rail
 
 Every paperflow doc loaded with an active Goal in scope renders a 240 px sticky right rail showing the Goal's lifecycle as a Mermaid `gitGraph`. The rail tracks **events**, not doc revisions: `goal-opened`, `questionnaire-written`, `questionnaire-answered`, `plan-written`, `plan-grilled`, `phase-advanced`, `goal-snapshot`, `goal-closed`, `simplified-*`. Events live as `kind:event` Beads tasks parented to the goal-task, with HTML payloads at `~/.paperflow/events/<event-task-id>.html`.
+
+```mermaid
+flowchart LR
+    Article["Article body<br/>(centered, ~720 px)"]
+    Rail["Goal-path rail<br/>(sticky, 240 px)"]
+    Bridge["claude-bridge<br/>:8766"]
+
+    Article -.->|"side-by-side"| Rail
+    Rail -->|"GET /goal-path?goal=<id>"| Bridge
+    Rail -->|"GET /event/<id>"| Bridge
+    Rail -->|"GET /diff?from&to"| Bridge
+```
 
 Two ways to find the Goal for a given doc:
 
@@ -353,17 +308,7 @@ Subagent-Run: <task-id>
 
 The bridge supports tmux (any host), iTerm2 (`write text`), Apple Terminal (`do script in tab`), and cmux (`cmux send --workspace … --surface …`). Targeting JSON is captured at write-time by `~/.local/bin/paperflow-target` and embedded in the doc as `window.CLAUDE_TARGET`.
 
-### cmux trust pitfall
-
-On cmux.app systems the bridge **cannot** run as a LaunchAgent. cmux's socket is in access mode `cmuxOnly` and rejects connections whose responsible-process ancestor is `launchd`, returning `Failed to write to socket (Broken pipe)` on every dispatch. The bridge must be a child of `cmux.app` to inherit the trust cmux's auth requires.
-
-`install.sh` detects cmux (`$CMUX_SOCKET` + `$CMUX_BUNDLED_CLI_PATH`), tears down any legacy LaunchAgent, and spawns the bridge with:
-
-```bash
-cmux new-workspace --name paperflow-bridge --command "node $REPO/bin/claude-bridge.js"
-```
-
-If the bridge ever shows broken-pipe in the logs and you've recently switched terminals into cmux, re-run `bash install.sh` — it'll detect the environment and re-spawn correctly. Same contract holds for the Dock daemon.
+When the bridge is launched outside a cmux pane, it loses cmux's socket trust — re-spawn via `cmux new-workspace --command "node ~/.local/lib/paperflow/claude-bridge.js"` if button clicks return broken-pipe.
 
 ---
 
@@ -449,11 +394,7 @@ Distribute Mermaid diagrams throughout — every section explaining a flow, comp
 open http://localhost:8765/paperflow/specs/<filename>.html
 ```
 
-Canonical references in the repo:
-
-- [`examples/openclaw-spec.html`](./examples/openclaw-spec.html) — the spec shape
-- [`examples/openclaw-grill.html`](./examples/openclaw-grill.html) — the grill form
-- [`examples/example-questionnaire.html`](./examples/example-questionnaire.html) — questionnaire shape; copy this as the starting template
+Canonical references in the repo: [`examples/openclaw-spec.html`](./examples/openclaw-spec.html), [`examples/openclaw-grill.html`](./examples/openclaw-grill.html), [`examples/example-questionnaire.html`](./examples/example-questionnaire.html).
 
 ### Doc validation (mandatory)
 
@@ -479,6 +420,7 @@ paperflow/
 ├── bin/
 │   ├── claude-bridge.js            # the bridge service
 │   ├── get-terminal-target.sh      # captures CLAUDE_TARGET JSON
+│   ├── paperflow-active-scope      # resolves goal/phase from cwd up
 │   ├── paperflow-bd-init           # per-repo Beads bootstrap
 │   ├── paperflow-validate          # static Mermaid check (~80 LOC Node)
 │   ├── paperflow-audit-site        # Unlighthouse wrapper
@@ -530,20 +472,27 @@ paperflow/
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Browser shows `file://` URL, not `localhost` | Auto-open hook didn't fire | Run `/hooks` once or restart the session |
-| Click button → "✗ Failed" / broken pipe under cmux | Bridge running as LaunchAgent — cmux rejects the dispatch | `bash install.sh` — detects cmux, re-spawns the bridge as a cmux workspace |
-| Click button → nothing happens | Bridge down | LaunchAgent: `launchctl kickstart -k gui/$(id -u)/dev.<user>.claude-bridge`. cmux: open the `paperflow-bridge` workspace |
-| Live reload not refreshing | live-server LaunchAgent down | `launchctl kickstart -k gui/$(id -u)/dev.<user>.docs-livereload` |
-| `bash install.sh` says EACCES on `npm install -g` | Homebrew root-owns `/usr/local/lib/node_modules` | The installer pre-flights this and prints the two fixes. TL;DR either `sudo chown -R $(whoami) $(npm config get prefix)/{lib/node_modules,bin,share}`, or `npm config set prefix ~/.npm-global` and add it to PATH |
-| `bash install.sh` says "Node v22+ not found" | nvm not loaded in non-interactive shell | `nvm install 22 && nvm use 22 && bash install.sh` or `brew install node` |
-| Statusline empty in a Goal-active repo | Cache stale and live composition failed | Run any Beads-mutating action (claim/close); cache rewrites |
-| Dock panes show "paperflow-dock daemon down" | Daemon not running | `bash install.sh` — daemon liveness is probed via `~/.paperflow/dock.sock`; respawns if unresponsive |
-| Goal-path rail empty on a fresh doc | Doc didn't set `window.PAPERFLOW_GOAL_ID` | Add the inline script before the `doc.js` include; rail falls back to `?source=` resolution but is silent on docs that haven't generated events yet |
-| `paperflow-validate` keeps failing on the same Mermaid block | Inline HTML inside Mermaid, or an unbalanced quote in a `diagram:` literal | Read the validator's failure JSON — it points at the line and shows the offending excerpt |
+### Common issues
 
-Logs:
+**`brew not found`** — paperflow's auto-install relies on Homebrew. Install brew first at https://brew.sh, then re-run the quickstart. macOS-only — Linux is not supported.
+
+**Bridge port 8766 unreachable** — self-test failed at the bridge ping. Check `lsof -i :8766` for a stale process; kill it and re-run install. Only one paperflow bridge can listen on 8766 at a time.
+
+**Live-server port 8765 unreachable** — same idea: `lsof -i :8765`. Most often something else (a dev server) is squatting on the port. Either kill it or override the live-server port in the LaunchAgent plist.
+
+**npm EACCES on global install** — paperflow's installer is now nvm-aware: if your `node` is from nvm, you'll be skipped past the EACCES branch. If it's a system install (`/usr/local`), the chown remediation still applies: `sudo chown -R $(whoami) /usr/local/{lib/node_modules,bin,share}`.
+
+**CLAUDE.md exists, but I want the new `--with-X` fragments** — re-run the installer with `--merge --with-openclaw` (or whichever flag). Each fragment has a sentinel comment, so re-merging is safe.
+
+**Hooks duplicated in `settings.json`** — fixed in 2026-05-07: hook dedup now uses exact-path match. If you have leftover duplicates from before, edit `~/.claude/settings.json` and remove the duplicate `command` entries under `hooks.PostToolUse[].hooks[]`.
+
+**cmux trust broken-pipe on browser button clicks** — the bridge needs to inherit cmux's socket auth. Respawn it from inside a cmux pane: `cmux new-workspace --command "node ~/.local/lib/paperflow/claude-bridge.js"`.
+
+**Statusline empty in a Goal-active repo** — cache stale and live composition failed. Run any Beads-mutating action (claim/close); cache rewrites.
+
+**Goal-path rail empty on a fresh doc** — doc didn't set `window.PAPERFLOW_GOAL_ID`. Add the inline script before the `doc.js` include; rail falls back to `?source=` resolution but is silent on docs that haven't generated events yet.
+
+### Logs
 
 ```
 ~/.local/log/docs-livereload.{out,err}.log
