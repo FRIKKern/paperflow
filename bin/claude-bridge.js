@@ -20,6 +20,8 @@
 //   POST /event                  create a kind:event Beads task + sidecar
 //   POST /event/active           write <repo>/.paperflow/active-event-base
 //   GET  /diff?from=<id>&to=<id> bridge-side line-level diff between two events
+//   POST /navigate               swap the live-render-controlled browser tab to
+//                                a different paperflow doc (rail-interactive)
 //   POST /simplify               kick off a leaning-pass + verification job;
 //                                returns {ok, job_id} immediately
 //   GET  /simplify/status?job=   poll a Simplify job; returns {state, …}
@@ -502,6 +504,60 @@ const server = http.createServer((req, res) => {
           }
           respondGoalPath(res, slugLabel, stdout);
         });
+    });
+    return;
+  }
+
+  // POST /navigate — swap the live-render-controlled browser tab to a
+  // different paperflow doc. Body: {path: "<rel-under-/paperflow/>"}.
+  // Mirrors hooks/auto-open-doc.sh: shells out to macOS `/usr/bin/open <url>`,
+  // which (a) refocuses an existing tab without duplicating it, and (b) on
+  // cmux invokes the URL handler whose tab-reuse contract returns
+  // "OK surface=N placement=reuse|new". Live-render handles the in-page
+  // content swap separately. Path validation is a strict whitelist —
+  // only relative HTML docs under /paperflow/ are permitted, so the
+  // browser can't be steered at off-doc URLs.
+  if (req.method === 'POST' && url.pathname === '/navigate') {
+    collectBody(req, (parseErr, payload) => {
+      const json = (code, body) => {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+      if (parseErr) return json(400, { ok: false, error: 'invalid JSON' });
+      const { path: relPath } = payload || {};
+      if (typeof relPath !== 'string') {
+        return json(400, { ok: false, error: 'path must be a string' });
+      }
+      if (relPath.includes('..')) {
+        return json(400, { ok: false, error: 'path must not contain ".."' });
+      }
+      if (relPath.startsWith('/')) {
+        return json(400, { ok: false, error: 'path must be relative (no leading "/")' });
+      }
+      if (/^https?:\/\//i.test(relPath)) {
+        return json(400, { ok: false, error: 'path must not be absolute URL' });
+      }
+      if (!/^[a-zA-Z0-9_./-]+\.html$/.test(relPath)) {
+        return json(400, { ok: false, error: 'path must match [a-zA-Z0-9_./-]+\\.html' });
+      }
+      const fullUrl = `http://localhost:8765/paperflow/${relPath}`;
+      // /usr/bin/open hits cmux's URL handler when run inside cmux.app
+      // (tab-reuse contract); on plain macOS it focuses the existing tab
+      // in the default browser. Either way the live-render hot-reload
+      // swaps content if the URL is already open.
+      execFile('/usr/bin/open', [fullUrl], { timeout: 2000 }, (err, stdout, stderr) => {
+        const ts = new Date().toISOString();
+        if (err) {
+          console.error(`[${ts}] navigate error:`, err.message, '| url:', fullUrl);
+          return json(500, {
+            ok: false,
+            error: err.message,
+            stderr: String(stderr || '').slice(0, 400)
+          });
+        }
+        console.log(`[${ts}] navigate → ${fullUrl} | ${String(stdout || '').trim().slice(0, 120)}`);
+        json(200, { ok: true, target: 'open', url: fullUrl });
+      });
     });
     return;
   }

@@ -100,6 +100,13 @@
   stroke-width: 3px;
 }
 
+/* Active-doc highlight: the commit whose source path matches window.DOC_PATH
+ * gets a thicker accent stroke so the reader sees "you are here" at a glance. */
+.paperflow-goal-path-rail svg .rail-active-doc {
+  stroke: var(--accent, #a23925);
+  stroke-width: 3px;
+}
+
 .paperflow-rail-fallback {
   margin: 0;
   padding-left: 1.1rem;
