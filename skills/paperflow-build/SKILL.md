@@ -153,7 +153,12 @@ When `bd ready --label $SLUG --label $PHASE_NAME` returns empty:
 1. Confirm no claimed-but-not-closed tasks remain in the phase.
 2. **Close the phase-task:** `bd update "$PHASE" --close`.
 3. **Find the next phase** in canonical order (pre-flight → build → review, plus any user-defined extras): `bd list --label kind:phase --label "$SLUG" --json | jq '.[] | select(.status != "closed")' | head -1`.
-4. **Update the active-phase pointer:** `echo "$NEXT_PHASE" > <repo>/.paperflow/active-phase`.
+4. **Update the active-phase pointers** — both the per-repo file and the per-instance scoped global:
+
+   ```bash
+   echo "$NEXT_PHASE" > <repo>/.paperflow/active-phase
+   paperflow-active-scope --write phase "$NEXT_PHASE"
+   ```
 5. If no next phase exists, the goal is complete: optionally close the goal-task and surface the result.
 
 ### Failure / debug

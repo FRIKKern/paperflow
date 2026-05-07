@@ -436,18 +436,14 @@ resolve_goal_phase_task() {
     command -v bd >/dev/null 2>&1 || return 0
     command -v jq >/dev/null 2>&1 || return 0
 
-    local repo_root
-    repo_root=$(find_paperflow_repo_root "$CWD")
-    [ -z "$repo_root" ] && return 0
-
-    local goal_pointer="$repo_root/.paperflow/active-goal"
-    local phase_pointer="$repo_root/.paperflow/active-phase"
-    [ -r "$goal_pointer" ] || return 0
-    [ -r "$phase_pointer" ] || return 0
+    # Per-instance scope resolver owns the pointer-file lookup.
+    local scope_helper="$HOME/.local/bin/paperflow-active-scope"
+    [ -x "$scope_helper" ] || scope_helper="$(command -v paperflow-active-scope 2>/dev/null || true)"
+    [ -n "$scope_helper" ] || return 0
 
     local goal_id phase_id
-    goal_id=$(head -n 1 "$goal_pointer" 2>/dev/null | tr -d '[:space:]')
-    phase_id=$(head -n 1 "$phase_pointer" 2>/dev/null | tr -d '[:space:]')
+    goal_id=$("$scope_helper" --read goal 2>/dev/null | tr -d '[:space:]')
+    phase_id=$("$scope_helper" --read phase 2>/dev/null | tr -d '[:space:]')
     [ -z "$goal_id" ] && return 0
     [ -z "$phase_id" ] && return 0
 
