@@ -49,6 +49,8 @@ WITH_BROWSERBASE=0
 WITH_UNLIGHTHOUSE=0
 DO_RESET=0
 DO_RESET_DOCK=0
+MERGE_CLAUDEMD=0
+YES="${PAPERFLOW_YES:-0}"
 for arg in "$@"; do
     case "$arg" in
         --with-openclaw)     WITH_OPENCLAW=1 ;;
@@ -56,6 +58,8 @@ for arg in "$@"; do
         --with-unlighthouse) WITH_UNLIGHTHOUSE=1 ;;
         --reset)             DO_RESET=1 ;;
         --reset-dock)        DO_RESET_DOCK=1 ;;
+        --merge|--merge-claude-md) MERGE_CLAUDEMD=1 ;;
+        --yes)               YES=1 ;;
         --help|-h)
             sed -n '2,40p' "$0"
             exit 0
@@ -132,35 +136,16 @@ BR_LABEL="${LABEL_PREFIX}.claude-bridge"
 # ─── 0. Pre-flight ─────────────────────────────────────────────────
 log "Pre-flight"
 
-# Node 22+ — check (but locate the real binary later in step 2)
-_PREFLIGHT_NODE_OK=0
-if [ -d "$HOME/.nvm/versions/node" ] && ls -d "$HOME/.nvm/versions/node"/v22.*/bin/node >/dev/null 2>&1; then
-    _PREFLIGHT_NODE_OK=1
-elif command -v node >/dev/null 2>&1; then
-    _NV="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
-    [ "${_NV:-0}" -ge 22 ] && _PREFLIGHT_NODE_OK=1
-fi
-if [ "$_PREFLIGHT_NODE_OK" -ne 1 ]; then
-    err "Node 22 or later is required. Install with one of:"
-    printf '      brew install node           (simplest)\n'
-    printf '      brew install nvm && nvm install 22\n\n'
-    printf '    Then re-run: bash install.sh\n'
-    exit 1
-fi
-
-# jq — required for settings.json merge
-if ! command -v jq >/dev/null 2>&1; then
-    err "jq is required. Install with: brew install jq"
-    exit 1
-fi
-
-# Beads (bd) — required for paperflow's task layer
+# Prereqs (node22, jq, git) verified by quickstart.sh; bd verified there too as of 2026-05-07.
+# Manual-run guard: when install.sh is invoked directly (not via quickstart), bd
+# might still be missing — keep a tiny clear-message check so the failure mode
+# is obvious instead of dying inside the migration block far below.
 if ! command -v bd >/dev/null 2>&1; then
     err "bd (Beads) is required. paperflow uses Beads as the system of record"
     err "for goals + phases + tasks. Pick one and re-run:"
     printf '\n      brew install beads        (macOS Homebrew)\n'
     printf '      npm i -g beads            (cross-platform)\n\n'
-    printf '    See https://github.com/gastownhall/beads\n'
+    printf '    Or just run:  bash scripts/quickstart.sh   (auto-installs)\n'
     exit 1
 fi
 ok "bd ($(bd --version 2>/dev/null | head -n1 || echo 'version unknown'))"
@@ -177,7 +162,19 @@ fi
 # node at /usr/local/bin and root-owns /usr/local/lib/node_modules, so a
 # later `npm install -g` exits with EACCES and the user is left guessing
 # (especially if we suppressed stderr). Catch it now with a clear remedy.
-if command -v npm >/dev/null 2>&1; then
+#
+# Skip the EACCES bail when nvm is managing node — npm prefix is per-version
+# and user-owned under ~/.nvm/versions/, so global installs always work.
+_NVM_NODE=0
+if [ -n "${NVM_DIR:-}" ]; then _NVM_NODE=1; fi
+if [ "$_NVM_NODE" -eq 0 ] && command -v node >/dev/null 2>&1; then
+    case "$(command -v node)" in
+        */.nvm/*) _NVM_NODE=1 ;;
+    esac
+fi
+if [ "$_NVM_NODE" -eq 1 ]; then
+    skip "npm prefix: nvm-managed node — user-owned, no chown needed"
+elif command -v npm >/dev/null 2>&1; then
     NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
     NPM_GLOBAL_DIR="$NPM_PREFIX/lib/node_modules"
     if [ -n "$NPM_PREFIX" ] && [ ! -w "$NPM_PREFIX/lib" ] 2>/dev/null && [ ! -w "$NPM_GLOBAL_DIR" ] 2>/dev/null; then
@@ -189,6 +186,8 @@ if command -v npm >/dev/null 2>&1; then
         printf '    B)  Use a user-local prefix:\n'
         printf '        npm config set prefix ~/.npm-global\n'
         printf '        export PATH="$HOME/.npm-global/bin:$PATH"   # add to ~/.zshrc\n\n'
+        printf '    C)  Switch to nvm (recommended):\n'
+        printf '        brew install nvm && nvm install 22\n\n'
         printf '    Then:  bash install.sh\n'
         exit 1
     fi
@@ -214,8 +213,12 @@ if [ "$WITH_BROWSERBASE" -eq 1 ]; then
 fi
 if [ "$WITH_UNLIGHTHOUSE" -eq 1 ]; then
     if ! command -v unlighthouse >/dev/null 2>&1; then
-        # Ask, don't auto-install.
-        if [ -t 0 ]; then
+        # --yes (or piped stdin) → auto-install without prompting.
+        if [ "${YES:-0}" = 1 ] || [ ! -t 0 ]; then
+            "$(command -v npm)" install -g @unlighthouse/cli puppeteer >/dev/null \
+                && ok "unlighthouse installed (--yes)" \
+                || skip "unlighthouse: install failed — fragment will still ship in CLAUDE.md"
+        else
             printf '  unlighthouse not on PATH. Install @unlighthouse/cli + puppeteer globally now? (y/N) '
             read -r _ULH_ANSWER || _ULH_ANSWER=""
             case "$_ULH_ANSWER" in
@@ -226,8 +229,6 @@ if [ "$WITH_UNLIGHTHOUSE" -eq 1 ]; then
                     ;;
                 *) skip "unlighthouse: skipping install — fragment will still ship in CLAUDE.md" ;;
             esac
-        else
-            skip "unlighthouse: --with-unlighthouse set but stdin not a TTY — skipping auto-install"
         fi
     fi
 fi
@@ -504,55 +505,63 @@ log "settings.json"
 SETTINGS="$HOME/.claude/settings.json"
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
 
-if jq -e '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command? | type == "string" and endswith("inject-principles.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+# Tightened dedup: match the EXACT command string we write, not endswith() —
+# a stale entry pointing at /old/path/inject-principles.sh would otherwise
+# satisfy endswith() and silently keep the wrong hook installed.
+HOOK_INJECT='$HOME/.claude/hooks/inject-principles.sh'
+HOOK_OPEN='$HOME/.claude/hooks/auto-open-doc.sh'
+HOOK_VALIDATE='$HOME/.claude/hooks/validate-paperflow-doc.sh'
+HOOK_EVENT='$HOME/.claude/hooks/event-on-save.sh'
+
+if jq -e --arg cmd "$HOOK_INJECT" '.hooks.UserPromptSubmit[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
     skip "UserPromptSubmit hook already present"
 else
     TMP="$(mktemp)"
-    jq '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{
+    jq --arg cmd "$HOOK_INJECT" '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{
         hooks: [{ type: "command",
-                  command: "$HOME/.claude/hooks/inject-principles.sh",
+                  command: $cmd,
                   timeout: 5 }]
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
     ok "merged UserPromptSubmit"
 fi
 
-if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command? | type == "string" and endswith("auto-open-doc.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+if jq -e --arg cmd "$HOOK_OPEN" '.hooks.PostToolUse[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
     skip "PostToolUse auto-open hook already present"
 else
     TMP="$(mktemp)"
-    jq '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+    jq --arg cmd "$HOOK_OPEN" '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
         matcher: "Write|Edit",
         hooks: [{ type: "command",
-                  command: "$HOME/.claude/hooks/auto-open-doc.sh",
+                  command: $cmd,
                   timeout: 3 }]
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
     ok "merged PostToolUse auto-open"
 fi
 
-if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command? | type == "string" and endswith("validate-paperflow-doc.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+if jq -e --arg cmd "$HOOK_VALIDATE" '.hooks.PostToolUse[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
     skip "PostToolUse validate hook already present"
 else
     TMP="$(mktemp)"
-    jq '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+    jq --arg cmd "$HOOK_VALIDATE" '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
         matcher: "Write|Edit",
         hooks: [{ type: "command",
-                  command: "$HOME/.claude/hooks/validate-paperflow-doc.sh",
+                  command: $cmd,
                   timeout: 15 }]
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
     ok "merged PostToolUse validate"
 fi
 
-if jq -e '.hooks.PostToolUse[]?.hooks[]? | select(.command? | type == "string" and endswith("event-on-save.sh"))' "$SETTINGS" >/dev/null 2>&1; then
+if jq -e --arg cmd "$HOOK_EVENT" '.hooks.PostToolUse[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
     skip "PostToolUse event-on-save hook already present"
 else
     TMP="$(mktemp)"
-    jq '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+    jq --arg cmd "$HOOK_EVENT" '.hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
         matcher: "Write|Edit",
         hooks: [{ type: "command",
-                  command: "$HOME/.claude/hooks/event-on-save.sh",
+                  command: $cmd,
                   timeout: 5 }]
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
@@ -803,6 +812,17 @@ cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrat
 chmod +x "$HOME/.local/bin/paperflow-migrate-legacy-goals"
 ok "installed at ~/.local/bin/paperflow-migrate-legacy-goals"
 
+# ─── 10f1. Per-instance active-scope resolver ──────────────────────
+# paperflow-active-scope owns the per-instance (per cmux workspace, or per
+# Claude Code session) active-goal/active-phase pointers. Skills, hooks,
+# and the statusline read/write through this helper instead of touching
+# ~/.paperflow/active-{goal,phase} directly. The legacy unscoped files
+# remain as a fallback for installs that pre-date this change.
+log "Helper: paperflow-active-scope"
+cp "$REPO/bin/paperflow-active-scope" "$HOME/.local/bin/paperflow-active-scope"
+chmod +x "$HOME/.local/bin/paperflow-active-scope"
+ok "installed at ~/.local/bin/paperflow-active-scope"
+
 # ─── 10f2. Subagent-Run audit helper ───────────────────────────────
 log "Helper: paperflow-audit-orchestrator-budget"
 cp "$REPO/bin/paperflow-audit-orchestrator-budget" "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
@@ -872,10 +892,42 @@ render_claude_md() {
     mv "$tmp" "$dst"
 }
 
+append_fragment_if_missing() {
+    # $1 = sentinel slug (e.g. "openclaw"); $2 = fragment file path
+    local slug="$1" frag="$2"
+    local sentinel="<!-- paperflow:with-${slug} -->"
+    [ -f "$frag" ] || { skip "fragment missing: $frag"; return 0; }
+    if grep -qF "$sentinel" "$CLAUDE_MD" 2>/dev/null; then
+        skip "fragment $slug already in CLAUDE.md"
+        return 0
+    fi
+    {
+        printf '\n\n%s\n' "$sentinel"
+        cat "$frag"
+    } >> "$CLAUDE_MD"
+    ok "appended $slug fragment to CLAUDE.md"
+}
+
 if [ -f "$CLAUDE_MD" ]; then
-    skip "exists (not overwriting — edit manually to refresh, or re-run with --reset)"
+    if [ "$MERGE_CLAUDEMD" -eq 1 ]; then
+        # Merge mode: append any --with-* fragments that aren't already present.
+        # Sentinel-driven idempotency — re-running with the same flags is a no-op.
+        [ "$WITH_OPENCLAW" -eq 1 ]     && append_fragment_if_missing openclaw     "$REPO/claude-md-fragments/openclaw.md"
+        [ "$WITH_BROWSERBASE" -eq 1 ]  && append_fragment_if_missing browserbase  "$REPO/claude-md-fragments/browserbase.md"
+        [ "$WITH_UNLIGHTHOUSE" -eq 1 ] && append_fragment_if_missing unlighthouse "$REPO/claude-md-fragments/unlighthouse.md"
+        if [ "$WITH_OPENCLAW" -eq 0 ] && [ "$WITH_BROWSERBASE" -eq 0 ] && [ "$WITH_UNLIGHTHOUSE" -eq 0 ]; then
+            skip "--merge passed but no --with-* flags set (nothing to append)"
+        fi
+    else
+        skip "exists (not overwriting — pass --merge to append --with-* fragments, or --reset to rebuild)"
+    fi
 else
     render_claude_md "$CLAUDE_MD"
+    # Tag the freshly-rendered file with sentinels for whatever fragments shipped,
+    # so a follow-up `--merge` won't double-append the same prose.
+    [ "$WITH_OPENCLAW" -eq 1 ]     && printf '\n<!-- paperflow:with-openclaw -->\n'     >> "$CLAUDE_MD"
+    [ "$WITH_BROWSERBASE" -eq 1 ]  && printf '\n<!-- paperflow:with-browserbase -->\n'  >> "$CLAUDE_MD"
+    [ "$WITH_UNLIGHTHOUSE" -eq 1 ] && printf '\n<!-- paperflow:with-unlighthouse -->\n' >> "$CLAUDE_MD"
     ok "written (fragments: openclaw=$WITH_OPENCLAW browserbase=$WITH_BROWSERBASE unlighthouse=$WITH_UNLIGHTHOUSE)"
 fi
 
@@ -947,6 +999,51 @@ log "Status"
                                                        && ok "settings stat.: wired"      || skip "settings stat.: not wired (foreign or absent)"
 }
 
+# ─── Self-test ─────────────────────────────────────────────────────
+# End-to-end smoke check on the three load-bearing services. Runs AFTER
+# the verbose status block so users see the per-component truth first,
+# then a single pass/fail gate. Hard-fails the install on any breakage —
+# better to stop here than ship a half-broken paperflow with a green
+# closer message.
+echo
+log "Self-test"
+
+selftest_fail() {
+    err "self-test failed: $1"
+    printf '    \033[2m%s\033[0m\n' "$2" >&2
+    printf '\n  \033[1;31m✗\033[0m install completed but a service is unhealthy. Fix the above, then re-run.\n\n' >&2
+    exit 1
+}
+
+# 1. Active-scope resolver — must exit 0 and print a non-empty scope.
+if SCOPE="$("$HOME/.local/bin/paperflow-active-scope" --resolve 2>/dev/null)" && [ -n "$SCOPE" ]; then
+    ok "scope resolver: $SCOPE"
+else
+    selftest_fail "paperflow-active-scope --resolve returned non-zero or empty" \
+                  "Inspect: $HOME/.local/bin/paperflow-active-scope --resolve"
+fi
+
+# 2. Bridge listening on 8766. Tolerant: any HTTP response (2xx/3xx/4xx/5xx)
+# proves the process is alive — we don't require a /health endpoint.
+if curl -fsS --max-time 2 -o /dev/null http://localhost:8766/ 2>/dev/null \
+   || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' http://localhost:8766/ 2>/dev/null \
+        | grep -qE '^[2345]'; then
+    ok "bridge port 8766"
+else
+    selftest_fail "claude-bridge not responding on port 8766" \
+                  "Inspect: lsof -i :8766     (a stale process may hold the port)"
+fi
+
+# 3. Live-server on 8765 — same tolerant check.
+if curl -fsS --max-time 2 -o /dev/null http://localhost:8765/ 2>/dev/null \
+   || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' http://localhost:8765/ 2>/dev/null \
+        | grep -qE '^[2345]'; then
+    ok "live-server port 8765"
+else
+    selftest_fail "live-server not responding on port 8765" \
+                  "Inspect: launchctl list | grep docs-livereload    (and: lsof -i :8765)"
+fi
+
 echo
 printf '\033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
 printf '⚠  RESTART CLAUDE CODE  before testing.\n'
@@ -967,4 +1064,6 @@ warn_running_claude() {
 }
 warn_running_claude
 
-log "Done. Try writing a spec — it'll auto-open with action buttons."
+printf '\n\033[1m\033[1;32m ✓ paperflow installed\033[0m\n\n'
+printf '  Try:  \033[1m/paperflow-goal "your first goal"\033[0m\n'
+printf '  Then: \033[2mgrill, build, review\033[0m — see /paperflow/specs/\n\n'

@@ -57,19 +57,35 @@ case "$FILE_PATH" in
   *)                  EVT="doc-written" ;;
 esac
 
-# ── Resolve the active-goal pointer in three strategies (first hit wins):
-#   1. Walk up from the saved file's directory looking for
-#      `.paperflow/active-goal`. Catches docs that live INSIDE a repo
-#      that uses paperflow.
-#   2. Walk up from $PWD (the shell's cwd, which when paperflow is being
-#      driven by the orchestrator is the dev repo root).
-#   3. Fall back to ~/.paperflow/active-goal — a global pointer the
-#      paperflow-goal skill mirrors on open and clears on close.
-# If none resolves, the rail can't render anyway, so quiet exit 0.
-walk_up_for_active_goal() {
+# ── Resolve the active-goal pointer via paperflow-active-scope. The helper
+# owns the scope priority chain (cmux workspace → CLAUDE_SESSION_ID → unscoped
+# legacy fallback) plus its own PID-keyed cache. Pull the session_id out of
+# the JSON payload and pass it through $CLAUDE_SESSION_ID so the helper can
+# skip cmux identify on the hook hot path when the session id is already
+# known. If the resolver returns empty, the save is "detached":
+#   - paperflow doc under ~/docs/paperflow/... → record the event without a
+#     parent goal (free-floating "attributed-while-detached"); bridge handles
+#     the no-parent case.
+#   - non-paperflow file → already filtered out above.
+SCOPE_HELPER="$HOME/.local/bin/paperflow-active-scope"
+[ -x "$SCOPE_HELPER" ] || SCOPE_HELPER="$(command -v paperflow-active-scope 2>/dev/null || true)"
+
+CLAUDE_SESSION_ID="${CLAUDE_SESSION_ID:-$(printf '%s' "$PAYLOAD" | /usr/bin/env jq -r '.session_id // empty' 2>/dev/null || true)}"
+export CLAUDE_SESSION_ID
+
+GOAL_ID=""
+if [ -n "$SCOPE_HELPER" ]; then
+  GOAL_ID="$(CLAUDE_SESSION_ID="$CLAUDE_SESSION_ID" "$SCOPE_HELPER" --read goal 2>/dev/null || true)"
+fi
+
+# Optional walk-back parent. The pointer is per-repo; locate the nearest
+# .paperflow/ above the saved file or $PWD.
+PARENT_EVENT=""
+REPO_DIR=""
+walk_up_for_event_base() {
   local dir="$1"
   while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-    if [ -f "$dir/.paperflow/active-goal" ]; then
+    if [ -f "$dir/.paperflow/active-event-base" ]; then
       printf '%s' "$dir"
       return 0
     fi
@@ -77,42 +93,9 @@ walk_up_for_active_goal() {
   done
   return 1
 }
-
-REPO_DIR=""
-ACTIVE_GOAL_FILE=""
-
-# Strategy 1: walk up from the saved file's directory.
-REPO_DIR="$(walk_up_for_active_goal "$(/usr/bin/dirname "$FILE_PATH")" || true)"
-if [ -n "$REPO_DIR" ]; then
-  ACTIVE_GOAL_FILE="$REPO_DIR/.paperflow/active-goal"
-fi
-
-# Strategy 2: walk up from $PWD.
-if [ -z "$ACTIVE_GOAL_FILE" ] && [ -n "$PWD" ]; then
-  REPO_DIR="$(walk_up_for_active_goal "$PWD" || true)"
-  if [ -n "$REPO_DIR" ]; then
-    ACTIVE_GOAL_FILE="$REPO_DIR/.paperflow/active-goal"
-  fi
-fi
-
-# Strategy 3: global fallback.
-if [ -z "$ACTIVE_GOAL_FILE" ] && [ -f "$HOME/.paperflow/active-goal" ]; then
-  ACTIVE_GOAL_FILE="$HOME/.paperflow/active-goal"
-  REPO_DIR="$HOME"
-fi
-
-if [ -z "$ACTIVE_GOAL_FILE" ]; then
-  # No active Goal anywhere — the rail wouldn't render anyway.
-  exit 0
-fi
-
-GOAL_ID="$(/usr/bin/head -n1 "$ACTIVE_GOAL_FILE" | /usr/bin/tr -d '[:space:]')"
-[ -n "$GOAL_ID" ] || exit 0
-
-# Optional walk-back parent. If non-empty, we forward it so the bridge can
-# label the event and start a fresh branch.
-PARENT_EVENT=""
-if [ -f "$REPO_DIR/.paperflow/active-event-base" ]; then
+REPO_DIR="$(walk_up_for_event_base "$(/usr/bin/dirname "$FILE_PATH")" || true)"
+[ -z "$REPO_DIR" ] && [ -n "$PWD" ] && REPO_DIR="$(walk_up_for_event_base "$PWD" || true)"
+if [ -n "$REPO_DIR" ] && [ -f "$REPO_DIR/.paperflow/active-event-base" ]; then
   PARENT_EVENT="$(/usr/bin/head -n1 "$REPO_DIR/.paperflow/active-event-base" | /usr/bin/tr -d '[:space:]')"
 fi
 
@@ -125,14 +108,17 @@ case "$SRC_REL" in /*|*/*) ;; *) SRC_REL="${FILE_PATH#*/docs/superpowers/}" ;; e
 # escape newlines/quotes correctly. Cap at ~512 KB to avoid bloating bd.
 PAYLOAD_HTML="$(/usr/bin/head -c 524288 "$FILE_PATH" 2>/dev/null || true)"
 
-# Build JSON body via jq so quoting/newlines survive.
+# Build JSON body via jq so quoting/newlines survive. When GOAL_ID is empty
+# the save is "attributed-while-detached" — the bridge handles the no-parent
+# case by labelling the event accordingly.
 BODY="$(/usr/bin/env jq -nc \
   --arg goal_id    "$GOAL_ID" \
   --arg event_type "$EVT" \
   --arg source_doc "$SRC_REL" \
   --arg parent     "$PARENT_EVENT" \
   --arg payload    "$PAYLOAD_HTML" \
-  '{goal_id: $goal_id, event_type: $event_type, source_doc: $source_doc}
+  '{event_type: $event_type, source_doc: $source_doc}
+   + (if $goal_id != "" then {goal_id: $goal_id} else {detached: true} end)
    + (if $parent  != "" then {parent_event: $parent} else {} end)
    + (if $payload != "" then {payload_html: $payload} else {} end)' 2>/dev/null || true)"
 
