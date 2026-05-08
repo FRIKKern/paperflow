@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# paperflow-backfill-goal-id — backfill window.PAPERFLOW_GOAL_ID into legacy
+# paperflow HTML docs that pre-date doc.js's auto-inject (PR #22). Dry-run by
+# default. --apply writes after snapshotting every modified file to
+# ~/.paperflow/backfill-snapshots/<ts>/. Restore via:
+#   cp -R ~/.paperflow/backfill-snapshots/<stamp>/* ~/docs/paperflow/
+# Heuristic: (1) kind:event task whose source: label matches the doc's
+# relative path, preferring event:goal-snapshot; (2) exact slug match vs
+# goal-<slug> labels; (3) date-prefix proximity (±7 days); (4) unresolved.log.
+
+set -euo pipefail
+
+ROOT="${HOME}/docs/paperflow"
+REPORT=""
+UNRESOLVED="${HOME}/.paperflow/backfill-unresolved.log"
+APPLY=0
+RUN_TS="$(date +%Y%m%d-%H%M%S)"
+SNAPSHOT_DIR="${HOME}/.paperflow/backfill-snapshots/${RUN_TS}"
+
+usage() {
+    cat <<'EOF'
+Usage: paperflow-backfill-goal-id [OPTIONS]
+
+Backfill window.PAPERFLOW_GOAL_ID into legacy paperflow doc HTML files
+that pre-date PR #22's auto-inject. Uses a 4-tier heuristic to map
+each doc to a Beads Goal id; logs unresolvable docs to a JSONL log.
+
+Options:
+  --apply              Write changes (default: dry-run, never writes)
+  --root <path>        Root to walk for *.html (default: ~/docs/paperflow)
+  --report <path>      Report destination (default: stdout)
+  --unresolved <path>  JSONL log for unresolvable docs
+                       (default: ~/.paperflow/backfill-unresolved.log)
+  --help, -h           Show this text
+
+Idempotent: docs that already have PAPERFLOW_GOAL_ID set are skipped.
+Snapshots: --apply backs up originals to ~/.paperflow/backfill-snapshots/
+           <timestamp>/<relative-path> before any write.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --apply)       APPLY=1 ;;
+        --root)        ROOT="${2:?--root needs a path}"; shift ;;
+        --report)      REPORT="${2:?--report needs a path}"; shift ;;
+        --unresolved)  UNRESOLVED="${2:?--unresolved needs a path}"; shift ;;
+        --help|-h)     usage; exit 0 ;;
+        *) printf 'Unknown flag: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if [ -z "$REPORT" ]; then exec 3>&1; else mkdir -p "$(dirname "$REPORT")"; exec 3>"$REPORT"; fi
+mkdir -p "$(dirname "$UNRESOLVED")"; : >> "$UNRESOLVED"
+
+command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 2; }
+command -v bd >/dev/null 2>&1 || { echo "bd (Beads) required" >&2; exit 2; }
+[ -d "$ROOT" ] || { echo "root not a directory: $ROOT" >&2; exit 2; }
+
+# Need both open + closed Goals for slug-match. bd list defaults to status=open.
+# Run two queries per kind and merge — covers pre-migration kind:goal label
+# AND post-migration --type epic, plus the closed history.
+ev_open="$(bd list --label kind:event --status open   --json 2>/dev/null || echo '[]')"
+ev_clos="$(bd list --label kind:event --status closed --json 2>/dev/null || echo '[]')"
+EVENTS_JSON="$(jq -s 'add | unique_by(.id)' <(printf '%s' "$ev_open") <(printf '%s' "$ev_clos") 2>/dev/null || echo '[]')"
+gl_open="$(bd list --label kind:goal --status open   --json 2>/dev/null || echo '[]')"
+gl_clos="$(bd list --label kind:goal --status closed --json 2>/dev/null || echo '[]')"
+ge_open="$(bd list --type epic --status open   --json 2>/dev/null || echo '[]')"
+ge_clos="$(bd list --type epic --status closed --json 2>/dev/null || echo '[]')"
+GOALS_JSON="$(jq -s 'add | unique_by(.id)' \
+    <(printf '%s' "$gl_open") <(printf '%s' "$gl_clos") \
+    <(printf '%s' "$ge_open") <(printf '%s' "$ge_clos") 2>/dev/null || echo '[]')"
+
+walked=0; already=0; t1=0; t2=0; t3=0; t4=0; wrote=0; SNAPSHOT_USED=0
+
+# Tier 1: events with source:<rel-path>; prefer event:goal-snapshot.
+infer_tier1() {
+    printf '%s' "$EVENTS_JSON" | jq -r --arg rel "$1" '
+        [ .[] | select(.labels | index("source:" + $rel)) ] as $m
+        | if ($m|length)==0 then ""
+          else (([$m[]|select(.labels|index("event:goal-snapshot"))][0]) // $m[0]).parent // ""
+          end'
+}
+# Tier 2: exact slug match vs goal-<slug> labels. Filter to top-level only —
+# bd cascades labels to children, so subtasks like "paperflow-3o8.2.1" can
+# carry the same goal-<slug> label as their parent. Top-level = id has no dot.
+infer_tier2() {
+    [ -z "$1" ] && { printf ''; return; }
+    printf '%s' "$GOALS_JSON" | jq -r --arg s "$1" '
+        [ .[] | select(.labels|index("goal-"+$s)) | select(.id | test("\\.") | not) ]
+        [0].id // ""'
+}
+# Tier 3: ±7-day proximity, closest goal wins.
+infer_tier3() {
+    [ -z "$1" ] && { printf ''; return; }
+    local te; te=$(date -j -f '%Y-%m-%d' "$1" +%s 2>/dev/null) || return
+    printf '%s' "$GOALS_JSON" | jq -r --argjson t "$te" --argjson w 604800 '
+        [ .[] | . as $g
+          | (.created_at|sub("Z$";"Z")|fromdateiso8601) as $c
+          | ($t-$c|if .<0 then -. else . end) as $a
+          | select($a<=$w) | {id,a:$a} ]
+        | sort_by(.a) | .[0].id // ""'
+}
+
+log_unresolved() {
+    local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -nc --arg ts "$ts" --arg file "$1" --arg reason "$2" --arg slug "${3:-}" --arg date "${4:-}" \
+        '{ts:$ts, file:$file, reason:$reason, slug:$slug, date:$date}' >> "$UNRESOLVED"
+}
+
+# Insert the embed. Returns 0/OK or 7/no-target. awk buffers the file, finds
+# the last footer <script> block whose body sets DOC_PATH or CLAUDE_TARGET
+# (insert just after that <script> opener); else inserts a fresh block before
+# </head>; else exits 7.
+do_insert() {
+    awk -v gid="$3" -v emit_dp="$4" -v rel="$5" '
+        { lines[NR] = $0 }
+        END {
+            n = NR; target = 0
+            for (i = n; i >= 1 && target == 0; i--) {
+                if (lines[i] !~ /<\/script>/) continue
+                for (j = i; j >= 1; j--) if (lines[j] ~ /<script[^>]*>/) {
+                    block = ""; for (k = j; k <= i; k++) block = block "\n" lines[k]
+                    if (block ~ /window\.DOC_PATH/ || block ~ /window\.CLAUDE_TARGET/) target = j
+                    break
+                }
+            }
+            if (target > 0) {
+                for (i = 1; i <= n; i++) {
+                    print lines[i]
+                    if (i == target) {
+                        print "  window.PAPERFLOW_GOAL_ID = \"" gid "\";"
+                        if (emit_dp == "1") print "  window.DOC_PATH = \"" rel "\";"
+                    }
+                }
+                exit 0
+            }
+            head = 0
+            for (i = 1; i <= n; i++) if (lines[i] ~ /<\/head>/) { head = i; break }
+            if (head == 0) exit 7
+            for (i = 1; i <= n; i++) {
+                if (i == head) {
+                    print "<script>"
+                    print "  window.PAPERFLOW_GOAL_ID = \"" gid "\";"
+                    if (emit_dp == "1") print "  window.DOC_PATH = \"" rel "\";"
+                    print "</script>"
+                }
+                print lines[i]
+            }
+        }' "$1" > "$2"
+}
+
+# ── Walk ───────────────────────────────────────────────────────────
+while IFS= read -r -d '' file; do
+    walked=$((walked + 1))
+    rel="${file#$ROOT/}"
+    fn="$(basename "$file")"
+
+    if grep -q 'PAPERFLOW_GOAL_ID' "$file" 2>/dev/null; then
+        already=$((already + 1))
+        printf 'SKIPPED-EMBEDDED  %s\n' "$file" >&3
+        continue
+    fi
+
+    # Pull date prefix + slug from filename (or from goals/<slug>/index.html dir).
+    datepfx=""; slug=""
+    if [[ "${fn%.html}" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})-(.+)$ ]]; then
+        datepfx="${BASH_REMATCH[1]}"; slug="${BASH_REMATCH[2]}"
+    fi
+    dirslug=""; ddate=""
+    if [[ "$rel" =~ ^goals/([^/]+)/index\.html$ ]]; then
+        dirslug="${BASH_REMATCH[1]}"
+        if [[ "$dirslug" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})-(.+)$ ]]; then
+            ddate="${BASH_REMATCH[1]}"; dirslug="${BASH_REMATCH[2]}"
+        fi
+        [ -z "$datepfx" ] && datepfx="$ddate"
+    fi
+
+    goal_id=""; tier=0
+    if g=$(infer_tier1 "$rel") && [ -n "$g" ]; then goal_id="$g"; tier=1; fi
+    if [ -z "$goal_id" ]; then
+        # Candidates include date-prefixed forms — actual goal-<slug> labels
+        # carry the date (e.g. goal-2026-05-06-paperflow-simplify), so plain
+        # "paperflow-simplify" never matches without the prefix.
+        candidates=()
+        for s in "$slug" "${slug%-plan}" "${slug%-grill}" "${slug%-changelog}" \
+                 "${slug%-questionnaire}" "${slug%-plan-grill}"; do
+            [ -z "$s" ] && continue
+            candidates+=("$s")
+            [ -n "$datepfx" ] && candidates+=("${datepfx}-${s}")
+        done
+        if [ -n "$dirslug" ]; then
+            candidates+=("$dirslug")
+            [ -n "$datepfx" ] && candidates+=("${datepfx}-${dirslug}")
+        fi
+        for c in "${candidates[@]+"${candidates[@]}"}"; do
+            if g=$(infer_tier2 "$c") && [ -n "$g" ]; then goal_id="$g"; tier=2; break; fi
+        done
+    fi
+    # Tier 3 (date-proximity) intentionally skipped per Option C — too noisy
+    # for this corpus. Slug-match catches the legitimate wins; everything
+    # else lands in unresolved for human review.
+
+    if [ -z "$goal_id" ]; then
+        t4=$((t4 + 1))
+        log_unresolved "$file" "no-heuristic-match" "$slug" "$datepfx"
+        printf 'SKIPPED-UNRESOLVED %s  ->  goal=-  (tier=4)\n' "$file" >&3
+        continue
+    fi
+
+    case "$tier" in 1) t1=$((t1+1)) ;; 2) t2=$((t2+1)) ;; 3) t3=$((t3+1)) ;; esac
+
+    emit_dp=0
+    grep -q 'window\.DOC_PATH' "$file" 2>/dev/null || emit_dp=1
+
+    if [ "$APPLY" -ne 1 ]; then
+        printf 'EMBEDDED          %s  ->  goal=%s  (tier=%d)\n' "$file" "$goal_id" "$tier" >&3
+        continue
+    fi
+
+    snap="$SNAPSHOT_DIR/$rel"
+    mkdir -p "$(dirname "$snap")" || { echo "ABORT: snapshot mkdir failed: $snap" >&2; exit 3; }
+    cp "$file" "$snap" || { echo "ABORT: snapshot copy failed: $file" >&2; exit 3; }
+    SNAPSHOT_USED=1
+
+    tmp=$(mktemp)
+    if do_insert "$file" "$tmp" "$goal_id" "$emit_dp" "$rel" && [ -s "$tmp" ]; then
+        mv "$tmp" "$file"
+        wrote=$((wrote + 1))
+        printf 'WROTE             %s  ->  goal=%s  (tier=%d)\n' "$file" "$goal_id" "$tier" >&3
+    else
+        rm -f "$tmp"
+        log_unresolved "$file" "no-insertion-target" "$slug" "$datepfx"
+        t4=$((t4 + 1))
+        case "$tier" in 1) t1=$((t1-1)) ;; 2) t2=$((t2-1)) ;; 3) t3=$((t3-1)) ;; esac
+        printf 'SKIPPED-UNRESOLVED %s  ->  goal=%s  (tier=%d)  no-insertion-target\n' "$file" "$goal_id" "$tier" >&3
+    fi
+done < <(find "$ROOT" -type f -name '*.html' -not -empty -print0 2>/dev/null)
+
+{
+    printf '\n'
+    printf 'Walked: %d  ·  Already-embedded: %d  ·  Tier1: %d  ·  Tier2: %d  ·  Tier3: %d  ·  Unresolved: %d  ·  Wrote: %d\n' \
+        "$walked" "$already" "$t1" "$t2" "$t3" "$t4" "$wrote"
+    if [ "$APPLY" -eq 1 ] && [ "$SNAPSHOT_USED" -eq 1 ]; then
+        printf 'Snapshot dir: %s\n' "$SNAPSHOT_DIR"
+    else
+        printf 'Snapshot dir: N/A (dry-run or no writes)\n'
+    fi
+    [ -z "$REPORT" ] && printf 'Report -> stdout\n' || printf 'Report -> %s\n' "$REPORT"
+    printf 'Unresolved -> %s\n' "$UNRESOLVED"
+} >&3
+exit 0
