@@ -806,6 +806,24 @@ cp "$REPO/bin/paperflow-bd-init" "$HOME/.local/bin/paperflow-bd-init"
 chmod +x "$HOME/.local/bin/paperflow-bd-init"
 ok "installed at ~/.local/bin/paperflow-bd-init"
 
+# ─── 10e1. Runtime preflight at ~/.local/bin/paperflow-preflight ───
+# Sed-substitutes __NODE_BIN__ and __BRIDGE_JS__ into the cmux spawn
+# command — same pattern as the LaunchAgent plist templates above.
+log "Helper: paperflow-preflight"
+sed -e "s|__NODE_BIN__|$NODE_BIN|g" \
+    -e "s|__BRIDGE_JS__|$REPO/bin/claude-bridge.js|g" \
+    "$REPO/bin/paperflow-preflight" > "$HOME/.local/bin/paperflow-preflight"
+chmod +x "$HOME/.local/bin/paperflow-preflight"
+ok "installed at ~/.local/bin/paperflow-preflight"
+
+# ─── 10e2. Health doctor at ~/.local/bin/paperflow-doctor ──────────
+log "Helper: paperflow-doctor"
+sed -e "s|__REPO__|$REPO|g" \
+    -e "s|__NODE_BIN__|$NODE_BIN|g" \
+    "$REPO/bin/paperflow-doctor" > "$HOME/.local/bin/paperflow-doctor"
+chmod +x "$HOME/.local/bin/paperflow-doctor"
+ok "installed at ~/.local/bin/paperflow-doctor"
+
 # ─── 10f. Legacy goals migration helper ────────────────────────────
 log "Helper: paperflow-migrate-legacy-goals"
 cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrate-legacy-goals"
@@ -982,6 +1000,8 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
     [ -x "$HOME/.local/bin/paperflow-bd-init" ]               && ok "bd-init helper : executable" || err "bd-init helper : missing"
+    [ -x "$HOME/.local/bin/paperflow-preflight" ]             && ok "preflight     : executable" || err "preflight     : missing"
+    [ -x "$HOME/.local/bin/paperflow-doctor" ]                && ok "doctor        : executable" || err "doctor        : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
@@ -1048,6 +1068,25 @@ if curl -fsS --max-time 2 -o /dev/null http://localhost:8765/ 2>/dev/null \
 else
     selftest_fail "live-server not responding on port 8765" \
                   "Inspect: launchctl list | grep docs-livereload    (and: lsof -i :8765)"
+fi
+
+# 4. Preflight helper — verifies it's installed and reports ok end-to-end.
+if "$HOME/.local/bin/paperflow-preflight" >/dev/null 2>&1; then
+    ok "preflight        : ok"
+else
+    err "preflight        : reported failure (rerun manually to see JSON)"
+fi
+
+# 5. Doctor helper — fast health probe (warnings → exit 1, critical → exit 2).
+if "$HOME/.local/bin/paperflow-doctor" --fast >/dev/null 2>&1; then
+    ok "doctor           : ok"
+else
+    DOCTOR_EXIT=$?
+    if [ "$DOCTOR_EXIT" = "1" ]; then
+        ok "doctor           : ok with warnings (run paperflow-doctor --full)"
+    else
+        err "doctor           : exit $DOCTOR_EXIT (run paperflow-doctor manually for JSON)"
+    fi
 fi
 
 echo

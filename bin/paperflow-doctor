@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+# paperflow-doctor — health & integrity check for the paperflow installation.
+# Modes:  --fast (default; cache-aware, may re-exec --full once if cache stale)
+#         --full (run every check, write cache at ~/.paperflow/doctor.cache.json)
+# Exit:   0 ok  · 1 warnings  · 2 critical (or paperflow-preflight reported failure)
+# Cache TTL: 86400s. macOS-portable bash 3.2; jq required, no node/python.
+# Auto-fixes hook scripts, helper bins, and renderers when sources are present.
+# Output: single JSON object on stdout.
+
+set -u
+
+REPO="__REPO__"
+NODE_BIN="__NODE_BIN__"
+
+CACHE_DIR="$HOME/.paperflow"
+CACHE_FILE="$CACHE_DIR/doctor.cache.json"
+CACHE_TTL=86400
+MODE="--fast"
+CHECKS_RUN=0
+CHECKS_PASSED=0
+ISSUES_JSONL=""
+AUTOFIXED_JSONL=""
+WORST=0  # 0 ok · 1 warn · 2 critical
+
+case "${1:-}" in
+    "" | "--fast") MODE="--fast" ;;
+    "--full")      MODE="--full" ;;
+    *) printf 'usage: paperflow-doctor [--fast | --full]\n' >&2; exit 1 ;;
+esac
+
+# ── helpers ────────────────────────────────────────────────────────
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+bump_worst() {
+    case "$1" in
+        critical) [ "$WORST" -lt 2 ] && WORST=2 ;;
+        warning)  [ "$WORST" -lt 1 ] && WORST=1 ;;
+    esac; return 0
+}
+
+add_issue() {
+    # add_issue id severity title repair_command auto_fix_safe(true|false)
+    local line
+    line="$(jq -nc --arg id "$1" --arg severity "$2" --arg title "$3" \
+                  --arg repair_command "$4" --argjson auto_fix_safe "$5" \
+        '{id:$id, severity:$severity, title:$title, repair_command:$repair_command, auto_fix_safe:$auto_fix_safe}')" || return 0
+    ISSUES_JSONL="${ISSUES_JSONL}${line}
+"
+    bump_worst "$2"
+}
+
+add_autofixed() {
+    local line
+    line="$(jq -nc --arg id "$1" --arg note "$2" '{id:$id, note:$note}')" || return 0
+    AUTOFIXED_JSONL="${AUTOFIXED_JSONL}${line}
+"
+}
+
+pass() { CHECKS_RUN=$((CHECKS_RUN+1)); CHECKS_PASSED=$((CHECKS_PASSED+1)); }
+fail() { CHECKS_RUN=$((CHECKS_RUN+1)); }
+
+cache_is_fresh() {
+    local mt now age
+    [ -f "$CACHE_FILE" ] || return 1
+    mt="$(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)"
+    [ "$mt" = "0" ] && return 1
+    now="$(date +%s 2>/dev/null || echo 0)"
+    age=$((now - mt))
+    [ "$age" -lt "$CACHE_TTL" ]
+}
+
+emit_and_exit() {
+    local ec=0
+    [ "$WORST" = "2" ] && ec=2
+    [ "$WORST" = "1" ] && ec=1
+    local issues_arr autofixed_arr ok_val
+    issues_arr="$(printf '%s' "$ISSUES_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    autofixed_arr="$(printf '%s' "$AUTOFIXED_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    [ "$ec" = "0" ] && ok_val=true || ok_val=false
+    jq -nc --argjson ok "$ok_val" --argjson exit_code "$ec" --arg ts "$(now_iso)" \
+           --argjson checks_run "$CHECKS_RUN" --argjson checks_passed "$CHECKS_PASSED" \
+           --argjson auto_fixed "$autofixed_arr" --argjson issues "$issues_arr" \
+        '{ok:$ok, exit:$exit_code, ts:$ts, checks_run:$checks_run, checks_passed:$checks_passed, auto_fixed:$auto_fixed, issues:$issues}'
+    exit "$ec"
+}
+
+# ── 0. paperflow-preflight gate ────────────────────────────────────
+# Services down beats config drift — propagate preflight JSON unchanged.
+if [ -x "$HOME/.local/bin/paperflow-preflight" ]; then
+    PF_OUT="$("$HOME/.local/bin/paperflow-preflight" 2>/dev/null)"
+    PF_EXIT=$?
+    if [ "$PF_EXIT" != "0" ] && [ -n "$PF_OUT" ]; then
+        printf '%s\n' "$PF_OUT"
+        exit 2
+    fi
+    pass
+fi
+
+# ── 1. dependency presence ─────────────────────────────────────────
+# dep:title:repair triplets (curl repair has no `brew` because it ships with macOS).
+for triple in \
+    "bd:Beads CLI is not installed:brew install beads" \
+    "node:Node is not installed:brew install node" \
+    "jq:jq is not installed:brew install jq" \
+    "curl:curl is not installed:# install curl via your OS package manager"
+do
+    dep="${triple%%:*}"; rest="${triple#*:}"; title="${rest%%:*}"; repair="${rest#*:}"
+    if command -v "$dep" >/dev/null 2>&1; then pass
+    else fail; add_issue "missing_dep:$dep" "critical" "$title" "$repair" false
+    fi
+done
+
+# ── 2. settings integrity ──────────────────────────────────────────
+SETTINGS="$HOME/.claude/settings.json"
+if [ ! -f "$SETTINGS" ]; then
+    fail; add_issue "settings:missing" "critical" "~/.claude/settings.json is missing" "bash $REPO/install.sh" false
+elif jq empty "$SETTINGS" >/dev/null 2>&1; then pass
+else fail; add_issue "settings:invalid_json" "critical" \
+                     "~/.claude/settings.json is not valid JSON" \
+                     "bash $REPO/install.sh   # restores from a fresh render" false
+fi
+
+# ── 3. hook scripts (auto-fix safe) ────────────────────────────────
+for hook in inject-principles.sh auto-open-doc.sh validate-paperflow-doc.sh event-on-save.sh; do
+    DST="$HOME/.claude/hooks/$hook"
+    SRC="$REPO/hooks/$hook"
+    if [ -x "$DST" ]; then pass; continue; fi
+    if [ -f "$SRC" ]; then
+        mkdir -p "$HOME/.claude/hooks" 2>/dev/null
+        if cp "$SRC" "$DST" 2>/dev/null && chmod +x "$DST" 2>/dev/null; then
+            add_autofixed "hook:$hook" "copied from $SRC"; pass; continue
+        fi
+    fi
+    fail; add_issue "hook:missing:$hook" "warning" \
+                    "Hook script $hook is missing and could not be auto-restored" \
+                    "bash $REPO/install.sh" true
+done
+
+# ── 4. helper binaries (auto-fix safe) ─────────────────────────────
+# bin-name|source-basename pairs (paperflow-target uses get-terminal-target.sh).
+for pair in \
+    paperflow-validate:paperflow-validate \
+    paperflow-bd-init:paperflow-bd-init \
+    paperflow-target:get-terminal-target.sh \
+    paperflow-continue:paperflow-continue \
+    paperflow-preflight:paperflow-preflight \
+    paperflow-migrate-legacy-goals:paperflow-migrate-legacy-goals
+do
+    bin="${pair%%:*}"; src_name="${pair#*:}"
+    DST="$HOME/.local/bin/$bin"
+    SRC="$REPO/bin/$src_name"
+    if [ -x "$DST" ]; then pass; continue; fi
+    if [ -f "$SRC" ]; then
+        mkdir -p "$HOME/.local/bin" 2>/dev/null
+        copied=0
+        if [ "$bin" = "paperflow-preflight" ]; then
+            sed -e "s|__NODE_BIN__|$NODE_BIN|g" \
+                -e "s|__BRIDGE_JS__|$REPO/bin/claude-bridge.js|g" \
+                "$SRC" > "$DST" 2>/dev/null && chmod +x "$DST" 2>/dev/null && copied=1
+        else
+            cp "$SRC" "$DST" 2>/dev/null && chmod +x "$DST" 2>/dev/null && copied=1
+        fi
+        if [ "$copied" = "1" ]; then
+            add_autofixed "bin:$bin" "copied from $SRC"; pass; continue
+        fi
+    fi
+    fail; add_issue "bin:missing:$bin" "warning" \
+                    "Helper binary $bin is missing and could not be auto-restored" \
+                    "bash $REPO/install.sh" true
+done
+
+# ── 5. renderers (auto-fix safe) ───────────────────────────────────
+for asset in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js \
+             live-render.css live-render.js goal-path-rail.css goal-path-rail.js \
+             diff-modal.js text-diff.js simplify-button.js; do
+    DST="$HOME/docs/paperflow/_lib/$asset"
+    SRC="$REPO/lib/$asset"
+    if [ -f "$DST" ]; then pass; continue; fi
+    if [ -f "$SRC" ]; then
+        mkdir -p "$HOME/docs/paperflow/_lib" 2>/dev/null
+        if cp "$SRC" "$DST" 2>/dev/null; then
+            add_autofixed "renderer:$asset" "copied from $SRC"; pass; continue
+        fi
+    fi
+    fail; add_issue "renderer:missing:$asset" "warning" \
+                    "Renderer asset $asset is missing and could not be auto-restored" \
+                    "bash $REPO/install.sh" true
+done
+
+# ── 6. fast-mode gate: merge cache or re-exec ──────────────────────
+if [ "$MODE" = "--fast" ]; then
+    if cache_is_fresh; then
+        # merge cached issues by id (fresh wins; cache only fills new ids)
+        CURRENT_IDS=" $(printf '%s' "$ISSUES_JSONL" | jq -r '.id' 2>/dev/null | tr '\n' ' ') "
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            cid="$(printf '%s' "$line" | jq -r '.id' 2>/dev/null)"
+            case "$CURRENT_IDS" in
+                *" $cid "*) ;;
+                *)
+                    csev="$(printf '%s' "$line" | jq -r '.severity' 2>/dev/null)"
+                    ISSUES_JSONL="${ISSUES_JSONL}${line}
+"
+                    bump_worst "$csev"
+                    ;;
+            esac
+        done <<EOF
+$(jq -c '.issues[]?' "$CACHE_FILE" 2>/dev/null)
+EOF
+        emit_and_exit
+    elif [ "${PAPERFLOW_DOCTOR_REENTERED:-0}" != "1" ]; then
+        export PAPERFLOW_DOCTOR_REENTERED=1
+        exec "$0" --full
+    else
+        MODE="--full"   # re-entry guard fired; keep going in-place
+    fi
+fi
+
+# ─── FULL CHECKS ───────────────────────────────────────────────────
+
+# F1. tool versions
+if command -v bd >/dev/null 2>&1; then
+    BD_VER="$(bd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [ -n "$BD_VER" ]; then
+        BD_MAJ="$(printf '%s' "$BD_VER" | cut -d. -f1)"
+        BD_MIN="$(printf '%s' "$BD_VER" | cut -d. -f2)"
+        if [ "${BD_MAJ:-0}" -lt 1 ] && [ "${BD_MIN:-0}" -lt 4 ] 2>/dev/null; then
+            fail; add_issue "version:bd_old" "warning" \
+                            "Beads CLI is older than 0.4.0 (found $BD_VER)" \
+                            "brew upgrade beads" false
+        else pass
+        fi
+    fi
+fi
+
+if command -v node >/dev/null 2>&1; then
+    NODE_MAJ="$(node -v 2>/dev/null | tr -d v | cut -d. -f1)"
+    if [ -n "$NODE_MAJ" ] && [ "$NODE_MAJ" -lt 22 ] 2>/dev/null; then
+        fail; add_issue "version:node_old" "critical" \
+                        "Node major version is < 22 (found $NODE_MAJ)" \
+                        "brew install node   # or: nvm install 22 && nvm use 22" false
+    else pass
+    fi
+fi
+
+# F2. npm globals (unlighthouse is info-only — site-audit is opt-in)
+NPM_ROOT="$(npm root -g 2>/dev/null || true)"
+if [ -n "$NPM_ROOT" ] && [ -d "$NPM_ROOT" ]; then
+    if [ -d "$NPM_ROOT/mermaid" ]; then pass
+    else fail; add_issue "npm:mermaid_missing" "warning" "Global npm package 'mermaid' not found" "npm install -g mermaid" false
+    fi
+    pass
+    [ -d "$NPM_ROOT/@unlighthouse" ] || add_issue "npm:unlighthouse_missing" "info" \
+        "Global '@unlighthouse' not found (only needed for site-audit)" \
+        "npm install -g @unlighthouse/cli puppeteer" false
+fi
+
+# F3. git outdated (skip silently if no upstream / network fail)
+if [ -d "$REPO/.git" ] && git -C "$REPO" rev-parse '@{u}' >/dev/null 2>&1; then
+    FETCH_OK=0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 git -C "$REPO" fetch --quiet >/dev/null 2>&1 && FETCH_OK=1
+    else
+        git -C "$REPO" fetch --quiet >/dev/null 2>&1 && FETCH_OK=1
+    fi
+    if [ "$FETCH_OK" = "1" ]; then
+        BEHIND="$(git -C "$REPO" rev-list HEAD..@{u} --count 2>/dev/null || echo 0)"
+        if [ "${BEHIND:-0}" -gt 0 ] 2>/dev/null; then
+            fail; add_issue "git:outdated" "warning" \
+                            "paperflow checkout is $BEHIND commit(s) behind upstream" \
+                            "cd $REPO && git pull && bash install.sh" false
+        else pass
+        fi
+    else pass
+    fi
+fi
+
+# F4. LaunchAgent plist health (bridge skipped — under cmux it's a workspace, not an agent)
+LR_LABEL="$(launchctl list 2>/dev/null | awk '/\.docs-livereload$/ {print $3; exit}')"
+if [ -n "$LR_LABEL" ]; then
+    UID_NUM="$(id -u)"
+    if launchctl print "gui/$UID_NUM/$LR_LABEL" >/dev/null 2>&1; then pass
+    else fail; add_issue "launchagent:docs-livereload_unhealthy" "warning" \
+                         "docs-livereload LaunchAgent ($LR_LABEL) reports unhealthy" \
+                         "launchctl kickstart -k gui/$UID_NUM/$LR_LABEL" false
+    fi
+fi
+
+# F5. dock socket
+if [ -S "$HOME/.paperflow/dock.sock" ]; then pass
+else fail; add_issue "dock:socket_missing" "warning" \
+                     "Dock socket ~/.paperflow/dock.sock not present" \
+                     "bash $REPO/install.sh" false
+fi
+
+# F6. skill cap (CI-mirror)
+if [ -d "$REPO/skills" ]; then
+    SKILL_COUNT="$(find "$REPO/skills" -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${SKILL_COUNT:-0}" -gt 6 ] 2>/dev/null; then
+        fail; add_issue "skills:cap_exceeded" "warning" \
+                        "Skill cap exceeded — paperflow's CI gate enforces <= 6 (found $SKILL_COUNT)" \
+                        "# remove or merge skills under $REPO/skills" false
+    else pass
+    fi
+fi
+
+# F7. write cache
+mkdir -p "$CACHE_DIR" 2>/dev/null
+{
+    issues_arr_w="$(printf '%s' "$ISSUES_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    autofixed_arr_w="$(printf '%s' "$AUTOFIXED_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    jq -n --arg ts "$(now_iso)" --argjson issues "$issues_arr_w" \
+          --argjson auto_fixed "$autofixed_arr_w" \
+          --argjson checks_run "$CHECKS_RUN" --argjson checks_passed "$CHECKS_PASSED" \
+        '{ts:$ts, issues:$issues, auto_fixed:$auto_fixed, checks_run:$checks_run, checks_passed:$checks_passed}' \
+        > "$CACHE_FILE" 2>/dev/null
+} || true
+
+emit_and_exit
