@@ -8,10 +8,7 @@
     "url": "https://github.com/FRIKKern"
   },
   "homepage": "https://github.com/FRIKKern/paperflow",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/FRIKKern/paperflow.git"
-  },
+  "repository": "https://github.com/FRIKKern/paperflow",
   "license": "MIT",
   "keywords": [
     "claude-code",
