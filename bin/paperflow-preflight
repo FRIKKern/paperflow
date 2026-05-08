@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# paperflow-preflight — runtime preflight for the two HTTP services skills depend on.
+# Probes 8765 (docs-livereload, always LaunchAgent) and 8766 (claude-bridge, cmux-first).
+# On failure, attempts ONE auto-repair, re-probes, then emits one-line JSON to stdout
+# and exits 2. On success, exits 0 silently. Exit 1 reserved for script-internal errors.
+# Output contract: stdout is empty on success, single-line JSON on failure.
+
+set -u
+
+ID="$(id -u)"
+
+# ── tolerant HTTP probe (matches install.sh self-test) ─────────────
+probe_port() {
+    local port="$1"
+    curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null \
+        || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null \
+            | grep -qE '^[0-9]{3}$'
+}
+
+# ── label discovery via launchctl list + awk ───────────────────────
+discover_label() {
+    local pattern="$1"
+    launchctl list 2>/dev/null | awk -v p="$pattern" '$3 ~ p {print $3; exit}'
+}
+
+# ── poll a port for up to N seconds (1s steps) ─────────────────────
+wait_for_port() {
+    local port="$1" max="$2" i=0
+    while [ "$i" -lt "$max" ]; do
+        if probe_port "$port"; then return 0; fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# ── JSON string-escape: backslash, quote, control chars → \uXXXX ───
+# Reads stdin, writes one escaped JSON-string fragment (no surrounding quotes).
+json_escape() {
+    python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
+        || awk 'BEGIN{ORS=""} {
+            gsub(/\\/, "\\\\")
+            gsub(/"/,  "\\\"")
+            gsub(/\t/, "\\t")
+            gsub(/\r/, "\\r")
+            gsub(/\n/, "\\n")
+            print
+        }'
+}
+
+# ── tail a logfile, escape, return on stdout ───────────────────────
+log_tail_escaped() {
+    local path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        tail -n 5 "$path" 2>/dev/null | json_escape
+    fi
+}
+
+# ── emit failure JSON and exit 2 ───────────────────────────────────
+emit_failure() {
+    local service="$1" port="$2" mode="$3" reason="$4" repair="$5" log_tail="$6"
+    local repair_esc
+    repair_esc="$(printf '%s' "$repair" | json_escape)"
+    printf '{"ok":false,"service":"%s","port":%s,"mode":"%s","reason":"%s","repair_command":"%s","log_tail":"%s"}\n' \
+        "$service" "$port" "$mode" "$reason" "$repair_esc" "$log_tail"
+    exit 2
+}
+
+# ── 1. 8765 — docs-livereload (always LaunchAgent) ─────────────────
+if ! probe_port 8765; then
+    LR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/docs-livereload.err.log")"
+    LR_LABEL="$(discover_label '\.docs-livereload$')"
+    if [ -z "$LR_LABEL" ]; then
+        emit_failure "docs-livereload" 8765 "launchagent" "label_missing" \
+                     "bash install.sh   # LaunchAgent not loaded; rerun installer" \
+                     "$LR_LOG_TAIL"
+    fi
+    launchctl kickstart -k "gui/$ID/$LR_LABEL" >/dev/null 2>&1 || true
+    sleep 1
+    if ! probe_port 8765; then
+        LR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/docs-livereload.err.log")"
+        emit_failure "docs-livereload" 8765 "launchagent" "down" \
+                     "launchctl kickstart -k gui/$ID/$LR_LABEL" \
+                     "$LR_LOG_TAIL"
+    fi
+fi
+
+# ── 2. 8766 — claude-bridge (cmux-first) ───────────────────────────
+if ! probe_port 8766; then
+    if [ -n "${CMUX_SOCKET:-}" ] && [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "${CMUX_BUNDLED_CLI_PATH:-/nonexistent}" ]; then
+        # cmux branch: defensive bootout of any leftover LaunchAgent
+        LEGACY_LABEL="$(discover_label '\.claude-bridge$')"
+        if [ -n "$LEGACY_LABEL" ]; then
+            launchctl bootout "gui/$ID/$LEGACY_LABEL" >/dev/null 2>&1 || true
+        fi
+        if pgrep -f "node.*claude-bridge\.js" >/dev/null 2>&1; then
+            # Process up but port not responding — stuck bridge
+            emit_failure "claude-bridge" 8766 "cmux" "process_up_port_down" \
+                         "kill the stuck process and re-run paperflow-preflight, or rerun bash install.sh" \
+                         ""
+        fi
+        # Process down → spawn via cmux
+        "$CMUX_BUNDLED_CLI_PATH" new-workspace \
+            --name paperflow-bridge \
+            --command "__NODE_BIN__ __BRIDGE_JS__" \
+            >/dev/null 2>&1 || true
+        if ! wait_for_port 8766 20; then
+            emit_failure "claude-bridge" 8766 "cmux" "spawn_failed" \
+                         "$CMUX_BUNDLED_CLI_PATH new-workspace --name paperflow-bridge --command \"__NODE_BIN__ __BRIDGE_JS__\"" \
+                         ""
+        fi
+    else
+        # LaunchAgent fallback branch
+        BR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/claude-bridge.err.log")"
+        BR_LABEL="$(discover_label '\.claude-bridge$')"
+        if [ -z "$BR_LABEL" ]; then
+            emit_failure "claude-bridge" 8766 "launchagent" "label_missing" \
+                         "bash install.sh   # LaunchAgent not loaded; rerun installer" \
+                         "$BR_LOG_TAIL"
+        fi
+        launchctl kickstart -k "gui/$ID/$BR_LABEL" >/dev/null 2>&1 || true
+        sleep 1
+        if ! probe_port 8766; then
+            BR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/claude-bridge.err.log")"
+            emit_failure "claude-bridge" 8766 "launchagent" "down" \
+                         "launchctl kickstart -k gui/$ID/$BR_LABEL" \
+                         "$BR_LOG_TAIL"
+        fi
+    fi
+fi
+
+# both up
+printf 'paperflow-preflight: ok\n' >&2
+exit 0
