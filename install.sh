@@ -829,6 +829,12 @@ cp "$REPO/bin/paperflow-audit-orchestrator-budget" "$HOME/.local/bin/paperflow-a
 chmod +x "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
 ok "installed at ~/.local/bin/paperflow-audit-orchestrator-budget"
 
+# ─── 10f3. Legacy doc backfill helper ──────────────────────────────
+log "Helper: paperflow-backfill-goal-id"
+cp "$REPO/bin/paperflow-backfill-goal-id" "$HOME/.local/bin/paperflow-backfill-goal-id"
+chmod +x "$HOME/.local/bin/paperflow-backfill-goal-id"
+ok "installed at ~/.local/bin/paperflow-backfill-goal-id"
+
 # ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
 # Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
 # two alias blocks to ~/.beads/aliases.toml so `bd list` and `bd ready` filter
