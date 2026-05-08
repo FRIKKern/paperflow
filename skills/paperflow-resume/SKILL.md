@@ -21,10 +21,10 @@ The lifecycle-closing skill — equivalent to Claude Code's `/resume`, but for G
 1. **Enumerate Goals in this repo:**
 
    ```bash
-   bd list --label kind:goal --json
+   bd list --type epic --json
    ```
 
-   This returns every goal-task — open, closed, snapshotted. The orchestrator filters / sorts by `last-touched` if available.
+   This returns every goal-task — open, closed, snapshotted — via Beads' native epic type. (Legacy Goals carrying only the older `kind:goal` label are folded in by the orchestrator with a one-time fallback query.) The orchestrator filters / sorts by `last-touched` if available.
 
 2. **Present a numbered list** to the user. Compact: title, slug, status, last-touched. Highlight the currently-active goal (if any).
 
@@ -40,7 +40,17 @@ The lifecycle-closing skill — equivalent to Claude Code's `/resume`, but for G
    paperflow-active-scope --list-all   # JSON of every scope's {goal, phase}
    ```
 
-   Annotate each Goal in the numbered list with the scopes it's currently active in (e.g. "paperflow-j08 — last active in cmux-workspace-16"). The `bd list --label kind:goal --status open` output is the source of truth for which Goals exist; the scope map is annotation only.
+   Annotate each Goal in the numbered list with the scopes it's currently active in (e.g. "paperflow-j08 — last active in cmux-workspace-16"). The `bd list --type epic --status open` output is the source of truth for which Goals exist; the scope map is annotation only.
+
+   **Umbrella grouping.** After fetching open Goals via `bd list --type epic --status open --json`, group by any `umbrella-<slug>` label. Goals without an umbrella render flat. Goals sharing one umbrella render under a heading:
+
+   ```
+   ▾ <umbrella-slug> (umbrella, N goals)
+       paperflow-XYZ  · <title>     <status icon>
+       paperflow-ABC  · <title>     <status icon>
+   ```
+
+   When `N == 1` (only one Goal carries the umbrella), skip the heading and render that single Goal flat. Umbrella headings are sorted alphabetically; ungrouped Goals follow.
 
 3. **Wait for the user's pick** — by number, by slug, or by partial-match. Resolve to a goal-task ID.
 
@@ -108,7 +118,7 @@ A flag (`--cross-repo`) walks known paperflow-using repos and aggregates their G
 
 | Verb | Purpose |
 |---|---|
-| `bd list --label kind:goal --json` | Enumerate Goals in this repo. |
+| `bd list --type epic --json` | Enumerate Goals in this repo (Beads-native epic type). |
 | `bd show <goal-task-id> --json` | Read metadata + slug for the chosen Goal. |
 | `bd list --label goal-<slug> --label kind:phase --json` | Find first incomplete phase. |
 

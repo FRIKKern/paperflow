@@ -127,6 +127,8 @@ Two pointer files in `<repo>/.paperflow/` say what's active in this checkout:
 
 Lookup walks up from cwd to the nearest `.paperflow/`. With neither file present anywhere up to `/`, paperflow has no active goal/phase. Both pointers are written by `paperflow-goal` (on open) and `paperflow-resume` (on switch). `paperflow-build` advances `active-phase` when the current phase empties.
 
+Under the hood, Goal-tasks use Beads' native `--type epic`; `paperflow-build` calls `bd epic close-eligible` at phase-empty to auto-close completed Goals. The user-facing word stays "Goal." For multi-axis outcomes spanning more than one Goal, apply an optional `umbrella-<slug>` label — `paperflow-resume` groups Goals by umbrella when one is present.
+
 A second mirror at `~/.paperflow/active-goal` exists for hooks that fire from `~/docs/paperflow/...` (where the dev repo isn't reachable up the directory tree).
 
 ---

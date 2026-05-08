@@ -6,7 +6,7 @@
 # goal.json. For each:
 #   1. Reads title / vision / tasks[] / unknown keys via jq.
 #   2. Bootstraps Beads in the current repo (if not already done).
-#   3. Creates a goal-task with kind:goal + goal-<slug> labels.
+#   3. Creates a goal-task with --type epic + goal-<slug> label.
 #   4. Creates three default phase-tasks (pre-flight / build / review),
 #      each with kind:phase + goal-<slug>:phase-<name> labels.
 #      Phases depend on the goal-task (bd dep add <phase-id> <goal-id>).
@@ -76,13 +76,15 @@ for legacy_root in "$PF_DOCS/missions" "$PF_DOCS/goals"; do
         # Create the goal-task.
         if [ -n "$vision" ]; then
             goal_id="$(cd "$repo_root" && bd create "$title" \
-                --labels "kind:goal,goal-$slug" \
+                --type epic \
+                --labels "goal-$slug" \
                 -p 0 \
                 --description "$vision" \
                 --silent)"
         else
             goal_id="$(cd "$repo_root" && bd create "$title" \
-                --labels "kind:goal,goal-$slug" \
+                --type epic \
+                --labels "goal-$slug" \
                 -p 0 \
                 --silent)"
         fi

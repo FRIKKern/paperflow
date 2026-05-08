@@ -159,7 +159,15 @@ When `bd ready --label $SLUG --label $PHASE_NAME` returns empty:
    echo "$NEXT_PHASE" > <repo>/.paperflow/active-phase
    paperflow-active-scope --write phase "$NEXT_PHASE"
    ```
-5. If no next phase exists, the goal is complete: optionally close the goal-task and surface the result.
+5. If no next phase exists, the goal is complete: surface the result and offer to close the goal-task.
+
+6. **Surface auto-close candidates via `bd epic close-eligible`.** After advancing the active-phase pointer (or after the last phase closes), invoke:
+
+   ```bash
+   bd epic close-eligible --json
+   ```
+
+   Beads inspects every open epic and returns the ids whose dependency subtree (phases + work-tasks) is fully closed. If the active Goal id appears in the result, the orchestrator can close it directly with `bd epic close <goal-id>` — no need to walk the phase list and construct the close manually. When the Goal isn't yet eligible (claimed work-tasks remain elsewhere in the tree), the helper simply omits it; the orchestrator continues looping.
 
 ### Failure / debug
 
