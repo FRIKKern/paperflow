@@ -1,0 +1,26 @@
+{
+  "name": "paperflow",
+  "version": "0.1.0",
+  "description": "Doc-driven Claude Code orchestration — Goals · Phases · Tasks. Specs, plans, and grills as HTML articles you click through.",
+  "author": {
+    "name": "Frikk Jarl",
+    "email": "frikk@guerrilla.no",
+    "url": "https://github.com/FRIKKern"
+  },
+  "homepage": "https://github.com/FRIKKern/paperflow",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FRIKKern/paperflow.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "workflow",
+    "specs",
+    "plans",
+    "orchestration",
+    "macos",
+    "cmux"
+  ],
+  "skills": "./skills/"
+}

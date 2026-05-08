@@ -15,7 +15,7 @@ The fastest path is the one-liner in the [README](./README.md). This file covers
 | Auto-open hook | `~/.claude/hooks/auto-open-doc.sh` | Opens any spec/plan/grill/note HTML you write |
 | Doc renderer | `~/docs/paperflow/_lib/doc.{css,js}` | Auto-injects per-doc-type action buttons |
 | Grill renderer | `~/docs/paperflow/_lib/grill.{css,js}` | Form rendering + submit-back for grills |
-| Skills | `~/.claude/skills/{grill-plan,paperflow-install,discuss}/SKILL.md` | Claude invokes these on demand |
+| Skills | `~/.claude/skills/{goal,plan,build,review,install,resume,bootstrap}/SKILL.md` | Claude invokes these on demand (also exposed as `/paperflow:<name>` via the plugin manifest) |
 | Target helper | `~/.local/bin/paperflow-target` | Emits JSON describing your terminal so doc generators can embed it |
 
 ---

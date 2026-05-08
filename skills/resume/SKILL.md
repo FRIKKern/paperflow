@@ -1,9 +1,9 @@
 ---
-name: paperflow-resume
+name: resume
 description: Use when the user says "/resume", "resume", "what was I working on", "list goals", "switch to goal X", or wants to pick up an existing Goal in this repo. Mirrors Claude Code's `/resume` for paperflow Goals. Lists Goals via Beads, presents a numbered selection menu, on pick writes new `.paperflow/active-goal` and `.paperflow/active-phase` pointers (defaulting to the first incomplete phase), and triggers the auto-open hook to display the chosen Goal HTML. Read-only on Beads — only mutates the two pointer files.
 ---
 
-# paperflow-resume
+# resume
 
 The lifecycle-closing skill — equivalent to Claude Code's `/resume`, but for Goals. The user invokes it; the orchestrator lists Goals as a numbered list; the user picks; the skill flips pointers and opens the Goal HTML via cmux tab-reuse.
 
@@ -35,7 +35,7 @@ Read the JSON from stdout and react by exit code:
 | Use this skill when | Skip when |
 |---|---|
 | "/resume" / "resume" | Active goal already covers the current work |
-| "what was I working on" | New work — see `paperflow-goal` |
+| "what was I working on" | New work — see `/paperflow:goal` |
 | "list goals" / "show open goals" | The user wants Beads details on one task — `bd show <id>` |
 | "switch to goal X" / "make goal X active" | No goals exist in this repo yet |
 

@@ -1,9 +1,9 @@
 ---
-name: paperflow-goal
+name: goal
 description: Use when the user says "start a goal", "open a goal for X", "snapshot the goal", "archive the goal", "what's the active goal?", or kicks off any non-trivial multi-artifact piece of work. Creates a goal-task in Beads with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review) underneath, sets the per-repo `.paperflow/active-goal` and `.paperflow/active-phase` pointers, and renders the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. Snapshot and archive are sub-actions of the same skill.
 ---
 
-# paperflow-goal
+# goal
 
 Open / refresh / archive a Goal. paperflow's lifecycle starts here. A Goal is a Beads task with `kind:goal`; it contains Phases (children, `kind:phase`); phases contain work-tasks (grandchildren). The orchestrator always knows which Goal is active, which Phase within it is active, and which Task is currently claimed.
 
@@ -28,7 +28,7 @@ Visible self-correction, not silent inlining.
 
 **Recursion depth = 1**: subagent briefs themselves are orchestrator-direct, no matter their length. The orchestrator can write a 600-token brief without dispatching to write the brief — otherwise infinite recursion.
 
-**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `paperflow-build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
+**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `/paperflow:build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
 
 **Commit-message marker**: any commit touching > 30 LOC includes a structured trailer:
 
@@ -101,7 +101,7 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
    Capture the resulting task ID (e.g. `bd-a1b2`) into `$GOAL_ID`. The `--type epic` is Beads' native umbrella type — paperflow uses it as the data-layer name for a Goal. Drop the legacy `kind:goal` label on new Goals; closed Goals from before this migration keep their old labels.
 
-   **`--umbrella <slug>` for multi-axis outcomes.** When a body of work spans more than one Goal — e.g. a redesign that touches onboarding, billing, and admin in parallel — pass `paperflow-goal --umbrella <slug> "<vision>"`, which adds a `umbrella-<slug>` label on the goal-task. `paperflow-resume` groups Goals sharing the same umbrella under one heading. The umbrella label is **optional and rare**; default Goal usage doesn't need it. To attach an umbrella mid-flight, run `bd label add <epic-id> umbrella-<slug>` on the open Goal.
+   **`--umbrella <slug>` for multi-axis outcomes.** When a body of work spans more than one Goal — e.g. a redesign that touches onboarding, billing, and admin in parallel — pass `/paperflow:goal --umbrella <slug> "<vision>"`, which adds a `umbrella-<slug>` label on the goal-task. `/paperflow:resume` groups Goals sharing the same umbrella under one heading. The umbrella label is **optional and rare**; default Goal usage doesn't need it. To attach an umbrella mid-flight, run `bd label add <epic-id> umbrella-<slug>` on the open Goal.
 
 4. **Create three default phase-tasks** under the goal-task. Each phase-task gets `kind:phase` and a `phase-<name>` label so scoped `bd ready` queries work later:
 
@@ -128,7 +128,7 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
    echo "$PHASE_PREFLIGHT" > <repo>/.paperflow/active-phase
    ```
 
-   `pre-flight` is the active-phase default at goal creation. `paperflow-build` advances the pointer when the phase empties.
+   `pre-flight` is the active-phase default at goal creation. `/paperflow:build` advances the pointer when the phase empties.
 
    **Mirror to the per-instance scoped pointer.** The `event-on-save.sh` hook walks up from the saved file's dir and from `$PWD`, but neither traversal reaches the dev repo when paperflow docs are saved under `~/docs/paperflow/...`. Mirror the active-goal id and active-phase id through the scope helper, which writes per-cmux-workspace (or per-Claude-Code-session) pointers so two instances never collide:
 
@@ -163,7 +163,7 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 
 **Stall handling:** open the questionnaire URL alongside the Goal HTML and wait. If the user goes silent past the next prompt, **nudge once** by repeating the URL. If still no answers, proceed without and append one JSONL line to `~/.paperflow/questionnaire-skips.log`: `{"ts": "<iso>", "goal_id": "<id>", "questionnaire_path": "<abs path>", "reason": "stall"}`.
 
-**Output routing:** when answers come back through the bridge ("Questionnaire answers for…" header + `Goal: <id>` line), fold them into the Goal vision via `bd update $GOAL_ID --description "<refined>"` and re-snapshot the Goal HTML. The questionnaire bears `<filename>-answered.json` after successful submit — `paperflow-resume` uses that sidecar to detect unfinished forms across sessions.
+**Output routing:** when answers come back through the bridge ("Questionnaire answers for…" header + `Goal: <id>` line), fold them into the Goal vision via `bd update $GOAL_ID --description "<refined>"` and re-snapshot the Goal HTML. The questionnaire bears `<filename>-answered.json` after successful submit — `/paperflow:resume` uses that sidecar to detect unfinished forms across sessions.
 
 ## Sub-actions
 
@@ -198,4 +198,4 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 - Don't create a `goal.json` sidecar. Beads is the single source of truth — no parallel JSON.
 - Don't force the 3-phase default on existing Goals. If a user has renamed or added phases, preserve them.
 - Don't skip the `--type epic` flag on the goal-task or the `kind:phase` label on phase-tasks — they're the only discriminator between layers. (Legacy `kind:goal` Goals stay readable; new Goals use `--type epic`.)
-- Don't forget to write both pointer files. The active-phase pointer is mandatory; statusline and `paperflow-build` both rely on it.
+- Don't forget to write both pointer files. The active-phase pointer is mandatory; statusline and `/paperflow:build` both rely on it.

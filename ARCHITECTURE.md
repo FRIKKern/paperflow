@@ -44,7 +44,7 @@ Two pointer files in `<repo>/.paperflow/` say what's active in this checkout:
 <repo>/.paperflow/active-phase    # one line: paperflow-a1b2.2
 ```
 
-Lookup walks up from cwd to the nearest `.paperflow/`. With neither file present anywhere up to `/`, paperflow has no active goal/phase. Both pointers are written by `paperflow-goal` (on open) and `paperflow-resume` (on switch). `paperflow-build` advances `active-phase` when the current phase empties.
+Lookup walks up from cwd to the nearest `.paperflow/`. With neither file present anywhere up to `/`, paperflow has no active goal/phase. Both pointers are written by `/paperflow:goal` (on open) and `/paperflow:resume` (on switch). `/paperflow:build` advances `active-phase` when the current phase empties.
 
 A second mirror at `~/.paperflow/active-goal` exists for hooks that fire from `~/docs/paperflow/...` (where the dev repo isn't reachable up the directory tree).
 
@@ -61,7 +61,7 @@ paperflow-active-scope --resolve         # debug: print current scope token
 
 ### Umbrella label
 
-For multi-axis outcomes spanning more than one Goal, apply an optional `umbrella-<slug>` label — `paperflow-resume` groups Goals by umbrella when one is present.
+For multi-axis outcomes spanning more than one Goal, apply an optional `umbrella-<slug>` label — `/paperflow:resume` groups Goals by umbrella when one is present.
 
 ---
 
@@ -71,11 +71,11 @@ paperflow uses Beads (`bd`) as the single source of truth for goals, phases, tas
 
 ### Per-repo init
 
-`paperflow-bd-init` runs `bd init` once on the first Goal in a repo. `paperflow-build` claims with `bd update <id> --claim` and closes with `bd update <id> --close`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase.
+`paperflow-bd-init` runs `bd init` once on the first Goal in a repo. `/paperflow:build` claims with `bd update <id> --claim` and closes with `bd update <id> --close`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase.
 
 ### Goal-tasks: epics
 
-Goal-tasks use Beads' native `--type epic`. `paperflow-build` calls `bd epic close-eligible` at phase-empty to auto-close completed Goals. The user-facing word stays "Goal."
+Goal-tasks use Beads' native `--type epic`. `/paperflow:build` calls `bd epic close-eligible` at phase-empty to auto-close completed Goals. The user-facing word stays "Goal."
 
 ### Label conventions
 
@@ -207,7 +207,7 @@ The structural gate enforces: Mermaid figures, H2 hierarchy, bound decisions, an
 
 When a `branch:simplified-*` node is selected on the rail, Accept calls `POST /simplify/accept` (bridge writes the simplified payload back to the source HTML and relabels the event to `branch:main`); Reject calls `POST /simplify/reject` with an optional reason. The source HTML on disk is unchanged until the user explicitly accepts.
 
-Implementation lives in `paperflow-plan` as a sub-action — no new skill, the 6/6 cap holds.
+Implementation lives in `/paperflow:plan` as a sub-action — no new skill, the 7/7 cap holds.
 
 ---
 
@@ -235,7 +235,7 @@ Doing inline because: <reason>. Above threshold would be <subagent-reason>.
 
 ### Verification subagent
 
-When a build subagent returns more than 500 tokens of evidence, `paperflow-build` dispatches a SECOND subagent — a verification-subagent — which returns `PASS:` / `FAIL:` only. The orchestrator never absorbs raw evidence.
+When a build subagent returns more than 500 tokens of evidence, `/paperflow:build` dispatches a SECOND subagent — a verification-subagent — which returns `PASS:` / `FAIL:` only. The orchestrator never absorbs raw evidence.
 
 ### Commit-message marker
 
@@ -245,7 +245,7 @@ Any commit touching > 30 LOC includes a structured trailer:
 Subagent-Run: <task-id>
 ```
 
-`bin/paperflow-audit-orchestrator-budget` flags over-threshold commits that lack this trailer. `paperflow-review` runs the audit on every review-task; the reviewer must justify or re-open.
+`bin/paperflow-audit-orchestrator-budget` flags over-threshold commits that lack this trailer. `/paperflow:review` runs the audit on every review-task; the reviewer must justify or re-open.
 
 ---
 
@@ -442,7 +442,7 @@ paperflow/
 │   └── docs-livereload.plist.tmpl
 ├── scripts/
 │   ├── quickstart.sh               # the curl one-liner
-│   └── check-skill-count.sh        # CI gate, 6-skill cap
+│   └── check-skill-count.sh        # CI gate, 7-skill cap
 ├── examples/
 │   ├── openclaw-spec.html
 │   ├── openclaw-grill.html
@@ -462,20 +462,45 @@ Six skills, exact. The cap is hit; adding a new skill requires removing or mergi
 
 ### CI gate
 
-`scripts/check-skill-count.sh` fails CI if a 7th `paperflow-*/SKILL.md` lands without a displacement.
+`scripts/check-skill-count.sh` fails CI if an 8th `skills/*/SKILL.md` lands without a displacement. The cap covers the six lifecycle skills plus the plugin `bootstrap` skill.
 
 ### Adding or replacing a skill
 
 1. Decide which existing skill folds in (the cap is enforced).
 2. Write the new SKILL.md under `skills/<name>/SKILL.md`. Use the canonical shape: trigger phrases, what it does, what it delegates, what Beads mutations bracket it.
 3. Add the `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` block in the body — `install.sh` re-splices `lib/shared-thresholds.md` into every non-exempt skill on every run.
-4. Update `paperflow-install` if the skill needs new install plumbing.
+4. Update `/paperflow:install` if the skill needs new install plumbing.
 5. Run `scripts/check-skill-count.sh` locally to confirm green.
 
 ### Exempt skills
 
-`paperflow-resume` is exempt from the thresholds block (read-only on Beads).
+`/paperflow:resume` is exempt from the thresholds block (read-only on Beads).
 
 ### Doc voice
 
 Match `claude-md.tmpl`'s register: plain words, no bloat, no metaphors that don't earn their keep. Norwegian-influenced direct technical tone. Lead with diagrams when something's complicated. Distribute one Mermaid figure per ~300 words across docs the skill produces.
+
+---
+
+## Plugin manifest
+
+paperflow ships as a Claude Code plugin in addition to the curl-pipe install path. The plugin manifests live at the repo root:
+
+```
+.claude-plugin/plugin.json        # plugin metadata + skills entrypoint
+.claude-plugin/marketplace.json   # marketplace entry pointing at this repo
+```
+
+`plugin.json` declares `name: "paperflow"`, `version`, author, license, keywords, and `"skills": "./skills/"`. Claude Code auto-discovers each `skills/<name>/SKILL.md` and exposes it as `/paperflow:<name>` — the slash namespace is derived from the plugin name. So the seven shipped folders (`goal`, `plan`, `build`, `review`, `install`, `resume`, `bootstrap`) become `/paperflow:goal`, `/paperflow:plan`, etc.
+
+Install path:
+
+```
+/plugin marketplace add https://github.com/FRIKKern/paperflow
+/plugin install paperflow
+/paperflow:bootstrap
+```
+
+The `bootstrap` skill is the bridge between the plugin (skills + slash commands) and the host-side install (LaunchAgents, dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims) — it locates `$CLAUDE_PLUGIN_ROOT`, asks for consent, runs `install.sh`, then writes `~/.paperflow/installed` as the success sentinel. See `skills/bootstrap/SKILL.md`.
+
+The legacy curl-pipe install (`scripts/quickstart.sh` / `install.sh`) continues to work in parallel — the same `install.sh` is the host-side worker for both paths.

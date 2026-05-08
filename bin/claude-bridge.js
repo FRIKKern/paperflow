@@ -356,7 +356,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // POST /marker — write a small sidecar file so paperflow-resume can detect
+  // POST /marker — write a small sidecar file so /paperflow:resume can detect
   // submitted questionnaires. Body: { kind, plan, submitted_at?, goal_id? }.
   // The marker file is written next to the doc HTML, named
   // "<plan-stem>-answered.json". `plan` must be a relative path (no '..',

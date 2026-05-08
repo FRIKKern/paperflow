@@ -16,6 +16,18 @@
 
 ## Install
 
+### Install via Claude Code plugin (recommended)
+
+```
+/plugin marketplace add https://github.com/FRIKKern/paperflow
+/plugin install paperflow
+/paperflow:bootstrap
+```
+
+The first two are stock Claude Code commands. The third runs the bundled `install.sh` after explaining what it touches and asking for consent — LaunchAgents on ports 8765 + 8766, the cmux dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims, optional brew installs.
+
+### Or install via terminal
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FRIKKern/paperflow/main/scripts/quickstart.sh | bash
 ```
@@ -36,7 +48,7 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 **After install:**
 
 1. **Restart Claude Code** (or run `/hooks` in any already-running session) so hooks, skills, and `CLAUDE.md` get picked up.
-2. Run `/paperflow-goal "your first goal vision"`. paperflow handles the rest.
+2. Run `/paperflow:goal "your first goal vision"`. paperflow handles the rest.
 
 ---
 
@@ -69,7 +81,7 @@ Files you'll touch:
 
 - **No more half-finished plans.** The loop forces grill → revise before build, and the build step verifies before closing tasks. Reviews can re-open a build-task on rejection — the same Beads ID, same `branch:main`, no orphan work.
 - **Click, don't type.** Specs, plans, and grills are HTML — you click "Build this plan" or fill out a grill form, the answer routes back into the terminal Claude is running in. The bridge handles tmux, iTerm2, Apple Terminal, and cmux.
-- **One orchestrator instance.** Subagent thresholds (>30 LOC, >50 lines prose, >500 tokens) are enforced — orchestrator stays clean, work happens in subagents. Every commit over the LOC gate carries a `Subagent-Run: <task-id>` trailer; `paperflow-review` audits every commit and re-opens on missing trailers.
+- **One orchestrator instance.** Subagent thresholds (>30 LOC, >50 lines prose, >500 tokens) are enforced — orchestrator stays clean, work happens in subagents. Every commit over the LOC gate carries a `Subagent-Run: <task-id>` trailer; `/paperflow:review` audits every commit and re-opens on missing trailers.
 - **One source of truth.** Beads (`bd`) holds goals, phases, tasks, and events. No JSON sidecars, no parallel state. The active Goal and Phase live in two pointer files (`<repo>/.paperflow/active-{goal,phase}`) — that's the entire mutable state on disk.
 
 ---
@@ -78,7 +90,7 @@ Files you'll touch:
 
 | Component | What it does |
 |---|---|
-| Six skills `/paperflow-{goal,plan,build,review,install,resume}` | Open a Goal, plan it, build it, review it, install/upgrade, resume later |
+| Six skills `/paperflow:{goal,plan,build,review,install,resume}` (plus `/paperflow:bootstrap` for first-time install) | Open a Goal, plan it, build it, review it, install/upgrade, resume later |
 | Article-style HTML docs | Specs, plans, grills, questionnaires, changelogs — typography, captioned figures, Mermaid throughout |
 | Goal-path right rail | Sticky 240 px panel showing the Goal's lifecycle as a Mermaid `gitGraph`; click to jump, shift-click to diff |
 | paperflow Dock (cmux) | Four live feeds in cmux's sidebar: active context, ready tasks, recent events, auto-open log |
@@ -93,11 +105,11 @@ Files you'll touch:
 
 ```mermaid
 flowchart LR
-    G["paperflow-goal"]
+    G["/paperflow:goal"]
     Q["questionnaire<br/>(when useful)"]
-    P["paperflow-plan<br/>draft → grill → revise"]
-    B["paperflow-build<br/>claim → dispatch →<br/>verify → close"]
-    R["paperflow-review"]
+    P["/paperflow:plan<br/>draft → grill → revise"]
+    B["/paperflow:build<br/>claim → dispatch →<br/>verify → close"]
+    R["/paperflow:review"]
     Done(["Goal done"])
 
     G --> Q --> P --> B --> R
@@ -111,15 +123,15 @@ paperflow's lifecycle. The orchestrator opens a Goal, optionally runs a question
 A typical session in your terminal:
 
 ```
-> /paperflow-goal "rewrite onboarding"
+> /paperflow:goal "rewrite onboarding"
 ✓ Goal opened: paperflow-a1b2 (onboarding-revamp)
   → ~/docs/paperflow/goals/onboarding-revamp/index.html
 
-> /paperflow-plan
+> /paperflow:plan
   draft → grill (12 questions) → revise
   ✓ 9 work-tasks materialised under phase-build
 
-> /paperflow-build
+> /paperflow:build
   ✓ paperflow-a1b2.2.1 closed (subagent: 47 LOC, verified)
   ✓ paperflow-a1b2.2.2 closed (subagent: 22 LOC, verified)
   …
@@ -129,18 +141,19 @@ A typical session in your terminal:
 
 ## Six skills
 
-Six, exact. `scripts/check-skill-count.sh` fails CI if a 7th lands without a displacement.
+Six lifecycle skills, plus the plugin `bootstrap` skill that runs `install.sh` after `/plugin install paperflow`. `scripts/check-skill-count.sh` fails CI if an 8th lands without a displacement.
 
 | Skill | What it does | Trigger phrases |
 |---|---|---|
-| `/paperflow-goal` | Opens, snapshots, or archives a Goal — creates the goal-task, three default phases, both pointer files, renders the Goal HTML. | "start a goal", "snapshot the goal", "archive the goal" |
-| `/paperflow-plan` | Drafts a plan, grills it with 8–15 pointed questions, revises; materialises plan steps as Beads work-tasks. Simplify is a sub-action here. | "plan X", "grill this plan", "simplify this doc" |
-| `/paperflow-build` | Claims the next ready task, dispatches a subagent, verifies on return, closes; loops the phase, advances when empty. | "build", "next step", "ship it", "next phase" |
-| `/paperflow-review` | Opens a review-task linked to a build-task; delegates the review (or site audit) to a subagent. Includes a Subagent-Run audit. | "request review", "review this PR", "audit my site" |
-| `/paperflow-install` | The meta-skill — install, upgrade, reset, integration opt-in, author a new SKILL.md, write release changelogs. | "install paperflow", "upgrade paperflow", "what is paperflow?" |
-| `/paperflow-resume` | Mirrors Claude Code's `/resume` for Goals. Lists Goals via Beads, presents a numbered menu, flips the two pointers on pick. | "/resume", "list goals", "switch to goal X" |
+| `/paperflow:goal` | Opens, snapshots, or archives a Goal — creates the goal-task, three default phases, both pointer files, renders the Goal HTML. | "start a goal", "snapshot the goal", "archive the goal" |
+| `/paperflow:plan` | Drafts a plan, grills it with 8–15 pointed questions, revises; materialises plan steps as Beads work-tasks. Simplify is a sub-action here. | "plan X", "grill this plan", "simplify this doc" |
+| `/paperflow:build` | Claims the next ready task, dispatches a subagent, verifies on return, closes; loops the phase, advances when empty. | "build", "next step", "ship it", "next phase" |
+| `/paperflow:review` | Opens a review-task linked to a build-task; delegates the review (or site audit) to a subagent. Includes a Subagent-Run audit. | "request review", "review this PR", "audit my site" |
+| `/paperflow:install` | The meta-skill — install, upgrade, reset, integration opt-in, author a new SKILL.md, write release changelogs. | "install paperflow", "upgrade paperflow", "what is paperflow?" |
+| `/paperflow:resume` | Mirrors Claude Code's `/resume` for Goals. Lists Goals via Beads, presents a numbered menu, flips the two pointers on pick. | "/resume", "list goals", "switch to goal X" |
+| `/paperflow:bootstrap` | First-run host install — runs `install.sh` after `/plugin install paperflow`. Re-run with `--upgrade` or `--reset`. | "/paperflow:bootstrap" after a fresh plugin install |
 
-Each non-exempt skill carries an inlined copy of `lib/shared-thresholds.md` between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels. `install.sh` re-splices on every run. `paperflow-resume` is exempt (read-only).
+Each non-exempt skill carries an inlined copy of `lib/shared-thresholds.md` between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels. `install.sh` re-splices on every run. `/paperflow:resume` is exempt (read-only).
 
 ---
 
@@ -220,6 +233,6 @@ paperflow's bridge HTTP endpoints, hook composition, statusline internals, dock 
 
 MIT — see [LICENSE](./LICENSE).
 
-paperflow draws on patterns from [`obra/superpowers`](https://github.com/obra/superpowers) (MIT) — `paperflow-plan` adapts `writing-plans` and `brainstorming`; `paperflow-build` adapts `executing-plans`, `verification-before-completion`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `systematic-debugging`; `paperflow-review` adapts `requesting-code-review`, `receiving-code-review`, `finishing-a-development-branch`. Where a section is structurally identical to an upstream skill, an inline note in the SKILL.md points back to [THIRD-PARTY-CREDITS.md](./THIRD-PARTY-CREDITS.md).
+paperflow draws on patterns from [`obra/superpowers`](https://github.com/obra/superpowers) (MIT) — `/paperflow:plan` adapts `writing-plans` and `brainstorming`; `/paperflow:build` adapts `executing-plans`, `verification-before-completion`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `systematic-debugging`; `/paperflow:review` adapts `requesting-code-review`, `receiving-code-review`, `finishing-a-development-branch`. Where a section is structurally identical to an upstream skill, an inline note in the SKILL.md points back to [THIRD-PARTY-CREDITS.md](./THIRD-PARTY-CREDITS.md).
 
 paperflow uses [Beads](https://github.com/gastownhall/beads) (MIT) as the system of record. Beads is invoked as a runtime dependency — paperflow does not bundle, redistribute, or modify it.

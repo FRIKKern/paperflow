@@ -1,9 +1,9 @@
 ---
-name: paperflow-build
+name: build
 description: Use when the user says "build", "execute the plan", "next step", "ship it", "next phase", or wants to implement an active plan step-by-step. The orchestrator claims the next ready task in the active phase, delegates execution to a subagent, verifies on return, and closes the Beads task. Loop until the active phase is empty, then advance the active-phase pointer to the next phase. TDD is opt-in; verification-before-completion is always on; subagent-driven development is the default; parallel-agents and git-worktrees are opt-in modes; systematic-debugging fires on failure.
 ---
 
-# paperflow-build
+# build
 
 Implement a plan, step-by-step, phase-by-phase. The orchestrator's claim-execute-verify-close loop, scoped to the active phase. The subagent does the actual work; the orchestrator owns context, claims, and Beads mutations.
 
@@ -28,7 +28,7 @@ Visible self-correction, not silent inlining.
 
 **Recursion depth = 1**: subagent briefs themselves are orchestrator-direct, no matter their length. The orchestrator can write a 600-token brief without dispatching to write the brief — otherwise infinite recursion.
 
-**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `paperflow-build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
+**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `/paperflow:build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
 
 **Commit-message marker**: any commit touching > 30 LOC includes a structured trailer:
 
@@ -78,8 +78,8 @@ Read the JSON from stdout and react by exit code:
 
 | Use this skill when | Skip when |
 |---|---|
-| "build" / "execute the plan" / "next step" / "ship it" | No plan exists yet — see `paperflow-plan` |
-| "next phase" / "advance phase" | No goal is active — see `paperflow-goal` or `paperflow-resume` |
+| "build" / "execute the plan" / "next step" / "ship it" | No plan exists yet — see `/paperflow:plan` |
+| "next phase" / "advance phase" | No goal is active — see `/paperflow:goal` or `/paperflow:resume` |
 | Plan has work-tasks ready in the active phase | All phases are closed — the goal is done |
 
 ## Process

@@ -1,9 +1,9 @@
 ---
-name: paperflow-review
+name: review
 description: Use when the user says "request review", "receive review on PR #N", "finish this branch", "audit the site", or wants to verify, test, or hand off a build-task. Opens a review-task in Beads linked to its parent build-task and to the review phase-task; delegates the review to a subagent. Closes the review-task on approval; re-opens the parent build-task on rejection. Site audits live here too — `paperflow-audit-site` runs through the same review-task wrapper.
 ---
 
-# paperflow-review
+# review
 
 Request + receive code review, finish a development branch, run a site audit. Lives naturally in the `review` phase. The orchestrator opens a review-task linked to a build-task; the subagent runs the review (or audit); the result determines whether the parent build-task stays closed or re-opens.
 
@@ -28,7 +28,7 @@ Visible self-correction, not silent inlining.
 
 **Recursion depth = 1**: subagent briefs themselves are orchestrator-direct, no matter their length. The orchestrator can write a 600-token brief without dispatching to write the brief — otherwise infinite recursion.
 
-**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `paperflow-build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
+**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `/paperflow:build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
 
 **Commit-message marker**: any commit touching > 30 LOC includes a structured trailer:
 
@@ -80,7 +80,7 @@ Read the JSON from stdout and react by exit code:
 |---|---|
 | "request review on this branch" | No build-task to review yet |
 | "receive review on PR #N" | The review came back with no issues — close inline, no skill needed |
-| "finish this branch" / "merge it" | The branch isn't ready — verify-first via `paperflow-build` |
+| "finish this branch" / "merge it" | The branch isn't ready — verify-first via `/paperflow:build` |
 | "audit the site" / "run lighthouse" | A site that isn't live or doesn't have URLs to crawl |
 
 ## Process
@@ -124,7 +124,7 @@ bd update <build-task> --reopen
 bd update <review-task> --close   # the review itself is done; the work isn't
 ```
 
-`paperflow-build` will pick the re-opened build-task up via `bd ready` on the next iteration.
+`/paperflow:build` will pick the re-opened build-task up via `bd ready` on the next iteration.
 
 ### Subagent-Run audit
 

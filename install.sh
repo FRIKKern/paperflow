@@ -6,7 +6,8 @@
 #   - claude-bridge LaunchAgent (browser → terminal, port 8766)
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
-#   - six paperflow-* skills at ~/.claude/skills/paperflow-{goal,plan,build,review,install,resume}/
+#   - six skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
+#     (plus the bootstrap skill at ~/.claude/skills/bootstrap/)
 #   - terminal-target helper at ~/.local/bin/paperflow-target
 #   - ~/.claude/CLAUDE.md (only if missing)
 #
@@ -193,11 +194,11 @@ elif command -v npm >/dev/null 2>&1; then
     fi
 fi
 
-# Optional: unlighthouse for paperflow-review's site-audit sub-flow. Don't auto-install.
+# Optional: unlighthouse for /paperflow:review's site-audit sub-flow. Don't auto-install.
 if command -v unlighthouse >/dev/null 2>&1; then
-    skip "unlighthouse: present (site audits ready via paperflow-review)"
+    skip "unlighthouse: present (site audits ready via /paperflow:review)"
 else
-    skip "unlighthouse: not installed — site audits in paperflow-review need: npm install -g @unlighthouse/cli puppeteer"
+    skip "unlighthouse: not installed — site audits in /paperflow:review need: npm install -g @unlighthouse/cli puppeteer"
 fi
 
 # Integration flag pre-flight — non-fatal, just visibility.
@@ -311,14 +312,25 @@ mkdir -p "$HOME/docs/paperflow/specs" \
          "$HOME/.local/log" \
          "$HOME/.openclaw/logs" \
          "$HOME/.claude/hooks" \
-         "$HOME/.claude/skills/paperflow-goal" \
-         "$HOME/.claude/skills/paperflow-plan" \
-         "$HOME/.claude/skills/paperflow-build" \
-         "$HOME/.claude/skills/paperflow-review" \
-         "$HOME/.claude/skills/paperflow-install" \
-         "$HOME/.claude/skills/paperflow-resume" \
+         "$HOME/.claude/skills/goal" \
+         "$HOME/.claude/skills/plan" \
+         "$HOME/.claude/skills/build" \
+         "$HOME/.claude/skills/review" \
+         "$HOME/.claude/skills/install" \
+         "$HOME/.claude/skills/resume" \
+         "$HOME/.claude/skills/bootstrap" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
+
+# One-time legacy cleanup — remove the old paperflow-prefixed skill folders
+# now that the plugin migration uses short names. Idempotent: nothing to do
+# on second run.
+for s in paperflow-goal paperflow-plan paperflow-build paperflow-review paperflow-install paperflow-resume; do
+    if [ -d "$HOME/.claude/skills/$s" ]; then
+        rm -rf "$HOME/.claude/skills/$s"
+        ok "removed legacy skill folder: $s"
+    fi
+done
 
 # ─── 2. Detect Node v22+ ────────────────────────────────────────────
 log "Node.js"
@@ -632,7 +644,7 @@ fi
 
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in paperflow-goal paperflow-plan paperflow-build paperflow-review paperflow-install paperflow-resume; do
+for s in goal plan build review install resume bootstrap; do
     if [ -f "$REPO/skills/$s/SKILL.md" ]; then
         mkdir -p "$HOME/.claude/skills/$s"
         cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -645,11 +657,11 @@ done
 # ─── 9a. Refresh threshold blocks ──────────────────────────────────
 # Splice lib/shared-thresholds.md between the BEGIN/END sentinels in
 # each non-exempt skill body. Idempotent — running twice produces no
-# diff. paperflow-resume is exempt (read-only on Beads).
+# diff. The resume skill is exempt (read-only on Beads).
 log "Refresh threshold blocks"
 SHARED="$REPO/lib/shared-thresholds.md"
 SKILLS_DIR="$HOME/.claude/skills"
-NON_EXEMPT="paperflow-goal paperflow-plan paperflow-build paperflow-review paperflow-install"
+NON_EXEMPT="goal plan build review install"
 if [ ! -f "$SHARED" ]; then
     err "missing source: $SHARED"
 else
@@ -664,7 +676,7 @@ else
         trap 'rm -f "$TMP"' EXIT
         # Anchor sentinel matches to lines whose ONLY content is the
         # sentinel — otherwise prose that mentions the marker (as in
-        # paperflow-install's "Refreshing the threshold block" subsection)
+        # the install skill's "Refreshing the threshold block" subsection)
         # falsely triggers the splice and truncates the file.
         awk -v shared="$SHARED" '
           /^<!-- BEGIN paperflow-thresholds -->$/ {
@@ -983,12 +995,13 @@ log "Status"
     [ -x "$HOME/.claude/hooks/auto-open-doc.sh" ]      && ok "open hook     : executable" || err "open hook     : missing"
     [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
     [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
-    [ -f "$HOME/.claude/skills/paperflow-goal/SKILL.md" ]     && ok "goal skill    : present"    || err "goal skill    : missing"
-    [ -f "$HOME/.claude/skills/paperflow-plan/SKILL.md" ]     && ok "plan skill    : present"    || err "plan skill    : missing"
-    [ -f "$HOME/.claude/skills/paperflow-build/SKILL.md" ]    && ok "build skill   : present"    || err "build skill   : missing"
-    [ -f "$HOME/.claude/skills/paperflow-review/SKILL.md" ]   && ok "review skill  : present"    || err "review skill  : missing"
-    [ -f "$HOME/.claude/skills/paperflow-install/SKILL.md" ]  && ok "install skill : present"    || err "install skill : missing"
-    [ -f "$HOME/.claude/skills/paperflow-resume/SKILL.md" ]   && ok "resume skill  : present"    || err "resume skill  : missing"
+    [ -f "$HOME/.claude/skills/goal/SKILL.md" ]      && ok "goal skill    : present"    || err "goal skill    : missing"
+    [ -f "$HOME/.claude/skills/plan/SKILL.md" ]      && ok "plan skill    : present"    || err "plan skill    : missing"
+    [ -f "$HOME/.claude/skills/build/SKILL.md" ]     && ok "build skill   : present"    || err "build skill   : missing"
+    [ -f "$HOME/.claude/skills/review/SKILL.md" ]    && ok "review skill  : present"    || err "review skill  : missing"
+    [ -f "$HOME/.claude/skills/install/SKILL.md" ]   && ok "install skill : present"    || err "install skill : missing"
+    [ -f "$HOME/.claude/skills/resume/SKILL.md" ]    && ok "resume skill  : present"    || err "resume skill  : missing"
+    [ -f "$HOME/.claude/skills/bootstrap/SKILL.md" ] && ok "bootstrap     : present"    || err "bootstrap     : missing"
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
     [ -x "$HOME/.claude/hooks/event-on-save.sh" ]             && ok "event hook    : executable" || err "event hook    : missing"
@@ -1094,7 +1107,7 @@ printf '\033[1;33m━━━━━━━━━━━━━━━━━━━━�
 printf '⚠  RESTART CLAUDE CODE  before testing.\n'
 printf '   Already-running sessions do NOT pick up the newly installed:\n'
 printf '     • hooks         (run /hooks to reload without restarting)\n'
-printf '     • skills        (paperflow-goal/plan/build/review/install/resume — restart only)\n'
+printf '     • skills        (/paperflow:goal/plan/build/review/install/resume — restart only)\n'
 printf '     • CLAUDE.md     (loaded once at session start)\n'
 printf '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n\n'
 
@@ -1109,6 +1122,19 @@ warn_running_claude() {
 }
 warn_running_claude
 
+# Write the sentinel marker so the bootstrap skill can detect that a host-side
+# install has succeeded at least once. Format:
+#   version=<version>
+#   ts=<iso-8601>
+mkdir -p "$HOME/.paperflow"
+PF_SENTINEL="$HOME/.paperflow/installed"
+PF_VERSION="$(jq -r '.version // "0.1.0"' "$REPO/.claude-plugin/plugin.json" 2>/dev/null || echo '0.1.0')"
+PF_TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+    printf 'version=%s\n' "$PF_VERSION"
+    printf 'ts=%s\n' "$PF_TS"
+} > "$PF_SENTINEL"
+
 printf '\n\033[1m\033[1;32m ✓ paperflow installed\033[0m\n\n'
-printf '  Try:  \033[1m/paperflow-goal "your first goal"\033[0m\n'
+printf '  Try:  \033[1m/paperflow:goal "your first goal"\033[0m\n'
 printf '  Then: \033[2mgrill, build, review\033[0m — see /paperflow/specs/\n\n'

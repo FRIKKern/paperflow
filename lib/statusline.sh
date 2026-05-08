@@ -692,8 +692,8 @@ cleanup_cache() {
     fi
 }
 
-# Pre-render cache fast-path. The Beads-mutating skills (paperflow-build /
-# -plan / -review / -goal / -resume) write the formatted line to
+# Pre-render cache fast-path. The Beads-mutating skills (/paperflow:build /
+# :plan / :review / :goal / :resume) write the formatted line to
 # ~/.paperflow/statusline.txt on every claim/close/open. If that file exists
 # AND its mtime is within the last $PRERENDER_MAX_AGE seconds, just cat it.
 # Otherwise fall through to live composition.
