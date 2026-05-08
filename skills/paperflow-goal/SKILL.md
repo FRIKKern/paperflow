@@ -72,11 +72,13 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
    ```bash
    bd create "<vision sentence>" \
-       --label kind:goal \
+       --type epic \
        --label goal-<slug>
    ```
 
-   Capture the resulting task ID (e.g. `bd-a1b2`) into `$GOAL_ID`.
+   Capture the resulting task ID (e.g. `bd-a1b2`) into `$GOAL_ID`. The `--type epic` is Beads' native umbrella type — paperflow uses it as the data-layer name for a Goal. Drop the legacy `kind:goal` label on new Goals; closed Goals from before this migration keep their old labels.
+
+   **`--umbrella <slug>` for multi-axis outcomes.** When a body of work spans more than one Goal — e.g. a redesign that touches onboarding, billing, and admin in parallel — pass `paperflow-goal --umbrella <slug> "<vision>"`, which adds a `umbrella-<slug>` label on the goal-task. `paperflow-resume` groups Goals sharing the same umbrella under one heading. The umbrella label is **optional and rare**; default Goal usage doesn't need it. To attach an umbrella mid-flight, run `bd label add <epic-id> umbrella-<slug>` on the open Goal.
 
 4. **Create three default phase-tasks** under the goal-task. Each phase-task gets `kind:phase` and a `phase-<name>` label so scoped `bd ready` queries work later:
 
@@ -158,7 +160,8 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 | Verb | Purpose |
 |---|---|
 | `bd init` | Bootstrap Beads in the repo (first goal only). |
-| `bd create … --label kind:goal --label goal-<slug>` | Create the goal-task. |
+| `bd create … --type epic --label goal-<slug>` | Create the goal-task (Beads-native epic; drops the old `kind:goal` label). |
+| `bd label add <epic-id> umbrella-<slug>` | Attach a multi-Goal umbrella mid-flight. |
 | `bd create … --label kind:phase --label goal-<slug> --label phase-<name>` | Create a phase-task (×3 by default). |
 | `bd dep add <phase-task> <goal-task>` | Attach phase under goal. |
 | `bd show <goal-task-id> --json` | Read goal metadata for HTML render. |
@@ -171,5 +174,5 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 
 - Don't create a `goal.json` sidecar. Beads is the single source of truth — no parallel JSON.
 - Don't force the 3-phase default on existing Goals. If a user has renamed or added phases, preserve them.
-- Don't skip the `kind:goal` and `kind:phase` labels — they're the only discriminator between layers.
+- Don't skip the `--type epic` flag on the goal-task or the `kind:phase` label on phase-tasks — they're the only discriminator between layers. (Legacy `kind:goal` Goals stay readable; new Goals use `--type epic`.)
 - Don't forget to write both pointer files. The active-phase pointer is mandatory; statusline and `paperflow-build` both rely on it.

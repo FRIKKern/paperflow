@@ -25,6 +25,12 @@ Two pointer files in `<repo>/.paperflow/` track what's active in this checkout:
 
 Lookup walks up from cwd to the nearest `.paperflow/`. When neither file exists anywhere up to `/`, there's no active goal/phase — paperflow falls back to whatever-Goal-is-newest behaviour. Both pointers are written by `paperflow-goal` (on Goal creation) and `paperflow-resume` (on switch).
 
+Under the hood paperflow uses Beads' native `--type epic` for Goal-tasks
+and `bd epic close-eligible` to auto-close completed Goals at phase-empty.
+The user-facing word remains "Goal." For multi-axis outcomes that span
+multiple Goals, apply an `umbrella-<slug>` label — `paperflow-resume`
+groups Goals by their umbrella when one is present.
+
 paperflow's active goal is **per-instance**. Each Claude Code instance scopes
 its own `active-goal` and `active-phase` pointers — by cmux workspace id
 when running under cmux, by Claude Code session id otherwise. The unscoped
