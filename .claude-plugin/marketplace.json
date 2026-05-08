@@ -1,0 +1,22 @@
+{
+  "name": "paperflow",
+  "owner": {
+    "name": "Frikk Jarl",
+    "email": "frikk@guerrilla.no",
+    "url": "https://github.com/FRIKKern"
+  },
+  "plugins": [
+    {
+      "name": "paperflow",
+      "description": "Doc-driven Claude Code orchestration — Goals · Phases · Tasks.",
+      "source": "./",
+      "version": "0.1.0",
+      "category": "workflows",
+      "tags": [
+        "paperflow",
+        "macos",
+        "cmux"
+      ]
+    }
+  ]
+}

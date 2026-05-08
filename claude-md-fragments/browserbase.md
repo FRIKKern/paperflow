@@ -1,7 +1,7 @@
 # BrowserBase
 
 BrowserBase is the cloud parallel + cross-browser visual capture backend used by
-`paperflow-review`'s `visual-investigator` subagent when a single local Chrome DevTools
+`/paperflow:review`'s `visual-investigator` subagent when a single local Chrome DevTools
 session is not enough — many pages in parallel, or non-Chrome engines (Firefox, Safari).
 
 Requires a BrowserBase API key (set in the environment as `BROWSERBASE_API_KEY`). The

@@ -60,7 +60,7 @@ function ensureSingleton() {
 // ──────────────────────────────────────────────────────────────────────
 // State + bd helpers.
 // ──────────────────────────────────────────────────────────────────────
-const NO_GOAL = "No active goal.\n  paperflow-resume to pick one.";
+const NO_GOAL = "No active goal.\n  /paperflow:resume to pick one.";
 
 let feeds = {
   "active-context": NO_GOAL,

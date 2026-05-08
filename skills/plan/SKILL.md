@@ -1,9 +1,9 @@
 ---
-name: paperflow-plan
+name: plan
 description: Use when the user says "plan X", "draft a plan for…", "grill this plan", "revise the plan after grill", or wants to design the task graph for the active Goal. paperflow's signature move. Three internal phases — draft → grill → revise. Grill is mandatory by default. The skill writes a plan HTML to `~/docs/paperflow/plans/<date>-<slug>.html`, then materialises plan steps as Beads work-tasks under the active phase via `bd create` + `bd dep add` for ordering. Brainstorming, writing-plans, and structural review all live here.
 ---
 
-# paperflow-plan
+# plan
 
 Design the task graph within phases. The orchestrator delegates the long-form writing to a subagent; the orchestrator turns the subagent's verified output into work-tasks `bd dep add`ed to the appropriate phase-task.
 
@@ -28,7 +28,7 @@ Visible self-correction, not silent inlining.
 
 **Recursion depth = 1**: subagent briefs themselves are orchestrator-direct, no matter their length. The orchestrator can write a 600-token brief without dispatching to write the brief — otherwise infinite recursion.
 
-**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `paperflow-build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
+**Verification-subagent dispatch**: when a subagent returns artifacts > 500 tokens of evidence (diffs, test output, screenshots), `/paperflow:build` dispatches a SECOND subagent — a verification-subagent — to inspect the evidence and confirm the gate passes. The orchestrator only sees a one-line verdict.
 
 **Commit-message marker**: any commit touching > 30 LOC includes a structured trailer:
 
@@ -78,9 +78,9 @@ Read the JSON from stdout and react by exit code:
 
 | Use this skill when | Skip when |
 |---|---|
-| "plan X" / "draft a plan for…" | The user wants to execute, not design — see `paperflow-build` |
+| "plan X" / "draft a plan for…" | The user wants to execute, not design — see `/paperflow:build` |
 | "grill this plan" / "stress-test the plan" | The work is one-shot and has no structure |
-| "revise the plan after grill" | No active goal — open one with `paperflow-goal` first |
+| "revise the plan after grill" | No active goal — open one with `/paperflow:goal` first |
 | Spec exists; needs implementation steps | Spec doesn't exist yet — write the spec first |
 
 ## Process
@@ -162,7 +162,7 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 1. **Read the grill answers** and decide what to change in the plan and what to change in the work-tasks.
 2. **Re-write the plan HTML** with the answers integrated.
 3. **Update Beads.** New steps → new work-tasks via `bd create` + `bd dep add`. Reordered steps → re-add dependency edges. Deleted steps → `bd update <id> --close` (or `--delete` if the step never started).
-4. **Offer the user three exits:** re-grill the revised plan; hand off to `paperflow-build` to start executing; or stop and let it sit.
+4. **Offer the user three exits:** re-grill the revised plan; hand off to `/paperflow:build` to start executing; or stop and let it sit.
 
 ## Artifact
 
@@ -183,7 +183,7 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 
 ## Simplify (sub-action)
 
-A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-action of `paperflow-plan`, not a separate skill (the 6/6 cap holds). One click triggers a leaning-pass subagent that returns a tighter version of the doc; a two-tier verification gate decides whether the candidate lands as a new branch on the goal-path rail.
+A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-action of `/paperflow:plan`, not a separate skill (the 7/7 cap holds). One click triggers a leaning-pass subagent that returns a tighter version of the doc; a two-tier verification gate decides whether the candidate lands as a new branch on the goal-path rail.
 
 | Step | What happens |
 |---|---|
@@ -205,6 +205,6 @@ A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-actio
 ## Don't
 
 - Don't skip the grill silently. If a plan ships without a grill, the user must have opted out by name.
-- Don't write a plan when no Goal is active. Point the user at `paperflow-goal` first.
+- Don't write a plan when no Goal is active. Point the user at `/paperflow:goal` first.
 - Don't attach work-tasks to the goal-task directly — always under a phase-task. The active-phase pointer says which.
 - Don't materialise work-tasks until the plan HTML is written and reviewed. The plan HTML is the artifact; the Beads tasks track its execution.
