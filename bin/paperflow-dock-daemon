@@ -166,7 +166,7 @@ async function renderActiveContext(goalId, goalSlugLbl, phaseId, phaseTaskObj) {
       "list", "--status", "in_progress",
       "--label", goalSlugLbl || "goal-unknown",
       "--exclude-label", "kind:phase",
-      "--exclude-label", "kind:goal",
+      "--exclude-type", "epic",
       "--exclude-label", "kind:event",
       "--json",
     ]);
