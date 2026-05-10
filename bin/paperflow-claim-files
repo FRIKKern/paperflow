@@ -41,8 +41,8 @@ case "$cmd" in
     [ "$#" -eq 0 ] && usage
     conflicts="$(
         for p in "$@"; do
-            bd list --label "file-claim:${p}" --status in_progress --json 2>/dev/null \
-              | jq -c --arg p "$p" '.[] | {task_id: .id, title, file: $p}'
+            bd list --label "file-claim:${p}" --json 2>/dev/null \
+              | jq -c --arg p "$p" '.[] | select(.status != "closed") | {task_id: .id, title, file: $p}'
         done | jq -cs '
             group_by(.task_id)
             | map({task_id: .[0].task_id, title: .[0].title, files: (map(.file) | unique)})
@@ -61,7 +61,7 @@ case "$cmd" in
     task="${1:-}"
     [ -z "$task" ] && usage
     labels="$(bd show "$task" --json 2>/dev/null \
-              | jq -r '.labels[]? | select(startswith("file-claim:"))')"
+              | jq -r '(if type=="array" then .[0] else . end).labels[]? | select(startswith("file-claim:"))')"
     if [ -z "$labels" ]; then
         printf '{"ok":true,"task":"%s","released":[]}\n' "$task"
         exit 0
