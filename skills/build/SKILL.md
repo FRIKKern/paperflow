@@ -51,6 +51,7 @@ Visible self-correction, not silent inlining.
 When in doubt, dispatch.
 <!-- END paperflow-thresholds -->
 
+<!-- BEGIN paperflow-step-0 -->
 ## Step 0 — Runtime preflight + doctor
 
 Before doing anything else, validate that the message-carrying runtime is up and the install is healthy.
@@ -72,6 +73,7 @@ Read the JSON from stdout and react by exit code:
 | 0 | Clean | Continue silent. |
 | 1 | Warnings (outdated, optional dep missing, drift already auto-fixed) | Continue. Print a one-line summary at the start of the skill's main work: `Doctor: N warning(s) — run paperflow-doctor --full to inspect.` |
 | 2 | Critical (bd/node missing, settings.json corrupted) | Abort. For each issue with `auto_fix_safe:false`, surface the `repair_command` and ask the user with `AskUserQuestion` whether to run it. |
+<!-- END paperflow-step-0 -->
 
 <!-- Step 0.5 (paperflow-doc-meta) is exempt here — `/paperflow:build` claims and verifies tasks, it does not write doc HTMLs directly. -->
 
@@ -151,7 +153,7 @@ The loop is small and unforgiving. Each iteration: read the active phase, ask Be
 
    If the claim fails (race with another agent), surface the error and stop. The dependency graph picks again on next invocation.
 
-4. **Dispatch a subagent.** Subagent default: `paperflow-code-editor` for source/script tasks; pick `paperflow-doc-writer` when the task scope is HTML/CSS/Markdown only. Fall back to `general-purpose` only when the task crosses categories (e.g. needs Bash + doc writing in one shot). Brief:
+4. **Dispatch a subagent.** Subagent default: `paperflow-code-editor` — source/script tasks; switch to `paperflow-doc-writer` when the scope is HTML/CSS/Markdown only. Fall back to `general-purpose` only when the task crosses categories (e.g. needs Bash + doc writing in one shot). Brief:
    - The Task ID, title, and full description.
    - The active goal slug + the active phase name.
    - The active branch + worktree path (if `git-worktrees` mode is on).

@@ -51,6 +51,7 @@ Visible self-correction, not silent inlining.
 When in doubt, dispatch.
 <!-- END paperflow-thresholds -->
 
+<!-- BEGIN paperflow-step-0 -->
 ## Step 0 — Runtime preflight + doctor
 
 Before doing anything else, validate that the message-carrying runtime is up and the install is healthy.
@@ -72,8 +73,10 @@ Read the JSON from stdout and react by exit code:
 | 0 | Clean | Continue silent. |
 | 1 | Warnings (outdated, optional dep missing, drift already auto-fixed) | Continue. Print a one-line summary at the start of the skill's main work: `Doctor: N warning(s) — run paperflow-doctor --full to inspect.` |
 | 2 | Critical (bd/node missing, settings.json corrupted) | Abort. For each issue with `auto_fix_safe:false`, surface the `repair_command` and ask the user with `AskUserQuestion` whether to run it. |
+<!-- END paperflow-step-0 -->
 
 
+<!-- BEGIN paperflow-step-0.5 -->
 ## Step 0.5 — Doc metadata (mandatory)
 
 Before writing any HTML doc, call:
@@ -100,6 +103,7 @@ Embed `active_goal_id` into the required script tail:
 If the helper auto-created a session Goal (`auto_created: true` in the JSON), surface that to the user in the chat reply: "Auto-created session Goal `<title>` for this doc — rename it whenever via `bd update <id> --title …`."
 
 Never invent or guess these values — always shell out to the helper.
+<!-- END paperflow-step-0.5 -->
 
 
 ## When to fire
@@ -148,7 +152,7 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
    bd show "$(cat <repo>/.paperflow/active-phase)" --json
    ```
 
-3. **Spawn a subagent.** Subagent default: `paperflow-doc-writer` (read/write/edit only — cannot shell out). Fall back to `general-purpose` only when the task crosses categories. Brief: source spec + goal vision + active phase + the article-style HTML template (eyebrow, H1, byline, ingress, body sections with Mermaid figures + tables, ordered step list with explicit dependency edges between steps). Output path:
+3. **Spawn a subagent.** Subagent default: `paperflow-doc-writer` — read/write/edit only, cannot shell out, ideal for the article-style HTML draft. Fall back to `general-purpose` only when the task crosses categories. Brief: source spec + goal vision + active phase + the article-style HTML template (eyebrow, H1, byline, ingress, body sections with Mermaid figures + tables, ordered step list with explicit dependency edges between steps). Output path:
 
    ```
    ~/docs/paperflow/plans/<YYYY-MM-DD>-<slug>.html
@@ -179,7 +183,7 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
 
 _Section structure adapted from `obra/superpowers/skills/brainstorming` (MIT) — see `THIRD-PARTY-CREDITS.md`._
 
-1. **Spawn a subagent.** Subagent default: `paperflow-researcher` for the question-generation pass (read-only — cannot accidentally edit while reviewing). The grill HTML write itself is a `paperflow-doc-writer` dispatch. Fall back to `general-purpose` only when the task crosses categories. The first dispatch reads the just-written plan in full and generates 8–15 pointed questions across these categories: architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions. Each question carries a `rationale`, a `recommendation`, a `recommendationReason`, and almost always a Mermaid `diagram`.
+1. **Spawn a subagent.** Subagent default: `paperflow-researcher` — read-only, cannot accidentally edit while generating questions. Fall back to `general-purpose` only when the task crosses categories. (The grill HTML write itself is a follow-on `paperflow-doc-writer` dispatch.) The first dispatch reads the just-written plan in full and generates 8–15 pointed questions across these categories: architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions. Each question carries a `rationale`, a `recommendation`, a `recommendationReason`, and almost always a Mermaid `diagram`.
 
 2. **Write the grill HTML** to:
 
@@ -219,7 +223,7 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 
 ## Simplify (sub-action)
 
-A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-action of `/paperflow:plan`, not a separate skill (the 7/7 cap holds). One click triggers a leaning-pass subagent that returns a tighter version of the doc; a two-tier verification gate decides whether the candidate lands as a new branch on the goal-path rail.
+A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-action of `/paperflow:plan`, not a separate skill (the 8/8 cap holds). One click triggers a leaning-pass subagent that returns a tighter version of the doc; a two-tier verification gate decides whether the candidate lands as a new branch on the goal-path rail.
 
 | Step | What happens |
 |---|---|

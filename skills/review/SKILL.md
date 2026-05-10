@@ -51,6 +51,7 @@ Visible self-correction, not silent inlining.
 When in doubt, dispatch.
 <!-- END paperflow-thresholds -->
 
+<!-- BEGIN paperflow-step-0 -->
 ## Step 0 — Runtime preflight + doctor
 
 Before doing anything else, validate that the message-carrying runtime is up and the install is healthy.
@@ -72,8 +73,10 @@ Read the JSON from stdout and react by exit code:
 | 0 | Clean | Continue silent. |
 | 1 | Warnings (outdated, optional dep missing, drift already auto-fixed) | Continue. Print a one-line summary at the start of the skill's main work: `Doctor: N warning(s) — run paperflow-doctor --full to inspect.` |
 | 2 | Critical (bd/node missing, settings.json corrupted) | Abort. For each issue with `auto_fix_safe:false`, surface the `repair_command` and ask the user with `AskUserQuestion` whether to run it. |
+<!-- END paperflow-step-0 -->
 
 
+<!-- BEGIN paperflow-step-0.5 -->
 ## Step 0.5 — Doc metadata (mandatory)
 
 Before writing any HTML doc, call:
@@ -100,6 +103,7 @@ Embed `active_goal_id` into the required script tail:
 If the helper auto-created a session Goal (`auto_created: true` in the JSON), surface that to the user in the chat reply: "Auto-created session Goal `<title>` for this doc — rename it whenever via `bd update <id> --title …`."
 
 Never invent or guess these values — always shell out to the helper.
+<!-- END paperflow-step-0.5 -->
 
 
 ## When to fire
@@ -129,7 +133,7 @@ The orchestrator wraps every review activity in a Beads review-task so the audit
    bd dep add <review-task> <review-phase-task>
    ```
 
-3. **Dispatch a subagent.** Subagent default: `paperflow-researcher` (read-only — cannot accidentally fix while reviewing). Fall back to `general-purpose` only when the task crosses categories. Brief: the diff (`git diff main...HEAD`), the build-task description, the verification evidence captured at build-close, and the criteria for approval. The subagent reviews and returns `{ verdict: approved | rejected, notes: [...] }`.
+3. **Dispatch a subagent.** Subagent default: `paperflow-researcher` — read-only, cannot accidentally fix while reviewing. Fall back to `general-purpose` only when the task crosses categories. Brief: the diff (`git diff main...HEAD`), the build-task description, the verification evidence captured at build-close, and the criteria for approval. The subagent reviews and returns `{ verdict: approved | rejected, notes: [...] }`.
 
 ### Closing on approval
 

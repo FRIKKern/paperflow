@@ -127,9 +127,8 @@ if [ -x "$HOME/.local/bin/paperflow-active-scope" ]; then
     SCOPE="$("$HOME/.local/bin/paperflow-active-scope" --resolve 2>/dev/null | tr -d '[:space:]')"
 fi
 case "$SCOPE" in
-    cmux-workspace-*) CMUX_WORKSPACE="$SCOPE" ;;
-    cmux-*)           CMUX_WORKSPACE="$SCOPE" ;;
-    *)                CMUX_WORKSPACE="" ;;
+    cmux-*) CMUX_WORKSPACE="$SCOPE" ;;
+    *)      CMUX_WORKSPACE="" ;;
 esac
 
 # ── 4. repo root (must be in a git repo for goal binding) ──────────

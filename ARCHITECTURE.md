@@ -207,7 +207,7 @@ The structural gate enforces: Mermaid figures, H2 hierarchy, bound decisions, an
 
 When a `branch:simplified-*` node is selected on the rail, Accept calls `POST /simplify/accept` (bridge writes the simplified payload back to the source HTML and relabels the event to `branch:main`); Reject calls `POST /simplify/reject` with an optional reason. The source HTML on disk is unchanged until the user explicitly accepts.
 
-Implementation lives in `/paperflow:plan` as a sub-action — no new skill, the 7/7 cap holds.
+Implementation lives in `/paperflow:plan` as a sub-action — no new skill, the 8/8 cap holds.
 
 ---
 

@@ -458,6 +458,40 @@ ensure_agent_up() {
     wait_for_port "$port"
 }
 
+# Copy a paperflow helper script from the repo into ~/.local/bin/<name>.
+# Collapses the cp + chmod +x + log + ok pattern repeated across section 10.
+# Usage: deploy_helper <name> [<src-basename-if-different>]
+deploy_helper() {
+    local name="$1" src="${2:-$1}"
+    log "Helper: $name"
+    cp "$REPO/bin/$src" "$HOME/.local/bin/$name"
+    chmod +x "$HOME/.local/bin/$name"
+    ok "installed at ~/.local/bin/$name"
+}
+
+# sed-substituting variant for placeholder helpers (preflight, doctor).
+# Usage: deploy_helper_sed <name> <sed-args...>
+deploy_helper_sed() {
+    local name="$1"; shift
+    log "Helper: $name"
+    sed "$@" "$REPO/bin/$name" > "$HOME/.local/bin/$name"
+    chmod +x "$HOME/.local/bin/$name"
+    ok "installed at ~/.local/bin/$name"
+}
+
+# Status-table executable check. Both branches share the prefix; the
+# trailing word ("executable" / "missing") is swapped so error rows read
+# correctly. Pass the prefix via $2 (e.g. "open hook   ").
+status_x() {
+    local path="$1" prefix="$2"
+    if [ -x "$path" ]; then ok "$prefix : executable"; else err "$prefix : missing"; fi
+}
+# Status-table file-exists check (label: "present" / "missing").
+status_f() {
+    local path="$1" prefix="$2"
+    if [ -f "$path" ]; then ok "$prefix : present"; else err "$prefix : missing"; fi
+}
+
 # ─── 4. live-server LaunchAgent ─────────────────────────────────────
 log "LaunchAgent: $LR_LABEL"
 LR_PLIST="$HOME/Library/LaunchAgents/$LR_LABEL.plist"
@@ -747,6 +781,65 @@ else
     done
 fi
 
+# ─── 9a1. Refresh Step 0 + Step 0.5 stanzas ───────────────────────
+# Same splice mechanism as 9a, pointing at lib/shared-step-0.md and
+# lib/shared-step-0.5.md. Step 0 lives in 7 skills (every skill that
+# can be invoked directly); Step 0.5 lives only in the 3 doc-writing
+# skills (goal/plan/review) — install.sh and autopilot carry local
+# variants that are not refreshed. Skipped when the plugin owns the
+# files (refresh via /plugin update).
+log "Refresh Step 0 / Step 0.5 stanzas"
+if [ "${SKIP_THRESHOLD_REFRESH:-0}" = "1" ]; then
+    skip "skipped — plugin owns SKILL.md content (refresh via /plugin update)"
+else
+    splice_block() {
+        local skill_file="$1" begin="$2" end="$3" source="$4"
+        [ -f "$source" ] || { err "missing source: $source"; return 1; }
+        grep -q "$begin" "$skill_file" || return 0
+        local tmp
+        tmp="$(mktemp)"
+        awk -v shared="$source" -v begin="$begin" -v end="$end" '
+          $0 == begin {
+              print
+              while ((getline line < shared) > 0) print line
+              close(shared)
+              skip = 1
+              next
+          }
+          $0 == end {
+              skip = 0
+              print
+              next
+          }
+          !skip { print }
+        ' "$skill_file" > "$tmp" && mv "$tmp" "$skill_file"
+    }
+    SHARED_S0="$REPO/lib/shared-step-0.md"
+    SHARED_S05="$REPO/lib/shared-step-0.5.md"
+    STEP0_SKILLS="goal plan build review install autopilot resume"
+    STEP05_SKILLS="goal plan review"
+    for s in $STEP0_SKILLS; do
+        SKILL_FILE="$SKILLS_DIR/$s/SKILL.md"
+        [ -f "$SKILL_FILE" ] || { skip "$s — SKILL.md not installed"; continue; }
+        if splice_block "$SKILL_FILE" \
+                        '<!-- BEGIN paperflow-step-0 -->' \
+                        '<!-- END paperflow-step-0 -->' \
+                        "$SHARED_S0"; then
+            ok "step-0: refreshed $s"
+        fi
+    done
+    for s in $STEP05_SKILLS; do
+        SKILL_FILE="$SKILLS_DIR/$s/SKILL.md"
+        [ -f "$SKILL_FILE" ] || { skip "$s — SKILL.md not installed"; continue; }
+        if splice_block "$SKILL_FILE" \
+                        '<!-- BEGIN paperflow-step-0.5 -->' \
+                        '<!-- END paperflow-step-0.5 -->' \
+                        "$SHARED_S05"; then
+            ok "step-0.5: refreshed $s"
+        fi
+    done
+fi
+
 # ─── 9b. Statusline ────────────────────────────────────────────────
 # One bash script + one editable JSON, wired into ~/.claude/settings.json.
 # Sidecar SHA tracking — overwrite only when the live file matches the SHA we
@@ -837,117 +930,34 @@ install_statusline_script
 install_statusline_limits
 merge_statusline_settings
 
-# ─── 10. terminal-target helper at ~/.local/bin/paperflow-target ───
-log "Helper: paperflow-target"
-cp "$REPO/bin/get-terminal-target.sh" "$HOME/.local/bin/paperflow-target"
-chmod +x "$HOME/.local/bin/paperflow-target"
-ok "installed at ~/.local/bin/paperflow-target"
+# ─── 10. Helper deployments to ~/.local/bin ────────────────────────
+# Every helper goes through deploy_helper (or deploy_helper_sed for the
+# two that need __VAR__ substitution). Order is preserved from the
+# legacy per-helper sections (10, 10b, 10c, 10d, 10e1/2/3, 10f, 10f0,
+# 10i, 10h, 10f1, 10f2, 10f3) — `paperflow-doctor` must land before the
+# migration step in 10g, which it precedes.
 
-# ─── 10b. mission launcher at ~/.local/bin/paperflow-continue ──────
-log "Helper: paperflow-continue"
-cp "$REPO/bin/paperflow-continue" "$HOME/.local/bin/paperflow-continue"
-chmod +x "$HOME/.local/bin/paperflow-continue"
-ok "installed at ~/.local/bin/paperflow-continue"
+deploy_helper paperflow-target          get-terminal-target.sh
+deploy_helper paperflow-continue
+deploy_helper paperflow-validate
+deploy_helper paperflow-audit-site
 
-# ─── 10c. doc validator at ~/.local/bin/paperflow-validate ─────────
-log "Helper: paperflow-validate"
-cp "$REPO/bin/paperflow-validate" "$HOME/.local/bin/paperflow-validate"
-chmod +x "$HOME/.local/bin/paperflow-validate"
-ok "installed at ~/.local/bin/paperflow-validate"
-
-# ─── 10d. audit wrapper at ~/.local/bin/paperflow-audit-site ───────
-log "Helper: paperflow-audit-site"
-cp "$REPO/bin/paperflow-audit-site" "$HOME/.local/bin/paperflow-audit-site"
-chmod +x "$HOME/.local/bin/paperflow-audit-site"
-ok "installed at ~/.local/bin/paperflow-audit-site"
-
-# ─── 10e. Beads bootstrap helper — folded into paperflow-doctor ────
-# Per-repo `bd init` now runs through `paperflow-doctor --ensure-bd`. The
-# legacy `paperflow-bd-init` binary is removed in the legacy-cleanup pass
-# at the top of this installer.
-
-# ─── 10e1. Runtime preflight at ~/.local/bin/paperflow-preflight ───
-# Sed-substitutes __NODE_BIN__ and __BRIDGE_JS__ into the cmux spawn
-# command — same pattern as the LaunchAgent plist templates above.
-log "Helper: paperflow-preflight"
-sed -e "s|__NODE_BIN__|$NODE_BIN|g" \
-    -e "s|__BRIDGE_JS__|$REPO/bin/claude-bridge.js|g" \
-    "$REPO/bin/paperflow-preflight" > "$HOME/.local/bin/paperflow-preflight"
-chmod +x "$HOME/.local/bin/paperflow-preflight"
-ok "installed at ~/.local/bin/paperflow-preflight"
-
-# ─── 10e2. Health doctor at ~/.local/bin/paperflow-doctor ──────────
-log "Helper: paperflow-doctor"
-sed -e "s|__REPO__|$REPO|g" \
+# Sed-substituting helpers — runtime preflight + health doctor templates.
+deploy_helper_sed paperflow-preflight \
     -e "s|__NODE_BIN__|$NODE_BIN|g" \
-    "$REPO/bin/paperflow-doctor" > "$HOME/.local/bin/paperflow-doctor"
-chmod +x "$HOME/.local/bin/paperflow-doctor"
-ok "installed at ~/.local/bin/paperflow-doctor"
+    -e "s|__BRIDGE_JS__|$REPO/bin/claude-bridge.js|g"
+deploy_helper_sed paperflow-doctor \
+    -e "s|__REPO__|$REPO|g" \
+    -e "s|__NODE_BIN__|$NODE_BIN|g"
 
-# ─── 10e3. Doc metadata helper at ~/.local/bin/paperflow-doc-meta ──
-# Shell-injected byline + active-goal-id for every paperflow doc write.
-# Auto-creates a Session: <date> <time> Goal in the repo if none exists.
-log "Helper: paperflow-doc-meta"
-cp "$REPO/bin/paperflow-doc-meta" "$HOME/.local/bin/paperflow-doc-meta"
-chmod +x "$HOME/.local/bin/paperflow-doc-meta"
-ok "installed at ~/.local/bin/paperflow-doc-meta"
-
-# ─── 10f. Legacy goals migration helper ────────────────────────────
-log "Helper: paperflow-migrate-legacy-goals"
-cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrate-legacy-goals"
-chmod +x "$HOME/.local/bin/paperflow-migrate-legacy-goals"
-ok "installed at ~/.local/bin/paperflow-migrate-legacy-goals"
-
-# ─── 10f0. Goal-merge helper ───────────────────────────────────────
-# paperflow-goal-merge folds one open Goal into another as a new phase.
-# Called by /paperflow:goal merge. Reversible at the bd level (close +
-# label, no destructive dep removal).
-log "Helper: paperflow-goal-merge"
-cp "$REPO/bin/paperflow-goal-merge" "$HOME/.local/bin/paperflow-goal-merge"
-chmod +x "$HOME/.local/bin/paperflow-goal-merge"
-ok "installed at ~/.local/bin/paperflow-goal-merge"
-
-# ─── 10i. file-claim helper at ~/.local/bin/paperflow-claim-files ──
-# Adds / queries / removes file-claim:<path> labels on Beads tasks so the
-# paperflow orchestrator can detect file-write conflicts before dispatching
-# a parallel subagent. Used by /paperflow:build (pre-dispatch check) and
-# /paperflow:plan (claim at task-creation time).
-log "Helper: paperflow-claim-files"
-cp "$REPO/bin/paperflow-claim-files" "$HOME/.local/bin/paperflow-claim-files"
-chmod +x "$HOME/.local/bin/paperflow-claim-files"
-ok "installed at ~/.local/bin/paperflow-claim-files"
-
-# ─── 10h. pf wrapper CLI at ~/.local/bin/pf ────────────────────────
-# Phase 1 substrate. Spawns a cmux Claude in cwd via $CMUX_BUNDLED_CLI_PATH
-# and sends /paperflow:goal or /paperflow:autopilot. Utility subcommands
-# (doctor, snapshot, status, preflight) run helpers without spawning Claude.
-log "Helper: pf"
-cp "$REPO/bin/pf" "$HOME/.local/bin/pf"
-chmod +x "$HOME/.local/bin/pf"
-ok "installed at ~/.local/bin/pf"
-
-# ─── 10f1. Per-instance active-scope resolver ──────────────────────
-# paperflow-active-scope owns the per-instance (per cmux workspace, or per
-# Claude Code session) active-goal/active-phase pointers. Skills, hooks,
-# and the statusline read/write through this helper instead of touching
-# ~/.paperflow/active-{goal,phase} directly. The legacy unscoped files
-# remain as a fallback for installs that pre-date this change.
-log "Helper: paperflow-active-scope"
-cp "$REPO/bin/paperflow-active-scope" "$HOME/.local/bin/paperflow-active-scope"
-chmod +x "$HOME/.local/bin/paperflow-active-scope"
-ok "installed at ~/.local/bin/paperflow-active-scope"
-
-# ─── 10f2. Subagent-Run audit helper ───────────────────────────────
-log "Helper: paperflow-audit-orchestrator-budget"
-cp "$REPO/bin/paperflow-audit-orchestrator-budget" "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
-chmod +x "$HOME/.local/bin/paperflow-audit-orchestrator-budget"
-ok "installed at ~/.local/bin/paperflow-audit-orchestrator-budget"
-
-# ─── 10f3. Legacy doc backfill helper ──────────────────────────────
-log "Helper: paperflow-backfill-goal-id"
-cp "$REPO/bin/paperflow-backfill-goal-id" "$HOME/.local/bin/paperflow-backfill-goal-id"
-chmod +x "$HOME/.local/bin/paperflow-backfill-goal-id"
-ok "installed at ~/.local/bin/paperflow-backfill-goal-id"
+deploy_helper paperflow-doc-meta
+deploy_helper paperflow-migrate-legacy-goals
+deploy_helper paperflow-goal-merge
+deploy_helper paperflow-claim-files
+deploy_helper pf
+deploy_helper paperflow-active-scope
+deploy_helper paperflow-audit-orchestrator-budget
+deploy_helper paperflow-backfill-goal-id
 
 # ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
 # Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
@@ -1141,43 +1151,43 @@ log "Status"
             err "claude-bridge : DOWN"
         fi
     fi
-    [ -f "$CLAUDE_MD" ]                                && ok "CLAUDE.md     : present"    || err "CLAUDE.md     : missing"
-    [ -x "$HOME/.claude/hooks/inject-principles.sh" ]  && ok "inject hook   : executable" || err "inject hook   : missing"
-    [ -x "$HOME/.claude/hooks/auto-open-doc.sh" ]      && ok "open hook     : executable" || err "open hook     : missing"
-    [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
-    [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
+    status_f "$CLAUDE_MD"                                "CLAUDE.md    "
+    status_x "$HOME/.claude/hooks/inject-principles.sh"  "inject hook  "
+    status_x "$HOME/.claude/hooks/auto-open-doc.sh"      "open hook    "
+    status_f "$HOME/docs/paperflow/_lib/doc.js"          "doc renderer "
+    status_f "$HOME/docs/paperflow/_lib/grill.js"        "grill render."
     if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
         ok "skills        : 8 via plugin (/paperflow:goal, /paperflow:plan, …, /paperflow:autopilot, /paperflow:setup)"
     else
-        [ -f "$HOME/.claude/skills/goal/SKILL.md" ]      && ok "goal skill    : present"    || err "goal skill    : missing"
-        [ -f "$HOME/.claude/skills/plan/SKILL.md" ]      && ok "plan skill    : present"    || err "plan skill    : missing"
-        [ -f "$HOME/.claude/skills/build/SKILL.md" ]     && ok "build skill   : present"    || err "build skill   : missing"
-        [ -f "$HOME/.claude/skills/review/SKILL.md" ]    && ok "review skill  : present"    || err "review skill  : missing"
-        [ -f "$HOME/.claude/skills/install/SKILL.md" ]   && ok "install skill : present"    || err "install skill : missing"
-        [ -f "$HOME/.claude/skills/resume/SKILL.md" ]    && ok "resume skill  : present"    || err "resume skill  : missing"
-        [ -f "$HOME/.claude/skills/setup/SKILL.md" ]     && ok "setup skill   : present"    || err "setup skill   : missing"
-        [ -f "$HOME/.claude/skills/autopilot/SKILL.md" ] && ok "autopilot     : present"    || err "autopilot     : missing"
+        status_f "$HOME/.claude/skills/goal/SKILL.md"      "goal skill   "
+        status_f "$HOME/.claude/skills/plan/SKILL.md"      "plan skill   "
+        status_f "$HOME/.claude/skills/build/SKILL.md"     "build skill  "
+        status_f "$HOME/.claude/skills/review/SKILL.md"    "review skill "
+        status_f "$HOME/.claude/skills/install/SKILL.md"   "install skill"
+        status_f "$HOME/.claude/skills/resume/SKILL.md"    "resume skill "
+        status_f "$HOME/.claude/skills/setup/SKILL.md"     "setup skill  "
+        status_f "$HOME/.claude/skills/autopilot/SKILL.md" "autopilot    "
     fi
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
-    [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
-    [ -x "$HOME/.claude/hooks/event-on-save.sh" ]             && ok "event hook    : executable" || err "event hook    : missing"
+    status_x "$HOME/.claude/hooks/validate-paperflow-doc.sh"  "validate hook"
+    status_x "$HOME/.claude/hooks/event-on-save.sh"           "event hook   "
     [ -d "$HOME/.paperflow/events" ]                          && ok "events dir    : ready"      || err "events dir    : missing"
-    [ -f "$HOME/docs/paperflow/_lib/goal-path-rail.js" ]      && ok "rail renderer : present"    || err "rail renderer : missing"
-    [ -f "$HOME/docs/paperflow/_lib/text-diff.js" ]           && ok "text-diff lib : present"    || err "text-diff lib : missing"
-    [ -x "$HOME/.local/bin/paperflow-target" ]                && ok "target helper : executable" || err "target helper : missing"
-    [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
-    [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"
-    [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
-    [ -x "$HOME/.local/bin/paperflow-preflight" ]             && ok "preflight     : executable" || err "preflight     : missing"
-    [ -x "$HOME/.local/bin/paperflow-doctor" ]                && ok "doctor        : executable" || err "doctor        : missing"
-    [ -x "$HOME/.local/bin/paperflow-doc-meta" ]              && ok "doc-meta      : executable" || err "doc-meta      : missing"
-    [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
-    [ -x "$HOME/.local/bin/paperflow-goal-merge" ]            && ok "goal-merge    : executable" || err "goal-merge    : missing"
-    [ -x "$HOME/.local/bin/paperflow-claim-files" ]           && ok "claim-files   : executable" || err "claim-files   : missing"
-    [ -x "$HOME/.local/bin/pf" ]                              && ok "pf wrapper   : executable" || err "pf wrapper   : missing"
-    [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
-    [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
-    [ -x "$HOME/.local/bin/paperflow-dock-feed" ]              && ok "dock feed     : executable" || err "dock feed     : missing"
+    status_f "$HOME/docs/paperflow/_lib/goal-path-rail.js"    "rail renderer"
+    status_f "$HOME/docs/paperflow/_lib/text-diff.js"         "text-diff lib"
+    status_x "$HOME/.local/bin/paperflow-target"              "target helper"
+    status_x "$HOME/.local/bin/paperflow-continue"            "continue laun."
+    status_x "$HOME/.local/bin/paperflow-validate"            "validator    "
+    status_x "$HOME/.local/bin/paperflow-audit-site"          "audit wrapper"
+    status_x "$HOME/.local/bin/paperflow-preflight"           "preflight    "
+    status_x "$HOME/.local/bin/paperflow-doctor"              "doctor       "
+    status_x "$HOME/.local/bin/paperflow-doc-meta"            "doc-meta     "
+    status_x "$HOME/.local/bin/paperflow-migrate-legacy-goals" "migrate helper"
+    status_x "$HOME/.local/bin/paperflow-goal-merge"          "goal-merge   "
+    status_x "$HOME/.local/bin/paperflow-claim-files"         "claim-files  "
+    status_x "$HOME/.local/bin/pf"                            "pf wrapper  "
+    status_x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" "audit helper "
+    status_x "$HOME/.local/bin/paperflow-dock-daemon"         "dock daemon  "
+    status_x "$HOME/.local/bin/paperflow-dock-feed"           "dock feed    "
     [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json" ]  && ok "dock config   : present"    || skip "dock config   : missing"
     if [ -S "$HOME/.paperflow/dock.sock" ] \
        && printf 'active-context\n' | /usr/bin/nc -U -w 1 "$HOME/.paperflow/dock.sock" >/dev/null 2>&1; then
@@ -1189,10 +1199,10 @@ log "Status"
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"
     jq -e '.hooks.PostToolUse'      "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings PTU  : wired"      || err "settings PTU  : broken"
-    [ -x "$HOME/.claude/statusline.sh" ]                       && ok "statusline    : executable" || err "statusline    : missing"
-    [ -f "$HOME/.paperflow/statusline-limits.json" ]           && ok "limits.json   : present"    || err "limits.json   : missing"
-    [ -f "$HOME/.paperflow/.statusline-installed-sha" ]        && ok "sl sidecar    : present"    || err "sl sidecar    : missing"
-    [ -f "$HOME/.paperflow/.statusline-limits-installed-sha" ] && ok "limits sidecar: present"    || err "limits sidecar: missing"
+    status_x "$HOME/.claude/statusline.sh"                       "statusline   "
+    status_f "$HOME/.paperflow/statusline-limits.json"           "limits.json  "
+    status_f "$HOME/.paperflow/.statusline-installed-sha"        "sl sidecar   "
+    [ -f "$HOME/.paperflow/.statusline-limits-installed-sha" ] && ok "limits sidecar: present" || err "limits sidecar: missing"
     jq -e '.statusLine' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings stat.: wired"      || skip "settings stat.: not wired (foreign or absent)"
 }
