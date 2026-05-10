@@ -642,27 +642,59 @@ else
     [ "$DOCK_DAEMON_RUNNING" -eq 1 ] || skip "daemon socket did not appear within 5 s — check the spawn"
 fi
 
+# ─── 8e. Plugin presence check (skill ownership resolver) ──────────
+# When the paperflow plugin is installed via /plugin install, the plugin
+# owns the skill registrations (/paperflow:goal etc.). Duplicating them
+# in ~/.claude/skills/ creates ambiguous slash commands — Claude has to
+# guess between /goal (host) and /paperflow:goal (plugin). Plugin wins:
+# sweep any leftover host skills, skip the host copy step.
+PAPERFLOW_PLUGIN_INSTALLED=0
+if [ -d "$HOME/.claude/plugins/cache" ] \
+   && find "$HOME/.claude/plugins/cache" -path '*/paperflow/*/.claude-plugin/plugin.json' \
+        2>/dev/null | head -1 | grep -q .; then
+    PAPERFLOW_PLUGIN_INSTALLED=1
+    log "Plugin detected — host skill copy + threshold refresh will be skipped"
+    for s in goal plan build review install resume bootstrap; do
+        if [ -d "$HOME/.claude/skills/$s" ]; then
+            rm -rf "$HOME/.claude/skills/$s"
+            ok "swept duplicate host skill: $s (plugin owns /paperflow:$s)"
+        fi
+    done
+fi
+
 # ─── 9. Skills ──────────────────────────────────────────────────────
 log "Skills"
-for s in goal plan build review install resume bootstrap; do
-    if [ -f "$REPO/skills/$s/SKILL.md" ]; then
-        mkdir -p "$HOME/.claude/skills/$s"
-        cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
-        ok "$s"
-    else
-        err "$s : missing template"
-    fi
-done
+if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
+    skip "provided by plugin — host copy skipped (slashes: /paperflow:goal etc.)"
+else
+    for s in goal plan build review install resume bootstrap; do
+        if [ -f "$REPO/skills/$s/SKILL.md" ]; then
+            mkdir -p "$HOME/.claude/skills/$s"
+            cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
+            ok "$s"
+        else
+            err "$s : missing template"
+        fi
+    done
+fi
 
 # ─── 9a. Refresh threshold blocks ──────────────────────────────────
 # Splice lib/shared-thresholds.md between the BEGIN/END sentinels in
 # each non-exempt skill body. Idempotent — running twice produces no
-# diff. The resume skill is exempt (read-only on Beads).
+# diff. The resume skill is exempt (read-only on Beads). Skipped when
+# plugin owns the skills — those SKILL.md files are versioned with the
+# plugin and refresh via /plugin update, not install.sh.
 log "Refresh threshold blocks"
+if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
+    skip "skipped — plugin owns SKILL.md content (refresh via /plugin update)"
+    SKIP_THRESHOLD_REFRESH=1
+fi
 SHARED="$REPO/lib/shared-thresholds.md"
 SKILLS_DIR="$HOME/.claude/skills"
 NON_EXEMPT="goal plan build review install"
-if [ ! -f "$SHARED" ]; then
+if [ "${SKIP_THRESHOLD_REFRESH:-0}" = "1" ]; then
+    :
+elif [ ! -f "$SHARED" ]; then
     err "missing source: $SHARED"
 else
     for s in $NON_EXEMPT; do
@@ -995,13 +1027,17 @@ log "Status"
     [ -x "$HOME/.claude/hooks/auto-open-doc.sh" ]      && ok "open hook     : executable" || err "open hook     : missing"
     [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
     [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
-    [ -f "$HOME/.claude/skills/goal/SKILL.md" ]      && ok "goal skill    : present"    || err "goal skill    : missing"
-    [ -f "$HOME/.claude/skills/plan/SKILL.md" ]      && ok "plan skill    : present"    || err "plan skill    : missing"
-    [ -f "$HOME/.claude/skills/build/SKILL.md" ]     && ok "build skill   : present"    || err "build skill   : missing"
-    [ -f "$HOME/.claude/skills/review/SKILL.md" ]    && ok "review skill  : present"    || err "review skill  : missing"
-    [ -f "$HOME/.claude/skills/install/SKILL.md" ]   && ok "install skill : present"    || err "install skill : missing"
-    [ -f "$HOME/.claude/skills/resume/SKILL.md" ]    && ok "resume skill  : present"    || err "resume skill  : missing"
-    [ -f "$HOME/.claude/skills/bootstrap/SKILL.md" ] && ok "bootstrap     : present"    || err "bootstrap     : missing"
+    if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
+        ok "skills        : 7 via plugin (/paperflow:goal, /paperflow:plan, …, /paperflow:bootstrap)"
+    else
+        [ -f "$HOME/.claude/skills/goal/SKILL.md" ]      && ok "goal skill    : present"    || err "goal skill    : missing"
+        [ -f "$HOME/.claude/skills/plan/SKILL.md" ]      && ok "plan skill    : present"    || err "plan skill    : missing"
+        [ -f "$HOME/.claude/skills/build/SKILL.md" ]     && ok "build skill   : present"    || err "build skill   : missing"
+        [ -f "$HOME/.claude/skills/review/SKILL.md" ]    && ok "review skill  : present"    || err "review skill  : missing"
+        [ -f "$HOME/.claude/skills/install/SKILL.md" ]   && ok "install skill : present"    || err "install skill : missing"
+        [ -f "$HOME/.claude/skills/resume/SKILL.md" ]    && ok "resume skill  : present"    || err "resume skill  : missing"
+        [ -f "$HOME/.claude/skills/bootstrap/SKILL.md" ] && ok "bootstrap     : present"    || err "bootstrap     : missing"
+    fi
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"
     [ -x "$HOME/.claude/hooks/event-on-save.sh" ]             && ok "event hook    : executable" || err "event hook    : missing"
