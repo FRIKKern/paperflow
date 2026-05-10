@@ -87,6 +87,19 @@ auto_create_session_goal() {
     printf '%s\n' "$goal_id"     > "$repo/.paperflow/active-goal"
     printf '%s\n' "$phase_id_pf" > "$repo/.paperflow/active-phase"
 
+    # Step 5b: also write the global per-scope pointers consumed by the dock
+    # daemon (paperflow-active-scope --read goal|phase). The per-repo pointers
+    # above feed pf snapshot/status; the per-scope pointers feed the dock
+    # statusline + active-context feed. Without this mirror, the dock daemon
+    # reports "No active goal" even after a Goal is auto-created here.
+    if command -v paperflow-active-scope >/dev/null 2>&1; then
+        paperflow-active-scope --write goal  "$goal_id"     >/dev/null 2>&1 || true
+        paperflow-active-scope --write phase "$phase_id_pf" >/dev/null 2>&1 || true
+    elif [ -x "$HOME/.local/bin/paperflow-active-scope" ]; then
+        "$HOME/.local/bin/paperflow-active-scope" --write goal  "$goal_id"     >/dev/null 2>&1 || true
+        "$HOME/.local/bin/paperflow-active-scope" --write phase "$phase_id_pf" >/dev/null 2>&1 || true
+    fi
+
     printf '%s %s\n' "$goal_id" "$title"
     return 0
 }
