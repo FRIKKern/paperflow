@@ -32,6 +32,26 @@ if (!fs.existsSync(FILE)) {
 }
 const html = fs.readFileSync(FILE, "utf8");
 
+// ── 0. Soft check: paperflow-managed docs should bind to a Goal ─────
+// Heuristic — only nag for paths under one of the paperflow doc dirs.
+// Missing window.PAPERFLOW_GOAL_ID is a warning, never an exit-2 fail.
+const PF_DOC_DIRS = [
+  "/notes/", "/specs/", "/plans/", "/grills/", "/changelog/",
+  "/goals/", "/missions/", "/questionnaires/"
+];
+const goalIdRe = /window\.PAPERFLOW_GOAL_ID\s*=\s*["']([^"']+)["']/;
+const inPfDir = PF_DOC_DIRS.some((d) => FILE.includes(d));
+const hasGoalId = goalIdRe.test(html);
+const warnings = [];
+if (inPfDir && !hasGoalId) {
+  warnings.push({
+    id: "missing_goal_id",
+    severity: "warning",
+    message: "Doc has no window.PAPERFLOW_GOAL_ID — should be set via paperflow-doc-meta to bind to a Goal",
+    fix_command: "paperflow-doc-meta && embed active_goal_id in the doc"
+  });
+}
+
 // ── 1. Extract Mermaid sources ──────────────────────────────────────
 const blocks = [];
 
@@ -98,16 +118,20 @@ async function loadMermaid() {
 
 (async () => {
   if (blocks.length === 0) {
-    process.stdout.write(JSON.stringify({ ok: true, total: 0, failed: [] }) + "\n");
+    const out = { ok: true, total: 0, failed: [] };
+    if (warnings.length) out.warnings = warnings;
+    process.stdout.write(JSON.stringify(out) + "\n");
     process.exit(0);
   }
   let mermaid;
   try { mermaid = await loadMermaid(); }
   catch (e) {
-    process.stdout.write(JSON.stringify({
+    const out = {
       ok: false, total: blocks.length, failed: [],
       error: `loader: ${e.message}`
-    }) + "\n");
+    };
+    if (warnings.length) out.warnings = warnings;
+    process.stdout.write(JSON.stringify(out) + "\n");
     process.exit(2);
   }
   const failed = [];
@@ -126,7 +150,9 @@ async function loadMermaid() {
       });
     }
   }
+  // ok is gated by Mermaid validity; warnings are non-blocking.
   const out = { ok: failed.length === 0, total: blocks.length, failed };
+  if (warnings.length) out.warnings = warnings;
   process.stdout.write(JSON.stringify(out, null, 2) + "\n");
   process.exit(failed.length === 0 ? 0 : 2);
 })().catch((e) => {

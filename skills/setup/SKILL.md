@@ -9,6 +9,8 @@ paperflow ships as a Claude Code plugin (skills + hooks + slash commands), but i
 
 This skill runs the existing `install.sh` with the user's explicit consent.
 
+<!-- Step 0.5 (paperflow-doc-meta) is exempt here — `/paperflow:setup` is a one-shot host installer; it does not write doc HTMLs. -->
+
 ## Process
 
 1. **Locate plugin root.** First try `$CLAUDE_PLUGIN_ROOT`. If unset, discover via:
