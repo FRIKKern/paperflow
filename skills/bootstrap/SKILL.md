@@ -27,7 +27,7 @@ This skill runs the existing `install.sh` with the user's explicit consent.
 
 6. **Verify.** After install.sh exits 0, run `~/.local/bin/paperflow-doctor --fast`. Report the issues array if any.
 
-7. **Done.** Tell the user the next step: `/paperflow:goal "your first goal"`.
+7. **Done.** Tell the user the next step: `/paperflow:goal "your first goal"`. Or for momentum: `/paperflow:autopilot "your vision"` to chain everything in one push (pauses at grill).
 
 ## Re-run modes
 
