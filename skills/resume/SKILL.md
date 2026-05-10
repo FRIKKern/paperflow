@@ -29,6 +29,8 @@ Read the JSON from stdout and react by exit code:
 | 1 | Warnings (outdated, optional dep missing, drift already auto-fixed) | Continue. Print a one-line summary at the start of the skill's main work: `Doctor: N warning(s) — run paperflow-doctor --full to inspect.` |
 | 2 | Critical (bd/node missing, settings.json corrupted) | Abort. For each issue with `auto_fix_safe:false`, surface the `repair_command` and ask the user with `AskUserQuestion` whether to run it. |
 
+<!-- Step 0.5 (paperflow-doc-meta) is exempt here — `/paperflow:resume` flips active-goal/active-phase pointers; it does not write doc HTMLs. -->
+
 
 ## When to fire
 

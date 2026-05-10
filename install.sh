@@ -883,6 +883,14 @@ sed -e "s|__REPO__|$REPO|g" \
 chmod +x "$HOME/.local/bin/paperflow-doctor"
 ok "installed at ~/.local/bin/paperflow-doctor"
 
+# ─── 10e3. Doc metadata helper at ~/.local/bin/paperflow-doc-meta ──
+# Shell-injected byline + active-goal-id for every paperflow doc write.
+# Auto-creates a Session: <date> <time> Goal in the repo if none exists.
+log "Helper: paperflow-doc-meta"
+cp "$REPO/bin/paperflow-doc-meta" "$HOME/.local/bin/paperflow-doc-meta"
+chmod +x "$HOME/.local/bin/paperflow-doc-meta"
+ok "installed at ~/.local/bin/paperflow-doc-meta"
+
 # ─── 10f. Legacy goals migration helper ────────────────────────────
 log "Helper: paperflow-migrate-legacy-goals"
 cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrate-legacy-goals"
@@ -1066,6 +1074,7 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
     [ -x "$HOME/.local/bin/paperflow-preflight" ]             && ok "preflight     : executable" || err "preflight     : missing"
     [ -x "$HOME/.local/bin/paperflow-doctor" ]                && ok "doctor        : executable" || err "doctor        : missing"
+    [ -x "$HOME/.local/bin/paperflow-doc-meta" ]              && ok "doc-meta      : executable" || err "doc-meta      : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
@@ -1151,6 +1160,15 @@ else
     else
         err "doctor           : exit $DOCTOR_EXIT (run paperflow-doctor manually for JSON)"
     fi
+fi
+
+# 6. Doc-meta helper — --no-auto-goal so a fresh install doesn't spawn a
+# session Goal during the smoke check (the helper would otherwise auto-bd-init
+# this repo if it has no .beads/ yet).
+if "$HOME/.local/bin/paperflow-doc-meta" --no-auto-goal >/dev/null 2>&1; then
+    ok "doc-meta         : ok"
+else
+    err "doc-meta         : reported failure (rerun manually for JSON)"
 fi
 
 echo

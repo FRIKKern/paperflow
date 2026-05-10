@@ -77,6 +77,11 @@ Read the JSON from stdout and react by exit code:
 | 2 | Critical (bd/node missing, settings.json corrupted) | Abort. For each issue with `auto_fix_safe:false`, surface the `repair_command` and ask the user with `AskUserQuestion` whether to run it. |
 
 
+## Step 0.5 — Doc metadata
+
+All sub-skills you invoke (`/paperflow:goal`, `/paperflow:plan`, `/paperflow:review`) handle Step 0.5 themselves by calling `~/.local/bin/paperflow-doc-meta` before writing each HTML. You don't need to call it directly.
+
+
 ## Process
 
 ```mermaid

@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# paperflow-doc-meta — emit the byline + goal-id metadata a paperflow doc
+# needs at write time. Shell-injected truth, never AI-guessed.
+# Modes:  (default)        emit JSON; auto-create a Session: <date> <time>
+#                          Goal in the current repo if none is active
+#         --no-auto-goal   emit JSON; leave active_goal_id null when missing
+# Exit:   0 ok  ·  1 usage  ·  2 fatal (not in repo / bd init failed)
+# Output: single JSON object on stdout.
+
+set -u
+
+MODE="auto"
+case "${1:-}" in
+    "")              MODE="auto" ;;
+    "--no-auto-goal") MODE="no-auto" ;;
+    *) printf 'usage: paperflow-doc-meta [--no-auto-goal]\n' >&2; exit 1 ;;
+esac
+
+# ── helpers ────────────────────────────────────────────────────────
+emit_error() {
+    # emit_error <error_id>
+    jq -nc --arg err "$1" --arg ts "$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null)" \
+        '{ok:false, error:$err, ts:$ts}'
+    exit 2
+}
+
+# Pull the issue id from `bd create` success output. Beads emits one of
+#   "✓ Created issue: paperflow-vma — …"     (alpha suffix; bd 1.0.3 default)
+#   "✓ Created issue: paperflow-42 — …"      (numeric suffix; older bd)
+# Match a prefix-suffix shape with at least one digit, then alnum after.
+# `head -1` stops on the Priority/Status follow-on lines (which mention "P2").
+parse_bd_id() {
+    # Anchor on the "Created issue:" line — bd may print other fields
+    # (Priority/Status) that contain dashes in future releases.
+    grep -m1 'Created issue:' | grep -oE '[a-z][a-z0-9]*-[a-z0-9]+' | head -n1
+}
+
+# Auto-create the session Goal + 3 phases. Echoes "<goal-id> <phase-id>"
+# on success, returns 0; non-zero on failure (caller emits error).
+auto_create_session_goal() {
+    local repo="$1" date_str="$2" time_str="$3"
+    local title="Session: $date_str $time_str"
+    local label_session="goal-session-$date_str"
+
+    # Step 1: ensure beads is initialised in this repo. Doctor handles
+    # the bd-init dance (idempotent; emits JSON; exit 0 success, 2 fail).
+    if [ -x "$HOME/.local/bin/paperflow-doctor" ]; then
+        "$HOME/.local/bin/paperflow-doctor" --ensure-bd >/dev/null 2>&1 || return 1
+    elif command -v bd >/dev/null 2>&1; then
+        if [ ! -d "$repo/.beads" ]; then
+            ( cd "$repo" && bd init >/dev/null 2>&1 ) || return 1
+        fi
+    else
+        return 1
+    fi
+
+    # Step 2: create the goal-task. `--type epic` matches the goal SKILL.
+    # `bd create` reports the new id on STDERR ("✓ Created issue: …"),
+    # not stdout — so capture both streams.
+    local goal_id
+    goal_id="$( ( cd "$repo" && bd create "$title" \
+                    --type epic \
+                    --label session-default \
+                    --label "$label_session" 2>&1 ) | parse_bd_id )"
+    [ -n "$goal_id" ] || return 1
+
+    # Step 3: spawn 3 default phase-tasks under the goal-task.
+    local phase_id_pf="" phase_id_bd="" phase_id_rv=""
+    phase_id_pf="$( ( cd "$repo" && bd create "pre-flight" --type task \
+                        --label "$label_session" --label kind:phase \
+                        --label phase-pre-flight 2>&1 ) | parse_bd_id )"
+    phase_id_bd="$( ( cd "$repo" && bd create "build" --type task \
+                        --label "$label_session" --label kind:phase \
+                        --label phase-build 2>&1 ) | parse_bd_id )"
+    phase_id_rv="$( ( cd "$repo" && bd create "review" --type task \
+                        --label "$label_session" --label kind:phase \
+                        --label phase-review 2>&1 ) | parse_bd_id )"
+    [ -n "$phase_id_pf" ] && [ -n "$phase_id_bd" ] && [ -n "$phase_id_rv" ] || return 1
+
+    # Step 4: wire dep edges (phase → goal).
+    ( cd "$repo" && bd dep add "$phase_id_pf" "$goal_id" >/dev/null 2>&1 ) || true
+    ( cd "$repo" && bd dep add "$phase_id_bd" "$goal_id" >/dev/null 2>&1 ) || true
+    ( cd "$repo" && bd dep add "$phase_id_rv" "$goal_id" >/dev/null 2>&1 ) || true
+
+    # Step 5: pointer files (active-phase defaults to pre-flight).
+    mkdir -p "$repo/.paperflow" 2>/dev/null
+    printf '%s\n' "$goal_id"     > "$repo/.paperflow/active-goal"
+    printf '%s\n' "$phase_id_pf" > "$repo/.paperflow/active-phase"
+
+    printf '%s %s\n' "$goal_id" "$title"
+    return 0
+}
+
+# ── 0. dependency check ────────────────────────────────────────────
+command -v jq >/dev/null 2>&1 || emit_error "jq_missing"
+
+# ── 1. timestamps ──────────────────────────────────────────────────
+TS="$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null)"
+DATE_STR="$(date +%Y-%m-%d)"
+TIME_LOCAL="$(date +%H:%M)"
+TZ_NAME="$(date +%Z)"
+TIME_DISPLAY="$TIME_LOCAL $TZ_NAME"
+
+# ── 2. device name (Mac-friendly short, strip .local) ──────────────
+DEVICE="$(scutil --get LocalHostName 2>/dev/null)"
+[ -n "$DEVICE" ] || DEVICE="$(hostname -s 2>/dev/null)"
+DEVICE="${DEVICE%.local}"
+[ -n "$DEVICE" ] || DEVICE="unknown"
+
+# ── 3. cmux workspace via paperflow-active-scope ───────────────────
+CMUX_WORKSPACE=""
+SCOPE=""
+if [ -x "$HOME/.local/bin/paperflow-active-scope" ]; then
+    SCOPE="$("$HOME/.local/bin/paperflow-active-scope" --resolve 2>/dev/null | tr -d '[:space:]')"
+fi
+case "$SCOPE" in
+    cmux-workspace-*) CMUX_WORKSPACE="$SCOPE" ;;
+    cmux-*)           CMUX_WORKSPACE="$SCOPE" ;;
+    *)                CMUX_WORKSPACE="" ;;
+esac
+
+# ── 4. repo root (must be in a git repo for goal binding) ──────────
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$REPO_ROOT" ]; then
+    emit_error "not_in_git_repo"
+fi
+
+# ── 5. active goal lookup ──────────────────────────────────────────
+ACTIVE_GOAL_ID=""
+ACTIVE_GOAL_TITLE=""
+AUTO_CREATED=false
+
+if [ -r "$REPO_ROOT/.paperflow/active-goal" ]; then
+    ACTIVE_GOAL_ID="$(head -n1 "$REPO_ROOT/.paperflow/active-goal" 2>/dev/null | tr -d '[:space:]')"
+fi
+
+if [ -z "$ACTIVE_GOAL_ID" ] && [ "$MODE" = "auto" ]; then
+    if RESULT="$(auto_create_session_goal "$REPO_ROOT" "$DATE_STR" "$TIME_LOCAL")"; then
+        ACTIVE_GOAL_ID="${RESULT%% *}"
+        ACTIVE_GOAL_TITLE="${RESULT#* }"
+        AUTO_CREATED=true
+    else
+        emit_error "bd_init_failed"
+    fi
+fi
+
+# Resolve title for already-active Goals via bd show. `bd show --json`
+# returns a one-element array on bd 1.0.3 — pluck `.[0].title`.
+if [ -n "$ACTIVE_GOAL_ID" ] && [ -z "$ACTIVE_GOAL_TITLE" ] && command -v bd >/dev/null 2>&1; then
+    ACTIVE_GOAL_TITLE="$( ( cd "$REPO_ROOT" && bd show "$ACTIVE_GOAL_ID" --json 2>/dev/null ) \
+                          | jq -r 'if type=="array" then .[0].title else .title end // empty' 2>/dev/null)"
+fi
+
+# ── 6. emit ────────────────────────────────────────────────────────
+jq -n \
+    --arg ts "$TS" \
+    --arg date "$DATE_STR" \
+    --arg time_local "$TIME_LOCAL" \
+    --arg tz "$TZ_NAME" \
+    --arg time_display "$TIME_DISPLAY" \
+    --arg device "$DEVICE" \
+    --arg cmux_workspace "$CMUX_WORKSPACE" \
+    --arg repo_root "$REPO_ROOT" \
+    --arg active_goal_id "$ACTIVE_GOAL_ID" \
+    --arg active_goal_title "$ACTIVE_GOAL_TITLE" \
+    --argjson auto_created "$AUTO_CREATED" \
+    '{
+       ok: true,
+       ts: $ts,
+       date: $date,
+       time_local: $time_local,
+       tz: $tz,
+       time_display: $time_display,
+       device: $device,
+       cmux_workspace: (if $cmux_workspace == "" then null else $cmux_workspace end),
+       repo_root: $repo_root,
+       active_goal_id:    (if $active_goal_id    == "" then null else $active_goal_id end),
+       active_goal_title: (if $active_goal_title == "" then null else $active_goal_title end),
+       auto_created: $auto_created
+     }'
+
+exit 0
