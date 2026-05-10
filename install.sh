@@ -897,6 +897,15 @@ cp "$REPO/bin/paperflow-migrate-legacy-goals" "$HOME/.local/bin/paperflow-migrat
 chmod +x "$HOME/.local/bin/paperflow-migrate-legacy-goals"
 ok "installed at ~/.local/bin/paperflow-migrate-legacy-goals"
 
+# ─── 10f0. Goal-merge helper ───────────────────────────────────────
+# paperflow-goal-merge folds one open Goal into another as a new phase.
+# Called by /paperflow:goal merge. Reversible at the bd level (close +
+# label, no destructive dep removal).
+log "Helper: paperflow-goal-merge"
+cp "$REPO/bin/paperflow-goal-merge" "$HOME/.local/bin/paperflow-goal-merge"
+chmod +x "$HOME/.local/bin/paperflow-goal-merge"
+ok "installed at ~/.local/bin/paperflow-goal-merge"
+
 # ─── 10f1. Per-instance active-scope resolver ──────────────────────
 # paperflow-active-scope owns the per-instance (per cmux workspace, or per
 # Claude Code session) active-goal/active-phase pointers. Skills, hooks,
@@ -1076,6 +1085,7 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-doctor" ]                && ok "doctor        : executable" || err "doctor        : missing"
     [ -x "$HOME/.local/bin/paperflow-doc-meta" ]              && ok "doc-meta      : executable" || err "doc-meta      : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
+    [ -x "$HOME/.local/bin/paperflow-goal-merge" ]            && ok "goal-merge    : executable" || err "goal-merge    : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-feed" ]              && ok "dock feed     : executable" || err "dock feed     : missing"

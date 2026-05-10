@@ -1,6 +1,6 @@
 ---
 name: goal
-description: Use when the user says "start a goal", "open a goal for X", "snapshot the goal", "save current state", "checkpoint this work", "continue this goal in a new tab", "resume in fresh session", "archive the goal", "what's the active goal?", or kicks off any non-trivial multi-artifact piece of work. Creates a goal-task in Beads with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review) underneath, sets the per-repo `.paperflow/active-goal` and `.paperflow/active-phase` pointers, and renders the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. Sub-actions: snapshot (refresh HTML + JSON sidecar), continue (spawn fresh Claude tab via paperflow-continue), archive (close Goal). Folds in the work that the legacy mission-create / mission-snapshot / mission-continue skills used to do.
+description: Use when the user says "start a goal", "open a goal for X", "snapshot the goal", "save current state", "checkpoint this work", "continue this goal in a new tab", "resume in fresh session", "archive the goal", "what's the active goal?", "merge goal X into Y", "fold this goal into another", or kicks off any non-trivial multi-artifact piece of work. Creates a goal-task in Beads with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review) underneath, sets the per-repo `.paperflow/active-goal` and `.paperflow/active-phase` pointers, and renders the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. Sub-actions: snapshot (refresh HTML + JSON sidecar), continue (spawn fresh Claude tab via paperflow-continue), archive (close Goal), merge (fold one open Goal into another as a new phase). Folds in the work that the legacy mission-create / mission-snapshot / mission-continue skills used to do.
 ---
 
 # goal
@@ -131,6 +131,41 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
    **`--umbrella <slug>` for multi-axis outcomes.** When a body of work spans more than one Goal — e.g. a redesign that touches onboarding, billing, and admin in parallel — pass `/paperflow:goal --umbrella <slug> "<vision>"`, which adds a `umbrella-<slug>` label on the goal-task. `/paperflow:resume` groups Goals sharing the same umbrella under one heading. The umbrella label is **optional and rare**; default Goal usage doesn't need it. To attach an umbrella mid-flight, run `bd label add <epic-id> umbrella-<slug>` on the open Goal.
 
+3.5. **Led-to consent.** Many Goals continue earlier work — refining the same idea, picking up where a previous session paused. Capture that lineage as a Beads label so the rail and `/paperflow:resume` can show the chain. Schema-free, optional, asked once.
+
+   First, query recent open Goals (last 7 days, excluding the one just created):
+
+   ```bash
+   bd list --type epic --status open --json 2>/dev/null \
+     | jq -r --arg me "$GOAL_ID" '
+         [.[] | select(.id != $me)
+              | select(.created_at > (now - 86400*7 | strftime("%Y-%m-%dT%H:%M:%S")))
+              | {id, title, created_at}]'
+   ```
+
+   **If 0 results:** skip the consent — fresh Goal, no continuation possible. Proceed to step 4.
+
+   **If 1+ results:** score each candidate against the new vision string with a cheap heuristic — count common words of length ≥ 4 (lowercased, stripped of punctuation). A score ≥ 2 marks a candidate as "looks similar". Surface the highest-scoring similar candidate FIRST in the question.
+
+   Then `AskUserQuestion` with up to 4 options:
+
+   - **Fresh Goal — no continuation** (default)
+   - **Continuation of: \<recent Goal title 1\>** (the highest-scoring; if score ≥ 2, prefix with "Looks similar — ")
+   - **Continuation of: \<recent Goal title 2\>** (second pick if available)
+   - **Looks similar to \<X\> — merge instead?** (only if a candidate scored ≥ 3, suggests folding the new Goal into the older one via the merge sub-action)
+
+   On **"Continuation of"**:
+
+   ```bash
+   bd update "$GOAL_ID" --add-label "led-from-${SOURCE_ID}"
+   ```
+
+   On **"merge instead"**: invoke the merge sub-action — `paperflow-goal-merge "$GOAL_ID" "$SOURCE_ID"` (the just-created Goal is the source; the older Goal is the target — we're folding the new Goal into the existing one). After the merge, the active-goal pointer needs to be updated to `$SOURCE_ID` and the skill exits early — no phase-tasks are created for what is now a merged-away Goal.
+
+   On **"Fresh Goal"**: do nothing extra. Proceed to step 4.
+
+   The `led-from-<source-id>` label is read-only metadata. The Goal-path rail surfaces it as a small "← led from <source>" breadcrumb at the top of the Goal HTML.
+
 4. **Create three default phase-tasks** under the goal-task. Each phase-task gets `kind:phase` and a `phase-<name>` label so scoped `bd ready` queries work later:
 
    ```bash
@@ -207,6 +242,54 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
   5. Reply with one short sentence — which terminal path was used + slug.
 
 - **Archive** — `bd update $GOAL_ID --close`. Closes every still-open phase-task as a side effect (only legal when no work-tasks remain open). Updates the Goal HTML status to `closed`.
+
+- **Merge** — fold one open Goal into another as a new phase. Triggered by "merge goal X into Y", "fold this goal into another", or surfaced from the led-to consent step's "merge instead" pick. Both Goals stay in Beads — the source is closed with a `merged-into-<target>` label, the target gains a new "Merged from <source>" phase-task that the source's existing phase-tasks now also depend on. Reversible at the bd level (re-open source, close merged phase). Implemented in `~/.local/bin/paperflow-goal-merge`:
+
+  ```bash
+  paperflow-goal-merge <source-id> <target-id>
+  ```
+
+  The helper:
+
+  1. Validates both ids exist and are open epics.
+  2. `bd create` a `kind:phase` task titled "Merged from \<src-title\> (was \<src-id\>)" under the target, with labels `kind:phase`, the target's `goal-<slug>`, and `phase-merged-from-<src-id>`.
+  3. `bd dep add` from each of the source's existing phase-tasks → the new merged phase. Source's old dep edges to the source Goal stay intact (Beads dep removal is not part of paperflow's contract — we add lineage, never delete it).
+  4. Rewrites every `~/docs/paperflow/` HTML whose `window.PAPERFLOW_GOAL_ID` equals the source id to point at the target. The goal-path rail then includes those docs in the target's history.
+  5. `bd update <source> --status closed --add-label merged-into-<target> --description "<merge breadcrumb>"`.
+  6. Emits a `kind:event` task labelled `event:goal-merged` + `branch:merged-from-<source>` under the target so the rail shows the merge.
+  7. Prints a summary table: src/tgt ids + titles, # of phase-tasks moved, # of docs rewritten, new merged-phase id, rail event id.
+
+  The merge flow re-parents source's phase-tasks under the target's new merged-phase, leaving the original source Goal closed with full lineage:
+
+  ```mermaid
+  flowchart LR
+    subgraph Before
+      G1["Goal: source<br/>(open)"]
+      P1["pre-flight"] --> G1
+      P2["build"]      --> G1
+      P3["review"]     --> G1
+      G2["Goal: target<br/>(open)"]
+      Q1["pre-flight"] --> G2
+      Q2["build"]      --> G2
+    end
+    subgraph After
+      G1c["Goal: source<br/>(closed, label:<br/>merged-into-target)"]
+      P1b["pre-flight"] --> G1c
+      P2b["build"]      --> G1c
+      P3b["review"]     --> G1c
+      G2b["Goal: target<br/>(open)"]
+      Q1b["pre-flight"]      --> G2b
+      Q2b["build"]           --> G2b
+      MP["Merged from source"] --> G2b
+      P1b --> MP
+      P2b --> MP
+      P3b --> MP
+    end
+  ```
+
+  After the merge, if the source Goal was the active Goal in this repo, the skill rewrites `<repo>/.paperflow/active-goal` to the target id (and clears `<repo>/.paperflow/active-phase` so `/paperflow:build` re-resolves it). The mirror through `paperflow-active-scope --write goal "$TARGET_ID"` keeps per-instance pointers consistent.
+
+  **To reverse:** `bd update <source> --status open --remove-label merged-into-<target>` then `bd update <merged-phase-id> --status closed`. Doc rewrites are NOT auto-reversed — re-run with src/tgt swapped or `git checkout` the affected HTML.
 
 - **Edit vision** — `bd update $GOAL_ID --description "<new>"` then re-render.
 

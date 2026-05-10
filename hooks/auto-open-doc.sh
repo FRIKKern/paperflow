@@ -59,6 +59,27 @@ case "$FILE_PATH" in
       --argjson exit "$EXIT" \
       '{ts: $ts, url: $url, response: $response, exit: $exit}' \
       >> "$LOG_FILE" 2>/dev/null || true
+
+    # Fast doctor probe — surface install warnings to the dock so a degraded
+    # paperflow announces itself the next time the user touches a doc.
+    # All errors swallowed: this is best-effort signalling, not a gate.
+    if command -v paperflow-doctor >/dev/null 2>&1; then
+      DR_JSON="$(paperflow-doctor --fast 2>/dev/null || true)"
+      if [ -n "$DR_JSON" ]; then
+        DR_W="$(printf '%s' "$DR_JSON" | /usr/bin/env jq -r '[.issues[]? | select(.severity=="warning")] | length' 2>/dev/null || echo 0)"
+        DR_C="$(printf '%s' "$DR_JSON" | /usr/bin/env jq -r '[.issues[]? | select(.severity=="critical")] | length' 2>/dev/null || echo 0)"
+        FEED_DIR="$HOME/.paperflow/dock-feeds"
+        mkdir -p "$FEED_DIR" 2>/dev/null || true
+        FEED_FILE="$FEED_DIR/doctor-status"
+        if [ "$DR_C" != "0" ]; then
+          printf 'doctor: %s critical, %s warning(s) — run paperflow-doctor --full\n' "$DR_C" "$DR_W" > "$FEED_FILE"
+        elif [ "$DR_W" != "0" ]; then
+          printf 'doctor: %s warning(s) — run paperflow-doctor --full\n' "$DR_W" > "$FEED_FILE"
+        else
+          printf 'doctor: ok\n' > "$FEED_FILE"
+        fi
+      fi
+    fi
     ;;
 esac
 
