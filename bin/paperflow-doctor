@@ -321,12 +321,13 @@ else fail; add_issue "dock:socket_missing" "warning" \
                      "bash $REPO/install.sh" false
 fi
 
-# F6. skill cap (CI-mirror)
+# F6. skill cap (CI-mirror — kept in sync with scripts/check-skill-count.sh)
+SKILLS_CAP=8
 if [ -d "$REPO/skills" ]; then
     SKILL_COUNT="$(find "$REPO/skills" -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${SKILL_COUNT:-0}" -gt 6 ] 2>/dev/null; then
+    if [ "${SKILL_COUNT:-0}" -gt "$SKILLS_CAP" ] 2>/dev/null; then
         fail; add_issue "skills:cap_exceeded" "warning" \
-                        "Skill cap exceeded — paperflow's CI gate enforces <= 6 (found $SKILL_COUNT)" \
+                        "Skill cap exceeded — paperflow's CI gate enforces <= $SKILLS_CAP (found $SKILL_COUNT)" \
                         "# remove or merge skills under $REPO/skills" false
     else pass
     fi

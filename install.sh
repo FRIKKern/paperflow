@@ -10,7 +10,8 @@
 #     (plus the setup skill at ~/.claude/skills/setup/ and the
 #      autopilot skill at ~/.claude/skills/autopilot/ — 8 total)
 #   - terminal-target helper at ~/.local/bin/paperflow-target
-#   - ~/.claude/CLAUDE.md (only if missing)
+#   - ~/.claude/CLAUDE.md (preamble refresh; user content outside the
+#     <!-- paperflow:preamble:* --> sentinels is preserved)
 #
 # After install, open /hooks once in any running Claude Code session
 # (or restart) so hooks are picked up.
@@ -974,10 +975,15 @@ else
     err "migration failed — check stderr above; legacy files preserved untouched"
 fi
 
-# ─── 11. CLAUDE.md (only if missing) ────────────────────────────────
+# ─── 11. CLAUDE.md (preamble refresh + optional --with-* fragments) ─
 # Render lean core + append integration fragments for whichever
 # --with-* flags fired. After --reset the file is gone, so the
 # create-fresh branch fires naturally.
+#
+# Refresh model: the rendered template lives between
+#   <!-- paperflow:preamble:begin --> … <!-- paperflow:preamble:end -->
+# sentinels. Re-running install.sh replaces just that block, so user
+# customisations outside the sentinels are preserved verbatim.
 log "~/.claude/CLAUDE.md"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 
@@ -1017,7 +1023,71 @@ append_fragment_if_missing() {
     ok "appended $slug fragment to CLAUDE.md"
 }
 
+# Preamble sentinels — let install.sh refresh just the paperflow-managed
+# section without touching user-authored prose. Wrap the rendered template
+# between these markers so a re-run replaces the block in-place.
+PREAMBLE_BEGIN="<!-- paperflow:preamble:begin -->"
+PREAMBLE_END="<!-- paperflow:preamble:end -->"
+
+write_fresh_claude_md() {
+    # Fresh-render path (used when the file is missing). Preamble is wrapped
+    # in begin/end sentinels so a follow-up re-run can refresh it in place.
+    local dst="$1" rendered tmp
+    rendered="$(mktemp)"
+    render "$REPO/claude-md.tmpl" "$rendered" ""
+    tmp="$(mktemp)"
+    {
+        printf '%s\n' "$PREAMBLE_BEGIN"
+        cat "$rendered"
+        printf '\n%s\n' "$PREAMBLE_END"
+    } > "$tmp"
+    mv "$tmp" "$dst"
+    rm -f "$rendered" 2>/dev/null || true
+}
+
+refresh_preamble_in_place() {
+    # Sentinel-block refresh. If the begin/end sentinels exist, replace the
+    # block between them with the freshly rendered template. Otherwise prepend
+    # the wrapped block so the user's custom content stays put underneath.
+    local dst="$1" rendered tmp
+    rendered="$(mktemp)"
+    render "$REPO/claude-md.tmpl" "$rendered" ""
+    tmp="$(mktemp)"
+    if grep -qF "$PREAMBLE_BEGIN" "$dst" && grep -qF "$PREAMBLE_END" "$dst"; then
+        # Replace the existing sentinel block (awk preserves everything outside it).
+        awk -v begin="$PREAMBLE_BEGIN" -v end="$PREAMBLE_END" -v rfile="$rendered" '
+            BEGIN { in_block = 0 }
+            $0 == begin {
+                print begin
+                while ((getline line < rfile) > 0) print line
+                print end
+                in_block = 1
+                next
+            }
+            $0 == end { in_block = 0; next }
+            in_block == 0 { print }
+        ' "$dst" > "$tmp"
+        mv "$tmp" "$dst"
+        ok "refreshed paperflow preamble block (sentinel-replace)"
+    else
+        # No sentinels yet — prepend the wrapped block, keep the user's content.
+        {
+            printf '%s\n' "$PREAMBLE_BEGIN"
+            cat "$rendered"
+            printf '\n%s\n\n' "$PREAMBLE_END"
+            cat "$dst"
+        } > "$tmp"
+        mv "$tmp" "$dst"
+        ok "prepended paperflow preamble block (sentinels added; user content preserved)"
+    fi
+    rm -f "$rendered" 2>/dev/null || true
+}
+
 if [ -f "$CLAUDE_MD" ]; then
+    # Always refresh the sentinel-wrapped paperflow preamble — user content
+    # outside the block is never touched. Then run the --merge flow for any
+    # opt-in --with-* fragments.
+    refresh_preamble_in_place "$CLAUDE_MD"
     if [ "$MERGE_CLAUDEMD" -eq 1 ]; then
         # Merge mode: append any --with-* fragments that aren't already present.
         # Sentinel-driven idempotency — re-running with the same flags is a no-op.
@@ -1027,11 +1097,9 @@ if [ -f "$CLAUDE_MD" ]; then
         if [ "$WITH_OPENCLAW" -eq 0 ] && [ "$WITH_BROWSERBASE" -eq 0 ] && [ "$WITH_UNLIGHTHOUSE" -eq 0 ]; then
             skip "--merge passed but no --with-* flags set (nothing to append)"
         fi
-    else
-        skip "exists (not overwriting — pass --merge to append --with-* fragments, or --reset to rebuild)"
     fi
 else
-    render_claude_md "$CLAUDE_MD"
+    write_fresh_claude_md "$CLAUDE_MD"
     # Tag the freshly-rendered file with sentinels for whatever fragments shipped,
     # so a follow-up `--merge` won't double-append the same prose.
     [ "$WITH_OPENCLAW" -eq 1 ]     && printf '\n<!-- paperflow:with-openclaw -->\n'     >> "$CLAUDE_MD"
