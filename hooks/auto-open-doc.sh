@@ -60,25 +60,32 @@ case "$FILE_PATH" in
       '{ts: $ts, url: $url, response: $response, exit: $exit}' \
       >> "$LOG_FILE" 2>/dev/null || true
 
-    # Fast doctor probe — surface install warnings to the dock so a degraded
-    # paperflow announces itself the next time the user touches a doc.
-    # All errors swallowed: this is best-effort signalling, not a gate.
-    if command -v paperflow-doctor >/dev/null 2>&1; then
-      DR_JSON="$(paperflow-doctor --fast 2>/dev/null || true)"
-      if [ -n "$DR_JSON" ]; then
-        DR_W="$(printf '%s' "$DR_JSON" | /usr/bin/env jq -r '[.issues[]? | select(.severity=="warning")] | length' 2>/dev/null || echo 0)"
-        DR_C="$(printf '%s' "$DR_JSON" | /usr/bin/env jq -r '[.issues[]? | select(.severity=="critical")] | length' 2>/dev/null || echo 0)"
-        FEED_DIR="$HOME/.paperflow/dock-feeds"
-        mkdir -p "$FEED_DIR" 2>/dev/null || true
-        FEED_FILE="$FEED_DIR/doctor-status"
-        if [ "$DR_C" != "0" ]; then
-          printf 'doctor: %s critical, %s warning(s) — run paperflow-doctor --full\n' "$DR_C" "$DR_W" > "$FEED_FILE"
-        elif [ "$DR_W" != "0" ]; then
-          printf 'doctor: %s warning(s) — run paperflow-doctor --full\n' "$DR_W" > "$FEED_FILE"
-        else
-          printf 'doctor: ok\n' > "$FEED_FILE"
-        fi
+    # Surface doctor status to the dock by READING the cache, never by
+    # invoking paperflow-doctor — `--fast` re-execs as `--full` when the
+    # cache is stale, which adds 1-5s to the user's interactive doc-save
+    # loop. The cache is refreshed by explicit `paperflow-doctor` runs
+    # (manual, /paperflow:install, or scheduled). All errors swallowed.
+    CACHE="$HOME/.paperflow/doctor.cache.json"
+    if [ -f "$CACHE" ]; then
+      DR_W="$(/usr/bin/env jq -r '[.issues[]? | select(.severity=="warning")] | length' "$CACHE" 2>/dev/null || echo 0)"
+      DR_C="$(/usr/bin/env jq -r '[.issues[]? | select(.severity=="critical")] | length' "$CACHE" 2>/dev/null || echo 0)"
+      if [ "$DR_C" != "0" ]; then
+        DR_MSG="$(printf 'doctor: %s critical, %s warning(s) — run paperflow-doctor --full' "$DR_C" "$DR_W")"
+      elif [ "$DR_W" != "0" ]; then
+        DR_MSG="$(printf 'doctor: %s warning(s) — run paperflow-doctor --full' "$DR_W")"
+      else
+        DR_MSG="doctor: ok"
       fi
+    else
+      DR_MSG="doctor: not yet run (paperflow-doctor --full)"
+    fi
+    FEED_DIR="$HOME/.paperflow/dock-feeds"
+    mkdir -p "$FEED_DIR" 2>/dev/null || true
+    FEED_FILE="$FEED_DIR/doctor-status"
+    # Diff-check: only rewrite when content changes — saves spurious mtime
+    # bumps that would wake any dock watcher tailing the file.
+    if [ "$DR_MSG" != "$(cat "$FEED_FILE" 2>/dev/null)" ]; then
+      printf '%s\n' "$DR_MSG" > "$FEED_FILE"
     fi
     ;;
 esac
