@@ -6,8 +6,9 @@
 #   - claude-bridge LaunchAgent (browser → terminal, port 8766)
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
-#   - six skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
-#     (plus the bootstrap skill at ~/.claude/skills/bootstrap/)
+#   - six lifecycle skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
+#     (plus the bootstrap skill at ~/.claude/skills/bootstrap/ and the
+#      autopilot skill at ~/.claude/skills/autopilot/ — 8 total)
 #   - terminal-target helper at ~/.local/bin/paperflow-target
 #   - ~/.claude/CLAUDE.md (only if missing)
 #
@@ -319,6 +320,7 @@ mkdir -p "$HOME/docs/paperflow/specs" \
          "$HOME/.claude/skills/install" \
          "$HOME/.claude/skills/resume" \
          "$HOME/.claude/skills/bootstrap" \
+         "$HOME/.claude/skills/autopilot" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
 
@@ -654,7 +656,7 @@ if [ -d "$HOME/.claude/plugins/cache" ] \
         2>/dev/null | head -1 | grep -q .; then
     PAPERFLOW_PLUGIN_INSTALLED=1
     log "Plugin detected — host skill copy + threshold refresh will be skipped"
-    for s in goal plan build review install resume bootstrap; do
+    for s in goal plan build review install resume bootstrap autopilot; do
         if [ -d "$HOME/.claude/skills/$s" ]; then
             rm -rf "$HOME/.claude/skills/$s"
             ok "swept duplicate host skill: $s (plugin owns /paperflow:$s)"
@@ -667,7 +669,7 @@ log "Skills"
 if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
     skip "provided by plugin — host copy skipped (slashes: /paperflow:goal etc.)"
 else
-    for s in goal plan build review install resume bootstrap; do
+    for s in goal plan build review install resume bootstrap autopilot; do
         if [ -f "$REPO/skills/$s/SKILL.md" ]; then
             mkdir -p "$HOME/.claude/skills/$s"
             cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -691,7 +693,7 @@ if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
 fi
 SHARED="$REPO/lib/shared-thresholds.md"
 SKILLS_DIR="$HOME/.claude/skills"
-NON_EXEMPT="goal plan build review install"
+NON_EXEMPT="goal plan build review install autopilot"
 if [ "${SKIP_THRESHOLD_REFRESH:-0}" = "1" ]; then
     :
 elif [ ! -f "$SHARED" ]; then
@@ -1028,7 +1030,7 @@ log "Status"
     [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
     [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
     if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
-        ok "skills        : 7 via plugin (/paperflow:goal, /paperflow:plan, …, /paperflow:bootstrap)"
+        ok "skills        : 8 via plugin (/paperflow:goal, /paperflow:plan, …, /paperflow:autopilot, /paperflow:bootstrap)"
     else
         [ -f "$HOME/.claude/skills/goal/SKILL.md" ]      && ok "goal skill    : present"    || err "goal skill    : missing"
         [ -f "$HOME/.claude/skills/plan/SKILL.md" ]      && ok "plan skill    : present"    || err "plan skill    : missing"
@@ -1037,6 +1039,7 @@ log "Status"
         [ -f "$HOME/.claude/skills/install/SKILL.md" ]   && ok "install skill : present"    || err "install skill : missing"
         [ -f "$HOME/.claude/skills/resume/SKILL.md" ]    && ok "resume skill  : present"    || err "resume skill  : missing"
         [ -f "$HOME/.claude/skills/bootstrap/SKILL.md" ] && ok "bootstrap     : present"    || err "bootstrap     : missing"
+        [ -f "$HOME/.claude/skills/autopilot/SKILL.md" ] && ok "autopilot     : present"    || err "autopilot     : missing"
     fi
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
     [ -x "$HOME/.claude/hooks/validate-paperflow-doc.sh" ]    && ok "validate hook : executable" || err "validate hook : missing"

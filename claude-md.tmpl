@@ -46,18 +46,20 @@ code reads and writes through the helper:
 Two cmux workspaces work on different Goals without colliding. Within one
 cmux workspace, multiple terminals share the same active goal — same scope.
 
-# The six skills
+# The eight skills
 
-Six skills, all under the `/paperflow:` plugin namespace. The cap is hit exactly — adding a new skill requires removing or merging an existing one. Each one delegates the actual work to a subagent; the skill body is what the orchestrator knows about Goal/Phase/Task context, what subagent prompt it produces, and what Beads mutations bracket the dispatch.
+Eight skills, all under the `/paperflow:` plugin namespace. The cap is hit exactly — adding a new skill requires removing or merging an existing one. Each one delegates the actual work to a subagent; the skill body is what the orchestrator knows about Goal/Phase/Task context, what subagent prompt it produces, and what Beads mutations bracket the dispatch.
 
 | Skill | One-sentence purpose |
 |---|---|
-| `/paperflow:goal`    | Open / snapshot / archive a Goal — orchestrator creates the goal-task with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review), sets the two pointer files, snapshots full state to HTML. |
-| `/paperflow:plan`    | The signature paperflow move — orchestrator delegates to a subagent that drafts a plan, grills it with 8–15 pointed questions, revises with the user. The result becomes work-tasks linked into the active phase. |
-| `/paperflow:build`   | Orchestrator claims the next ready task in the active phase, delegates execution to a subagent in that Task's context, verifies on return, closes. Advances the active-phase pointer when the current phase empties. |
-| `/paperflow:review`  | Orchestrator opens a review-task linked to its parent build-task, delegates the review to a subagent. Closes on approval; reopens the build-task on rejection. Site audits live here too. |
-| `/paperflow:install` | Bootstrap Beads, install / upgrade paperflow, write a new skill (delegated), write a changelog. The "what is paperflow?" entry point. |
-| `/paperflow:resume`  | Mirrors Claude Code's `/resume` — list Goals, user picks, the active-goal pointer flips, the active-phase pointer defaults to the first incomplete phase, the Goal HTML opens via the cmux tab-reuse contract. |
+| `/paperflow:goal`      | Open / snapshot / archive a Goal — orchestrator creates the goal-task with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review), sets the two pointer files, snapshots full state to HTML. |
+| `/paperflow:plan`      | The signature paperflow move — orchestrator delegates to a subagent that drafts a plan, grills it with 8–15 pointed questions, revises with the user. The result becomes work-tasks linked into the active phase. |
+| `/paperflow:build`     | Orchestrator claims the next ready task in the active phase, delegates execution to a subagent in that Task's context, verifies on return, closes. Advances the active-phase pointer when the current phase empties. |
+| `/paperflow:review`    | Orchestrator opens a review-task linked to its parent build-task, delegates the review to a subagent. Closes on approval; reopens the build-task on rejection. Site audits live here too. |
+| `/paperflow:install`   | Bootstrap Beads, install / upgrade paperflow, write a new skill (delegated), write a changelog. The "what is paperflow?" entry point. |
+| `/paperflow:resume`    | Mirrors Claude Code's `/resume` — list Goals, user picks, the active-goal pointer flips, the active-phase pointer defaults to the first incomplete phase, the Goal HTML opens via the cmux tab-reuse contract. |
+| `/paperflow:bootstrap` | First-run host install after `/plugin install paperflow` — runs `install.sh` after consent. Re-run with `--upgrade` or `--reset`. |
+| `/paperflow:autopilot` | Momentum mode — chains `goal → plan → grill → build → review` in one push, pauses MANDATORY at the grill (unless `--skip-grill`). Stops one click short of archive. |
 
 # Beads — task layer
 

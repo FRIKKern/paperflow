@@ -436,13 +436,13 @@ paperflow/
 │   ├── validate-paperflow-doc.sh   # PostToolUse(Write|Edit)
 │   └── event-on-save.sh            # PostToolUse(Write|Edit)
 ├── skills/
-│   └── paperflow-{goal,plan,build,review,install,resume}/SKILL.md
+│   └── {goal,plan,build,review,install,resume,bootstrap,autopilot}/SKILL.md
 ├── launchagents/
 │   ├── claude-bridge.plist.tmpl
 │   └── docs-livereload.plist.tmpl
 ├── scripts/
 │   ├── quickstart.sh               # the curl one-liner
-│   └── check-skill-count.sh        # CI gate, 7-skill cap
+│   └── check-skill-count.sh        # CI gate, 8-skill cap
 ├── examples/
 │   ├── openclaw-spec.html
 │   ├── openclaw-grill.html
@@ -458,11 +458,11 @@ paperflow/
 
 ## Skill authoring
 
-Six skills, exact. The cap is hit; adding a new skill requires removing or merging an existing one.
+Eight skills, exact. The cap is hit; adding a new skill requires removing or merging an existing one.
 
 ### CI gate
 
-`scripts/check-skill-count.sh` fails CI if an 8th `skills/*/SKILL.md` lands without a displacement. The cap covers the six lifecycle skills plus the plugin `bootstrap` skill.
+`scripts/check-skill-count.sh` fails CI if a 9th `skills/*/SKILL.md` lands without a displacement. The cap covers the six lifecycle skills, the plugin `bootstrap` skill, and the `autopilot` skill (the momentum-mode wrapper).
 
 ### Adding or replacing a skill
 
@@ -480,6 +480,10 @@ Six skills, exact. The cap is hit; adding a new skill requires removing or mergi
 
 Match `claude-md.tmpl`'s register: plain words, no bloat, no metaphors that don't earn their keep. Norwegian-influenced direct technical tone. Lead with diagrams when something's complicated. Distribute one Mermaid figure per ~300 words across docs the skill produces.
 
+### Autopilot
+
+`/paperflow:autopilot` is a thin orchestrator skill that composes the lifecycle skills (`goal → plan → build → review`) in one continuous push, not a replacement for them. It introduces no new primitives — the Goal/Phase/Task data model, the pointer files, the grill flow, the build skill's claim-execute-verify-close loop, the review verdict, and all hooks remain unchanged. Autopilot pauses MANDATORY at the grill gate (unless invoked with `--skip-grill`); the build and review phases run as the existing skills define them. Autopilot stops one click short of archive — closing a Goal stays a deliberate user action. The full design rationale, including comparison with OMC's autopilot and the explicit decision to keep the orchestrator paperflow-native rather than agent-bundled, lives in `~/docs/paperflow/notes/2026-05-10-omc-research-and-autopilot.html`. That note is the spec; `skills/autopilot/SKILL.md` is the implementation.
+
 ---
 
 ## Plugin manifest
@@ -491,7 +495,7 @@ paperflow ships as a Claude Code plugin in addition to the curl-pipe install pat
 .claude-plugin/marketplace.json   # marketplace entry pointing at this repo
 ```
 
-`plugin.json` declares `name: "paperflow"`, `version`, author, license, keywords, and `"skills": "./skills/"`. Claude Code auto-discovers each `skills/<name>/SKILL.md` and exposes it as `/paperflow:<name>` — the slash namespace is derived from the plugin name. So the seven shipped folders (`goal`, `plan`, `build`, `review`, `install`, `resume`, `bootstrap`) become `/paperflow:goal`, `/paperflow:plan`, etc.
+`plugin.json` declares `name: "paperflow"`, `version`, author, license, keywords, and `"skills": "./skills/"`. Claude Code auto-discovers each `skills/<name>/SKILL.md` and exposes it as `/paperflow:<name>` — the slash namespace is derived from the plugin name. So the eight shipped folders (`goal`, `plan`, `build`, `review`, `install`, `resume`, `bootstrap`, `autopilot`) become `/paperflow:goal`, `/paperflow:plan`, …, `/paperflow:autopilot`.
 
 Install path:
 

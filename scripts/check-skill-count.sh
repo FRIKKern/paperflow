@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Fail CI if paperflow's skill set exceeds the 7-skill cap, or if any
+# Fail CI if paperflow's skill set exceeds the 8-skill cap, or if any
 # skill is nested inside another. The cap covers the six lifecycle skills
-# (goal, plan, build, review, install, resume) plus the plugin
-# `bootstrap` skill that runs install.sh after `/plugin install paperflow`.
-# An 8th skill must displace an existing one in the same PR — never
-# additive. Nested skill subdirectories are forbidden so the cap stays
-# honest (a folded-in mini-skill still counts).
+# (goal, plan, build, review, install, resume), the plugin `bootstrap`
+# skill that runs install.sh after `/plugin install paperflow`, and
+# `autopilot` — the momentum-mode wrapper that chains the lifecycle in
+# one push. A 9th skill must displace an existing one in the same PR —
+# never additive. Nested skill subdirectories are forbidden so the cap
+# stays honest (a folded-in mini-skill still counts).
 
 set -eu
 
 # Run from the repo root regardless of where this is invoked from.
 cd "$(dirname "$0")/.."
 
-CAP=7
+CAP=8
 
 count="$(find skills -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$count" -gt "$CAP" ]; then
@@ -20,7 +21,7 @@ if [ "$count" -gt "$CAP" ]; then
     echo "  files:" >&2
     find skills -name '*.md' -type f >&2
     echo "" >&2
-    echo "  An 8th skill must displace one of the existing 7. See spec v7 §CI enforcement." >&2
+    echo "  A 9th skill must displace one of the existing 8. See spec v7 §CI enforcement." >&2
     exit 1
 fi
 

@@ -1,6 +1,6 @@
 ---
 name: install
-description: paperflow's meta-skill. Use when the user says "install paperflow", "upgrade paperflow", "reset paperflow", "write a new skill", "write the changelog", "what is paperflow?", or asks any meta question about the system. Bootstraps Beads (paperflow's working memory), runs the bundled `install.sh` with optional `--with-*` integration flags chosen via Q&A, can author a new SKILL.md (subject to the 7-skill cap CI gate), and writes a changelog HTML at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html`. The entry-point document — points first-time users at `/paperflow:goal` to start their first Goal.
+description: paperflow's meta-skill. Use when the user says "install paperflow", "upgrade paperflow", "reset paperflow", "write a new skill", "write the changelog", "what is paperflow?", or asks any meta question about the system. Bootstraps Beads (paperflow's working memory), runs the bundled `install.sh` with optional `--with-*` integration flags chosen via Q&A, can author a new SKILL.md (subject to the 8-skill cap CI gate), and writes a changelog HTML at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html`. The entry-point document — points first-time users at `/paperflow:goal` to start their first Goal.
 ---
 
 # install
@@ -88,7 +88,7 @@ Skills carry the prose locally so Claude Code's skill loader can read it directl
 
 ## What paperflow is
 
-paperflow is one Claude Code instance running as orchestrator. It creates Goals, designs the task graph, dispatches subagents, claims Tasks in Beads while subagents run, closes Tasks on verification, routes browser button clicks back via the bridge. Beads (`bd`) is the system of record. Six skills, all `/paperflow:*` namespaced, hit the cap exactly:
+paperflow is one Claude Code instance running as orchestrator. It creates Goals, designs the task graph, dispatches subagents, claims Tasks in Beads while subagents run, closes Tasks on verification, routes browser button clicks back via the bridge. Beads (`bd`) is the system of record. Eight skills, all `/paperflow:*` namespaced, hit the cap exactly:
 
 | Skill | What it does |
 |---|---|
@@ -98,6 +98,8 @@ paperflow is one Claude Code instance running as orchestrator. It creates Goals,
 | `/paperflow:review` | Open a review-task; run review or site audit. |
 | `/paperflow:install` | This skill. Install / upgrade / reset / new skill / changelog. |
 | `/paperflow:resume` | List Goals, pick, flip pointers, open Goal HTML. |
+| `/paperflow:bootstrap` | First-run host install — runs `install.sh` after `/plugin install paperflow`. |
+| `/paperflow:autopilot` | Chains `goal → plan → grill → build → review` in one push. Pauses at the grill. |
 
 ## Process
 
@@ -141,11 +143,11 @@ Beads bootstrap (`bd init`) is deferred to first `/paperflow:goal` in a repo.
 
 ### Sub-flow B — Write a new skill
 
-**The cap is hit at 7** (the six lifecycle skills plus the plugin `bootstrap` skill). Any new skill PR must remove or merge an existing skill in the same patch — `scripts/check-skill-count.sh` will fail otherwise. Confirm with the user which existing skill the new one displaces before writing.
+**The cap is hit at 8** (the six lifecycle skills, the plugin `bootstrap` skill, and the `autopilot` skill). Any new skill PR must remove or merge an existing skill in the same patch — `scripts/check-skill-count.sh` will fail otherwise. Confirm with the user which existing skill the new one displaces before writing.
 
 1. **Spawn a subagent** to draft the SKILL.md. Brief: one-sentence purpose, ≥1 Beads command in body, ≥1 verifiable artifact named, frontmatter `description` with trigger phrases, 60–150 lines.
 2. **Confirm the displacement.** Edit `install.sh` skill loop + status block to swap displaced skill for the new one.
-3. **Run `bash install.sh`** then verify: `find skills -name '*.md' -type f | wc -l` returns exactly 7.
+3. **Run `bash install.sh`** then verify: `find skills -name '*.md' -type f | wc -l` returns exactly 8.
 4. **Open a PR** referencing the displacement.
 
 ### Sub-flow C — Write a changelog (paperflow-itself releases only)
@@ -160,7 +162,7 @@ Beads bootstrap (`bd init`) is deferred to first `/paperflow:goal` in a repo.
 
 - Sub-flow A: refreshed `~/.claude/CLAUDE.md` (lean core + opted-in fragments), hooks, LaunchAgents, renderers, statusline. `~/.paperflow/.major-version` set to 2.
 - Sub-flow A (`--reset`): backup tarball at `~/.paperflow/backups/<ts>.tar.gz`, fresh install on top.
-- Sub-flow B: a new `skills/<name>/SKILL.md` (with the 7-skill cap satisfied via displacement), updated `install.sh`.
+- Sub-flow B: a new `skills/<name>/SKILL.md` (with the 8-skill cap satisfied via displacement), updated `install.sh`.
 - Sub-flow C: a changelog HTML at `~/docs/paperflow/changelog/<date>-<topic>-changelog.html`.
 
 ## Beads commands
