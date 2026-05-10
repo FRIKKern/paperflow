@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fail CI if paperflow's skill set exceeds the 8-skill cap, or if any
 # skill is nested inside another. The cap covers the six lifecycle skills
-# (goal, plan, build, review, install, resume), the plugin `bootstrap`
+# (goal, plan, build, review, install, resume), the plugin `setup`
 # skill that runs install.sh after `/plugin install paperflow`, and
 # `autopilot` — the momentum-mode wrapper that chains the lifecycle in
 # one push. A 9th skill must displace an existing one in the same PR —

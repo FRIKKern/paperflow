@@ -7,6 +7,10 @@ description: paperflow's meta-skill. Use when the user says "install paperflow",
 
 The meta-skill — covers install/upgrade/reset, integration opt-in, skill authoring, and changelog publishing. Also serves as paperflow's "what is this?" entry point.
 
+**install vs setup.** Two different verbs, two different jobs.
+`/paperflow:setup` is the **first-run** host installer — runs `install.sh` after `/plugin install paperflow`, idempotent re-runs handle `--upgrade` / `--reset`. Trigger phrases are literal: "/paperflow:setup", "set up paperflow", "bootstrap paperflow" (back-compat). It's a thin wrapper around `bash install.sh`.
+`/paperflow:install` is the **meta-skill** — write a new SKILL.md (within the 8-skill cap), publish a paperflow release changelog, answer "what is paperflow?". It also drives Q&A install/upgrade/reset flows when the user wants integration flag selection (`--with-openclaw`, `--with-browserbase`, `--with-unlighthouse`) — the setup skill is the bare consent path; the install skill is the guided path.
+
 <!-- BEGIN paperflow-thresholds -->
 ## Subagent enforcement (paperflow-thresholds v1)
 
@@ -98,7 +102,7 @@ paperflow is one Claude Code instance running as orchestrator. It creates Goals,
 | `/paperflow:review` | Open a review-task; run review or site audit. |
 | `/paperflow:install` | This skill. Install / upgrade / reset / new skill / changelog. |
 | `/paperflow:resume` | List Goals, pick, flip pointers, open Goal HTML. |
-| `/paperflow:bootstrap` | First-run host install — runs `install.sh` after `/plugin install paperflow`. |
+| `/paperflow:setup` | First-run host install — runs `install.sh` after `/plugin install paperflow`. |
 | `/paperflow:autopilot` | Chains `goal → plan → grill → build → review` in one push. Pauses at the grill. |
 
 ## Process
@@ -139,11 +143,11 @@ bash ~/Documents/GitHub/paperflow/install.sh --reset \
 
 Tarballs `~/.claude/{CLAUDE.md, hooks, skills}` and `~/.paperflow/` (excluding `~/.paperflow/backups/`) to `~/.paperflow/backups/<YYYY-MM-DD-HHMMSS>.tar.gz`, then deletes those paths and re-installs fresh with whichever `--with-*` flags were passed. Warn the user: "this will overwrite your live `~/.claude/CLAUDE.md` — backup at `~/.paperflow/backups/<ts>.tar.gz`. Untar to `/` to restore." Confirm before running.
 
-Beads bootstrap (`bd init`) is deferred to first `/paperflow:goal` in a repo.
+Beads bootstrap (`bd init`) is deferred to first `/paperflow:goal` in a repo, which calls `paperflow-doctor --ensure-bd` (the legacy `paperflow-bd-init` binary has been folded into doctor).
 
 ### Sub-flow B — Write a new skill
 
-**The cap is hit at 8** (the six lifecycle skills, the plugin `bootstrap` skill, and the `autopilot` skill). Any new skill PR must remove or merge an existing skill in the same patch — `scripts/check-skill-count.sh` will fail otherwise. Confirm with the user which existing skill the new one displaces before writing.
+**The cap is hit at 8** (the six lifecycle skills, the plugin `setup` skill, and the `autopilot` skill). Any new skill PR must remove or merge an existing skill in the same patch — `scripts/check-skill-count.sh` will fail otherwise. Confirm with the user which existing skill the new one displaces before writing.
 
 1. **Spawn a subagent** to draft the SKILL.md. Brief: one-sentence purpose, ≥1 Beads command in body, ≥1 verifiable artifact named, frontmatter `description` with trigger phrases, 60–150 lines.
 2. **Confirm the displacement.** Edit `install.sh` skill loop + status block to swap displaced skill for the new one.

@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED 2026-05 (Cut 2): folded into `paperflow-doctor --ensure-bd`.
+# This source file is kept for one transition release. install.sh no
+# longer deploys it to ~/.local/bin/. Callers should switch to:
+#   paperflow-doctor --ensure-bd
+# (which emits JSON: {ok, action: "init"|"already_init", db_path, ts}).
+#
 # Initialise Beads in the current repo if not already done. Idempotent.
 #
 # Walks up from $PWD to find the nearest git repo root. If <root>/.beads/

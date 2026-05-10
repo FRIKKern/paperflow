@@ -21,7 +21,7 @@
 ```
 /plugin marketplace add https://github.com/FRIKKern/paperflow
 /plugin install paperflow
-/paperflow:bootstrap
+/paperflow:setup
 ```
 
 The first two are stock Claude Code commands. The third runs the bundled `install.sh` after explaining what it touches and asking for consent — LaunchAgents on ports 8765 + 8766, the cmux dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims, optional brew installs.
@@ -90,7 +90,7 @@ Files you'll touch:
 
 | Component | What it does |
 |---|---|
-| Eight skills `/paperflow:{goal,plan,build,review,install,resume,bootstrap,autopilot}` | Open a Goal, plan it, build it, review it, install/upgrade, resume later, first-time host install — and `autopilot` chains the whole lifecycle in one push (pauses at grill) |
+| Eight skills `/paperflow:{goal,plan,build,review,install,resume,setup,autopilot}` | Open a Goal, plan it, build it, review it, install/upgrade, resume later, first-time host install — and `autopilot` chains the whole lifecycle in one push (pauses at grill) |
 | Article-style HTML docs | Specs, plans, grills, questionnaires, changelogs — typography, captioned figures, Mermaid throughout |
 | Goal-path right rail | Sticky 240 px panel showing the Goal's lifecycle as a Mermaid `gitGraph`; click to jump, shift-click to diff |
 | paperflow Dock (cmux) | Four live feeds in cmux's sidebar: active context, ready tasks, recent events, auto-open log |
@@ -141,7 +141,7 @@ A typical session in your terminal:
 
 ## The eight skills
 
-Six lifecycle skills, plus the plugin `bootstrap` skill that runs `install.sh` after `/plugin install paperflow`, plus `autopilot` — the momentum-mode wrapper that chains the lifecycle in one push (with a mandatory pause at the grill). `scripts/check-skill-count.sh` fails CI if a 9th lands without a displacement.
+Six lifecycle skills, plus the plugin `setup` skill that runs `install.sh` after `/plugin install paperflow`, plus `autopilot` — the momentum-mode wrapper that chains the lifecycle in one push (with a mandatory pause at the grill). `scripts/check-skill-count.sh` fails CI if a 9th lands without a displacement.
 
 | Skill | What it does | Trigger phrases |
 |---|---|---|
@@ -151,7 +151,7 @@ Six lifecycle skills, plus the plugin `bootstrap` skill that runs `install.sh` a
 | `/paperflow:review` | Opens a review-task linked to a build-task; delegates the review (or site audit) to a subagent. Includes a Subagent-Run audit. | "request review", "review this PR", "audit my site" |
 | `/paperflow:install` | The meta-skill — install, upgrade, reset, integration opt-in, author a new SKILL.md, write release changelogs. | "install paperflow", "upgrade paperflow", "what is paperflow?" |
 | `/paperflow:resume` | Mirrors Claude Code's `/resume` for Goals. Lists Goals via Beads, presents a numbered menu, flips the two pointers on pick. | "/resume", "list goals", "switch to goal X" |
-| `/paperflow:bootstrap` | First-run host install — runs `install.sh` after `/plugin install paperflow`. Re-run with `--upgrade` or `--reset`. | "/paperflow:bootstrap" after a fresh plugin install |
+| `/paperflow:setup` | First-run host install — runs `install.sh` after `/plugin install paperflow`. Re-run with `--upgrade` or `--reset`. | "/paperflow:setup" after a fresh plugin install |
 | `/paperflow:autopilot` | Chains `goal → plan → grill → build → review` in one push. Pauses MANDATORY at the grill (unless `--skip-grill`). Stops one click short of archive. | "autopilot", "run on autopilot", "do the whole flow" |
 
 Each non-exempt skill carries an inlined copy of `lib/shared-thresholds.md` between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels. `install.sh` re-splices on every run. `/paperflow:resume` is exempt (read-only).
