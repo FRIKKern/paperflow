@@ -50,6 +50,17 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 1. **Restart Claude Code** (or run `/hooks` in any already-running session) so hooks, skills, and `CLAUDE.md` get picked up.
 2. Run `/paperflow:goal "your first goal vision"` — or `/paperflow:autopilot "your vision"` if you want paperflow to chain plan → grill → build → review for you (pauses at the grill so you stay in the loop).
 
+**Terminal shortcut.** Once installed, the `pf` wrapper CLI lets you start a paperflow flow from anywhere without opening Claude Code first:
+
+```
+pf goal "ship the new auth flow"
+pf autopilot "fix the typecheck regressions"
+pf doctor
+pf status
+```
+
+`pf goal` spawns a fresh Claude in the current directory via cmux, sends the slash command, and you're off. Run `pf help` for the full subcommand list.
+
 ---
 
 ## What it looks like

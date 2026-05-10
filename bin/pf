@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# pf — paperflow's terminal wrapper. Type fewer characters; spawn Claude
+# from anywhere via cmux, run helpers without spawning Claude at all.
+# Phase 1: substrate. Future phases (sandbox, parallel, replay) bolt onto
+# pf_spawn_and_send. Pure bash 3.2, no node/python, raw 256-color ANSI.
+# NO_COLOR=1 or non-TTY → silent fallback. Header: 6 lines.
+
+set -u
+
+PF_VERSION="0.1.0"
+
+# ─── Color helpers ─────────────────────────────────────────────────
+PF_HAS_COLOR=1
+[ -n "${NO_COLOR:-}" ] && PF_HAS_COLOR=0
+[ -t 1 ] || PF_HAS_COLOR=0
+
+pf_color() {
+    [ "$PF_HAS_COLOR" = "0" ] && return 0
+    case "$1" in
+        ok)     printf '\033[38;5;42m'  ;;   # bright green
+        warn)   printf '\033[38;5;214m' ;;   # orange
+        crit)   printf '\033[38;5;196m' ;;   # red
+        dim)    printf '\033[38;5;240m' ;;   # gray
+        accent) printf '\033[38;5;39m'  ;;   # blue
+        *)      ;;
+    esac
+}
+pf_reset() { [ "$PF_HAS_COLOR" = "1" ] && printf '\033[0m'; }
+pf_ok()   { printf '%s✓%s %s\n' "$(pf_color ok)"   "$(pf_reset)" "$*"; }
+pf_warn() { printf '%s⚠%s %s\n' "$(pf_color warn)" "$(pf_reset)" "$*"; }
+pf_err()  { printf '%s✗%s %s\n' "$(pf_color crit)" "$(pf_reset)" "$*" >&2; }
+pf_dim()  { printf '%s%s%s\n'   "$(pf_color dim)"  "$*" "$(pf_reset)"; }
+
+# ─── cmux-spawn primitive (load-bearing) ────────────────────────────
+# pf_spawn_and_send <cwd> <slash-command-and-args> [<workspace-name>]
+# Returns: workspace ref on stdout, status to stderr.
+# Future phases (sandbox, parallel) wrap this — keep it clean.
+pf_spawn_and_send() {
+    local cwd="$1" message="$2"
+    local name="${3:-pf-$(date +%Y%m%d-%H%M%S)}"
+    if [ -z "${CMUX_BUNDLED_CLI_PATH:-}" ] || [ ! -x "$CMUX_BUNDLED_CLI_PATH" ]; then
+        pf_err "cmux CLI not found at \$CMUX_BUNDLED_CLI_PATH. pf goal/autopilot need cmux."
+        pf_dim "Workaround: open Claude Code yourself and type:  $message"
+        return 2
+    fi
+    [ -d "$cwd" ] || { pf_err "cwd does not exist: $cwd"; return 2; }
+    local ws_out ws_ref
+    ws_out=$("$CMUX_BUNDLED_CLI_PATH" new-workspace \
+                --name "$name" --cwd "$cwd" \
+                --command 'claude --dangerously-skip-permissions' \
+                --focus false 2>&1)
+    ws_ref=$(printf '%s\n' "$ws_out" | grep -oE 'workspace:[0-9]+' | head -1)
+    if [ -z "$ws_ref" ]; then
+        pf_err "cmux new-workspace failed: $ws_out"
+        return 2
+    fi
+    pf_ok "spawned $ws_ref ($name)" >&2
+    # Wait for Claude ready (poll read-screen for the prompt indicator)
+    local i=0
+    while [ "$i" -lt 15 ]; do
+        if "$CMUX_BUNDLED_CLI_PATH" read-screen --workspace "$ws_ref" --lines 5 2>/dev/null \
+                | grep -qE 'Welcome|/effort|—— Claude Code'; then break; fi
+        sleep 1; i=$((i + 1))
+    done
+    [ "$i" -ge 15 ] && pf_warn "claude boot timed out at 15s — sending anyway" >&2
+    "$CMUX_BUNDLED_CLI_PATH" send     --workspace "$ws_ref" "$message" >/dev/null
+    "$CMUX_BUNDLED_CLI_PATH" send-key --workspace "$ws_ref" return     >/dev/null
+    pf_ok "sent: $message" >&2
+    printf '%s\n' "$ws_ref"
+}
+
+# ─── Subcommands: goal, autopilot ──────────────────────────────────
+pf_slug() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]//g' | cut -c1-30; }
+
+cmd_goal() {
+    local vision="${1:-}"
+    [ -z "$vision" ] && { pf_err "missing vision. Usage: pf goal \"<vision>\""; return 1; }
+    local slug; slug=$(pf_slug "$vision")
+    pf_spawn_and_send "$(pwd)" "/paperflow:goal \"$vision\"" "pf-goal-${slug:-untitled}"
+}
+
+cmd_autopilot() {
+    local vision="" skip=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --skip-grill) skip=" --skip-grill" ;;
+            *) [ -z "$vision" ] && vision="$1" ;;
+        esac
+        shift
+    done
+    [ -z "$vision" ] && { pf_err "missing vision. Usage: pf autopilot \"<vision>\" [--skip-grill]"; return 1; }
+    local slug; slug=$(pf_slug "$vision")
+    pf_spawn_and_send "$(pwd)" "/paperflow:autopilot \"$vision\"${skip}" "pf-autopilot-${slug:-untitled}"
+}
+
+# ─── Subcommand: doctor ────────────────────────────────────────────
+cmd_doctor() {
+    local doctor_bin="$HOME/.local/bin/paperflow-doctor"
+    [ -x "$doctor_bin" ] || { pf_err "paperflow-doctor not installed at $doctor_bin"; pf_dim "Run: bash <repo>/install.sh"; return 2; }
+    local out exit_code
+    out=$("$doctor_bin" "$@" 2>/dev/null); exit_code=$?
+    if ! command -v jq >/dev/null 2>&1; then printf '%s\n' "$out"; return "$exit_code"; fi
+    local ok run passed n
+    ok=$(printf     '%s' "$out" | jq -r '.ok            // false' 2>/dev/null)
+    run=$(printf    '%s' "$out" | jq -r '.checks_run    // 0'     2>/dev/null)
+    passed=$(printf '%s' "$out" | jq -r '.checks_passed // 0'     2>/dev/null)
+    n=$(printf      '%s' "$out" | jq -r '(.issues // []) | length' 2>/dev/null)
+    if [ "$ok" = "true" ] && [ "${n:-0}" = "0" ]; then
+        pf_ok "doctor: clean ($passed/$run checks passed)"; return 0
+    fi
+    if [ "$ok" = "true" ]; then pf_warn "doctor: $passed/$run passed, $n warning(s)"
+    else                        pf_err  "doctor: $passed/$run passed, $n issue(s)"
+    fi
+    local i=1
+    printf '%s' "$out" | jq -r '(.issues // [])[] | "\(.severity)\t\(.title)\t\(.repair_command // "")"' 2>/dev/null \
+        | while IFS=$'\t' read -r sev title repair; do
+            case "$sev" in
+                critical) pf_err  "$i. $title" ;;
+                warning)  pf_warn "$i. $title" ;;
+                info)     pf_dim  "$i. $title" ;;
+                *)        printf '  %d. %s\n' "$i" "$title" ;;
+            esac
+            [ -n "$repair" ] && pf_dim "    repair: $repair"
+            i=$((i + 1))
+        done
+    return "$exit_code"
+}
+
+# ─── Subcommand: snapshot ──────────────────────────────────────────
+cmd_snapshot() {
+    local meta_bin="$HOME/.local/bin/paperflow-doc-meta"
+    [ -x "$meta_bin" ] || { pf_err "paperflow-doc-meta not installed at $meta_bin"; return 2; }
+    local out; out=$("$meta_bin" --no-auto-goal 2>/dev/null)
+    [ -z "$out" ] && { pf_err "doc-meta produced no output"; return 2; }
+    if ! command -v jq >/dev/null 2>&1; then printf '%s\n' "$out"; return 0; fi
+    local goal_id goal_title repo_root device ws ts
+    goal_id=$(printf    '%s' "$out" | jq -r '.active_goal_id    // "(none)"'    2>/dev/null)
+    goal_title=$(printf '%s' "$out" | jq -r '.active_goal_title // "(none)"'    2>/dev/null)
+    repo_root=$(printf  '%s' "$out" | jq -r '.repo_root         // "(none)"'    2>/dev/null)
+    device=$(printf     '%s' "$out" | jq -r '.device            // "(unknown)"' 2>/dev/null)
+    ws=$(printf         '%s' "$out" | jq -r '.cmux_workspace    // "(none)"'    2>/dev/null)
+    ts=$(printf         '%s' "$out" | jq -r '.time_display      // .ts // ""'   2>/dev/null)
+    pf_ok "snapshot @ $ts"
+    local d a r; d=$(pf_color dim); a=$(pf_color accent); r=$(pf_reset)
+    printf '  %sgoal%s   %s  %s%s%s\n' "$d" "$r" "$goal_id" "$a" "$goal_title" "$r"
+    printf '  %srepo%s   %s\n'         "$d" "$r" "$repo_root"
+    printf '  %sdevice%s %s\n'         "$d" "$r" "$device"
+    printf '  %scmux%s   %s\n'         "$d" "$r" "$ws"
+}
+
+# ─── Subcommand: status ────────────────────────────────────────────
+cmd_status() {
+    local meta_bin="$HOME/.local/bin/paperflow-doc-meta"
+    local goal_id="(none)" goal_title=""
+    if [ -x "$meta_bin" ] && command -v jq >/dev/null 2>&1; then
+        local out; out=$("$meta_bin" --no-auto-goal 2>/dev/null)
+        if [ -n "$out" ]; then
+            goal_id=$(printf    '%s' "$out" | jq -r '.active_goal_id    // "(none)"' 2>/dev/null)
+            goal_title=$(printf '%s' "$out" | jq -r '.active_goal_title // ""'        2>/dev/null)
+        fi
+    fi
+    if [ "$goal_id" = "(none)" ] || [ -z "$goal_id" ]; then
+        pf_dim "goal:    (none — type: pf goal \"<vision>\")"
+    else
+        printf '%s✓%s goal:    %s%s%s  %s\n' \
+            "$(pf_color ok)" "$(pf_reset)" "$(pf_color accent)" "$goal_id" "$(pf_reset)" "$goal_title"
+    fi
+    local cache="$HOME/.paperflow/doctor.cache.json"
+    if [ -f "$cache" ] && command -v jq >/dev/null 2>&1; then
+        local d_run d_n d_ts
+        d_run=$(jq -r '.checks_run // 0'        "$cache" 2>/dev/null)
+        d_n=$(jq -r   '(.issues // []) | length' "$cache" 2>/dev/null)
+        d_ts=$(jq -r  '.ts // ""'                "$cache" 2>/dev/null)
+        if [ "${d_n:-0}" = "0" ]; then
+            pf_ok "doctor:  clean ($d_run checks)  $(pf_color dim)$d_ts$(pf_reset)"
+        else
+            pf_warn "doctor:  $d_n issue(s)  $(pf_color dim)$d_ts$(pf_reset)"
+        fi
+    else
+        pf_dim "doctor:  (no cache — run: pf doctor)"
+    fi
+    local toast="$HOME/.paperflow/dock-feeds/doctor-status"
+    if [ -f "$toast" ]; then
+        local t; t=$(head -1 "$toast" 2>/dev/null)
+        [ -n "$t" ] && pf_dim "dock:    $t"
+    fi
+    if command -v bd >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        local n; n=$(bd ready --json 2>/dev/null | jq 'length' 2>/dev/null)
+        case "$n" in
+            ''|*[!0-9]*) pf_dim "ready:   (bd unreachable)" ;;
+            0)           pf_dim "ready:   0 tasks" ;;
+            *)           printf '%s✓%s ready:   %s task(s)\n' "$(pf_color ok)" "$(pf_reset)" "$n" ;;
+        esac
+    else
+        pf_dim "ready:   (bd or jq missing)"
+    fi
+}
+
+# ─── Subcommand: preflight ─────────────────────────────────────────
+cmd_preflight() {
+    local pre_bin="$HOME/.local/bin/paperflow-preflight"
+    [ -x "$pre_bin" ] || { pf_err "paperflow-preflight not installed at $pre_bin"; return 2; }
+    local out ec; out=$("$pre_bin" 2>&1); ec=$?
+    if [ "$ec" = "0" ]; then pf_ok "preflight: ok"; return 0; fi
+    pf_err "preflight: failed (exit $ec)"
+    printf '%s\n' "$out"
+    return "$ec"
+}
+
+# ─── Subcommand: version ───────────────────────────────────────────
+cmd_version() {
+    local plugin_ver="" cache_root="$HOME/.claude/plugins/cache/paperflow/paperflow"
+    if [ -d "$cache_root" ] && command -v jq >/dev/null 2>&1; then
+        local latest; latest=$(/bin/ls -1 "$cache_root" 2>/dev/null | sort -V | tail -1)
+        [ -n "$latest" ] && [ -f "$cache_root/$latest/.claude-plugin/plugin.json" ] \
+            && plugin_ver=$(jq -r '.version // ""' "$cache_root/$latest/.claude-plugin/plugin.json" 2>/dev/null)
+    fi
+    if [ -n "$plugin_ver" ]; then printf 'pf %s (paperflow plugin %s)\n' "$PF_VERSION" "$plugin_ver"
+    else                          printf 'pf %s (paperflow plugin: unknown)\n' "$PF_VERSION"
+    fi
+}
+
+# ─── Subcommand: help ──────────────────────────────────────────────
+cmd_help() {
+    case "${1:-}" in
+        goal)      cat <<EOF
+pf goal "<vision>"
+  Spawn a cmux Claude in cwd and send /paperflow:goal "<vision>".
+  Requires \$CMUX_BUNDLED_CLI_PATH (set automatically inside cmux).
+  Example: pf goal "ship the new auth flow"
+EOF
+            ;;
+        autopilot) cat <<EOF
+pf autopilot "<vision>" [--skip-grill]
+  Spawn a cmux Claude and send /paperflow:autopilot.
+  Chains goal → plan → grill → build → review.
+  Pauses MANDATORY at the grill gate unless --skip-grill.
+EOF
+            ;;
+        doctor)    cat <<EOF
+pf doctor [--full]
+  Run paperflow-doctor and pretty-print. Exit code mirrors doctor:
+  0 clean · 1 warnings · 2 critical
+EOF
+            ;;
+        snapshot)  cat <<EOF
+pf snapshot
+  Active Goal id+title, repo root, device, cmux workspace, timestamp.
+  Read-only — does NOT auto-create a Goal.
+EOF
+            ;;
+        status)    cat <<EOF
+pf status
+  One-line-per-row aggregate: active Goal · last doctor · dock toast
+  · ready task count (bd ready).
+EOF
+            ;;
+        preflight) cat <<EOF
+pf preflight
+  Run paperflow-preflight. Reports ok or prints failure detail.
+EOF
+            ;;
+        version)   cat <<EOF
+pf version
+  Print pf and paperflow plugin versions.
+EOF
+            ;;
+        ""|help|-h|--help) cat <<EOF
+pf — paperflow's terminal wrapper.
+
+Usage: pf <subcommand> [args...]
+
+  goal "<vision>"            spawn cmux Claude, send /paperflow:goal
+  autopilot "<vision>"       spawn cmux Claude, send /paperflow:autopilot
+                             (optional: --skip-grill)
+  doctor [--full]            run paperflow-doctor, pretty-print
+  snapshot                   active Goal + repo state
+  status                     active Goal + last doctor + ready count
+  preflight                  run paperflow-preflight
+  help [<subcmd>]            this message, or per-subcommand detail
+  version                    pf + paperflow plugin versions
+
+NO_COLOR=1 disables ANSI. \$CMUX_BUNDLED_CLI_PATH needed for goal/autopilot.
+Docs: https://github.com/FRIKKern/paperflow
+EOF
+            ;;
+        *) pf_err "unknown help topic: $1"; return 1 ;;
+    esac
+}
+
+# ─── Dispatch ──────────────────────────────────────────────────────
+case "${1:-help}" in
+    goal)            shift; cmd_goal "$@" ;;
+    autopilot)       shift; cmd_autopilot "$@" ;;
+    doctor)          shift; cmd_doctor "$@" ;;
+    snapshot)        shift; cmd_snapshot "$@" ;;
+    status)          shift; cmd_status "$@" ;;
+    preflight)       shift; cmd_preflight "$@" ;;
+    version|-V|--version) cmd_version ;;
+    help|-h|--help)  shift; cmd_help "$@" ;;
+    *)               pf_err "unknown subcommand: $1"; cmd_help; exit 1 ;;
+esac

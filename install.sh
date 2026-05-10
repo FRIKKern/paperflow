@@ -906,6 +906,15 @@ cp "$REPO/bin/paperflow-goal-merge" "$HOME/.local/bin/paperflow-goal-merge"
 chmod +x "$HOME/.local/bin/paperflow-goal-merge"
 ok "installed at ~/.local/bin/paperflow-goal-merge"
 
+# ─── 10h. pf wrapper CLI at ~/.local/bin/pf ────────────────────────
+# Phase 1 substrate. Spawns a cmux Claude in cwd via $CMUX_BUNDLED_CLI_PATH
+# and sends /paperflow:goal or /paperflow:autopilot. Utility subcommands
+# (doctor, snapshot, status, preflight) run helpers without spawning Claude.
+log "Helper: pf"
+cp "$REPO/bin/pf" "$HOME/.local/bin/pf"
+chmod +x "$HOME/.local/bin/pf"
+ok "installed at ~/.local/bin/pf"
+
 # ─── 10f1. Per-instance active-scope resolver ──────────────────────
 # paperflow-active-scope owns the per-instance (per cmux workspace, or per
 # Claude Code session) active-goal/active-phase pointers. Skills, hooks,
@@ -1086,6 +1095,7 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-doc-meta" ]              && ok "doc-meta      : executable" || err "doc-meta      : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
     [ -x "$HOME/.local/bin/paperflow-goal-merge" ]            && ok "goal-merge    : executable" || err "goal-merge    : missing"
+    [ -x "$HOME/.local/bin/pf" ]                              && ok "pf wrapper   : executable" || err "pf wrapper   : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-feed" ]              && ok "dock feed     : executable" || err "dock feed     : missing"
@@ -1179,6 +1189,14 @@ if "$HOME/.local/bin/paperflow-doc-meta" --no-auto-goal >/dev/null 2>&1; then
     ok "doc-meta         : ok"
 else
     err "doc-meta         : reported failure (rerun manually for JSON)"
+fi
+
+# 7. pf wrapper — `pf version` is the cheapest sanity probe; it touches the
+# dispatch table, color helpers, and plugin-cache lookup without spawning cmux.
+if "$HOME/.local/bin/pf" version >/dev/null 2>&1; then
+    ok "pf version       : ok"
+else
+    err "pf version       : failed (try: pf version)"
 fi
 
 echo
