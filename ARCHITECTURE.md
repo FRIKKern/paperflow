@@ -71,7 +71,7 @@ paperflow uses Beads (`bd`) as the single source of truth for goals, phases, tas
 
 ### Per-repo init
 
-`paperflow-bd-init` runs `bd init` once on the first Goal in a repo. `/paperflow:build` claims with `bd update <id> --claim` and closes with `bd update <id> --close`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase.
+`paperflow-doctor --ensure-bd` runs `bd init` once on the first Goal in a repo (folded in from the legacy `paperflow-bd-init` binary). `/paperflow:build` claims with `bd update <id> --claim` and closes with `bd update <id> --close`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase.
 
 ### Goal-tasks: epics
 
@@ -407,11 +407,10 @@ paperflow/
 │   ├── claude-bridge.js            # the bridge service
 │   ├── get-terminal-target.sh      # captures CLAUDE_TARGET JSON
 │   ├── paperflow-active-scope      # resolves goal/phase from cwd up
-│   ├── paperflow-bd-init           # per-repo Beads bootstrap
 │   ├── paperflow-validate          # static Mermaid check (~80 LOC Node)
 │   ├── paperflow-audit-site        # Unlighthouse wrapper
 │   ├── paperflow-audit-orchestrator-budget   # Subagent-Run trailer audit
-│   ├── paperflow-continue          # mission-launcher (carry-over)
+│   ├── paperflow-continue          # /paperflow:goal continue launcher (legacy: missions)
 │   ├── paperflow-migrate-legacy-goals
 │   ├── paperflow-simplify-verify   # Simplify structural gate
 │   ├── paperflow-dock-daemon       # the 2 s poller
@@ -436,7 +435,7 @@ paperflow/
 │   ├── validate-paperflow-doc.sh   # PostToolUse(Write|Edit)
 │   └── event-on-save.sh            # PostToolUse(Write|Edit)
 ├── skills/
-│   └── {goal,plan,build,review,install,resume,bootstrap,autopilot}/SKILL.md
+│   └── {goal,plan,build,review,install,resume,setup,autopilot}/SKILL.md
 ├── launchagents/
 │   ├── claude-bridge.plist.tmpl
 │   └── docs-livereload.plist.tmpl
@@ -462,7 +461,7 @@ Eight skills, exact. The cap is hit; adding a new skill requires removing or mer
 
 ### CI gate
 
-`scripts/check-skill-count.sh` fails CI if a 9th `skills/*/SKILL.md` lands without a displacement. The cap covers the six lifecycle skills, the plugin `bootstrap` skill, and the `autopilot` skill (the momentum-mode wrapper).
+`scripts/check-skill-count.sh` fails CI if a 9th `skills/*/SKILL.md` lands without a displacement. The cap covers the six lifecycle skills, the plugin `setup` skill, and the `autopilot` skill (the momentum-mode wrapper).
 
 ### Adding or replacing a skill
 
@@ -495,16 +494,16 @@ paperflow ships as a Claude Code plugin in addition to the curl-pipe install pat
 .claude-plugin/marketplace.json   # marketplace entry pointing at this repo
 ```
 
-`plugin.json` declares `name: "paperflow"`, `version`, author, license, keywords, and `"skills": "./skills/"`. Claude Code auto-discovers each `skills/<name>/SKILL.md` and exposes it as `/paperflow:<name>` — the slash namespace is derived from the plugin name. So the eight shipped folders (`goal`, `plan`, `build`, `review`, `install`, `resume`, `bootstrap`, `autopilot`) become `/paperflow:goal`, `/paperflow:plan`, …, `/paperflow:autopilot`.
+`plugin.json` declares `name: "paperflow"`, `version`, author, license, keywords, and `"skills": "./skills/"`. Claude Code auto-discovers each `skills/<name>/SKILL.md` and exposes it as `/paperflow:<name>` — the slash namespace is derived from the plugin name. So the eight shipped folders (`goal`, `plan`, `build`, `review`, `install`, `resume`, `setup`, `autopilot`) become `/paperflow:goal`, `/paperflow:plan`, …, `/paperflow:autopilot`.
 
 Install path:
 
 ```
 /plugin marketplace add https://github.com/FRIKKern/paperflow
 /plugin install paperflow
-/paperflow:bootstrap
+/paperflow:setup
 ```
 
-The `bootstrap` skill is the bridge between the plugin (skills + slash commands) and the host-side install (LaunchAgents, dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims) — it locates `$CLAUDE_PLUGIN_ROOT`, asks for consent, runs `install.sh`, then writes `~/.paperflow/installed` as the success sentinel. See `skills/bootstrap/SKILL.md`.
+The `setup` skill is the bridge between the plugin (skills + slash commands) and the host-side install (LaunchAgents, dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims) — it locates `$CLAUDE_PLUGIN_ROOT`, asks for consent, runs `install.sh`, then writes `~/.paperflow/installed` as the success sentinel. See `skills/setup/SKILL.md`.
 
 The legacy curl-pipe install (`scripts/quickstart.sh` / `install.sh`) continues to work in parallel — the same `install.sh` is the host-side worker for both paths.

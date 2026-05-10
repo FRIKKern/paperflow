@@ -1,6 +1,6 @@
 ---
 name: goal
-description: Use when the user says "start a goal", "open a goal for X", "snapshot the goal", "archive the goal", "what's the active goal?", or kicks off any non-trivial multi-artifact piece of work. Creates a goal-task in Beads with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review) underneath, sets the per-repo `.paperflow/active-goal` and `.paperflow/active-phase` pointers, and renders the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. Snapshot and archive are sub-actions of the same skill.
+description: Use when the user says "start a goal", "open a goal for X", "snapshot the goal", "save current state", "checkpoint this work", "continue this goal in a new tab", "resume in fresh session", "archive the goal", "what's the active goal?", or kicks off any non-trivial multi-artifact piece of work. Creates a goal-task in Beads with `kind:goal`, auto-creates three default phase-tasks (pre-flight, build, review) underneath, sets the per-repo `.paperflow/active-goal` and `.paperflow/active-phase` pointers, and renders the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html`. Sub-actions: snapshot (refresh HTML + JSON sidecar), continue (spawn fresh Claude tab via paperflow-continue), archive (close Goal). Folds in the work that the legacy mission-create / mission-snapshot / mission-continue skills used to do.
 ---
 
 # goal
@@ -89,7 +89,7 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
 1. **Pick a slug.** Kebab-case, 2–4 words. Date-prefix it: `<YYYY-MM-DD>-<slug>` (e.g. `2026-05-04-onboarding-revamp`). Confirm with the user only if ambiguous.
 
-2. **Pre-flight Beads.** If `<repo>/.beads/` doesn't exist, run `bd init`. Idempotent: re-running on an existing repo is a no-op.
+2. **Pre-flight Beads.** Run `paperflow-doctor --ensure-bd` — it walks up from cwd to the nearest git repo root, runs `bd init` if `.beads/` is missing, and emits one JSON line on stdout (`{ok, action, db_path}`). Idempotent: re-running is a no-op.
 
 3. **Create the goal-task:**
 
@@ -167,8 +167,19 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 
 ## Sub-actions
 
-- **Snapshot** — re-run step 7 against the live Beads state. No mutations to Beads. Refreshes the Goal HTML.
+- **Create** — the default at skill invocation. Steps 1–7 above. Explicit alias for clarity when the user says "open a goal" / "start a goal" / "create goal".
+
+- **Snapshot** — re-run step 7 against the live Beads state. No mutations to Beads. Refreshes the Goal HTML at `~/docs/paperflow/goals/<slug>/index.html` AND writes a small JSON sidecar at `~/docs/paperflow/goals/<slug>/index.json` containing `{slug, goal_id, vision, snapshot_ts, resume_prompt}`. The `resume_prompt` is the one-line instruction a fresh Claude session reads to pick up: `"You are resuming the <slug> Goal. Read /Users/<user>/docs/paperflow/goals/<slug>/index.html in full, then continue work on the active phase."`. The `continue` sub-action consumes this sidecar.
+
+- **Continue** — spawn a fresh Claude Code session in a new terminal tab, pre-loaded with the active Goal's resume_prompt.
+  1. Read `<repo>/.paperflow/active-goal` (or via `paperflow-active-scope --read goal`) to get `$GOAL_ID`.
+  2. Resolve the slug from `bd show $GOAL_ID --json` (label `goal-<slug>`).
+  3. Run **snapshot** first to refresh `~/docs/paperflow/goals/<slug>/index.json`. If the sidecar doesn't exist yet, snapshot writes it.
+  4. Invoke `~/.local/bin/paperflow-continue <slug>`. The launcher reads the sidecar's `resume_prompt`, detects the current terminal (tmux / iTerm / Apple Terminal / fallback), opens a new tab/window running `cd ~ && claude --dangerously-skip-permissions <resume_prompt>`.
+  5. Reply with one short sentence — which terminal path was used + slug.
+
 - **Archive** — `bd update $GOAL_ID --close`. Closes every still-open phase-task as a side effect (only legal when no work-tasks remain open). Updates the Goal HTML status to `closed`.
+
 - **Edit vision** — `bd update $GOAL_ID --description "<new>"` then re-render.
 
 ## Artifact
@@ -182,7 +193,7 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 
 | Verb | Purpose |
 |---|---|
-| `bd init` | Bootstrap Beads in the repo (first goal only). |
+| `paperflow-doctor --ensure-bd` | Bootstrap Beads in the repo (first goal only — wraps `bd init`). |
 | `bd create … --type epic --label goal-<slug>` | Create the goal-task (Beads-native epic; drops the old `kind:goal` label). |
 | `bd label add <epic-id> umbrella-<slug>` | Attach a multi-Goal umbrella mid-flight. |
 | `bd create … --label kind:phase --label goal-<slug> --label phase-<name>` | Create a phase-task (×3 by default). |

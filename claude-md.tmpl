@@ -58,14 +58,14 @@ Eight skills, all under the `/paperflow:` plugin namespace. The cap is hit exact
 | `/paperflow:review`    | Orchestrator opens a review-task linked to its parent build-task, delegates the review to a subagent. Closes on approval; reopens the build-task on rejection. Site audits live here too. |
 | `/paperflow:install`   | Bootstrap Beads, install / upgrade paperflow, write a new skill (delegated), write a changelog. The "what is paperflow?" entry point. |
 | `/paperflow:resume`    | Mirrors Claude Code's `/resume` — list Goals, user picks, the active-goal pointer flips, the active-phase pointer defaults to the first incomplete phase, the Goal HTML opens via the cmux tab-reuse contract. |
-| `/paperflow:bootstrap` | First-run host install after `/plugin install paperflow` — runs `install.sh` after consent. Re-run with `--upgrade` or `--reset`. |
+| `/paperflow:setup` | First-run host install after `/plugin install paperflow` — runs `install.sh` after consent. Re-run with `--upgrade` or `--reset`. |
 | `/paperflow:autopilot` | Momentum mode — chains `goal → plan → grill → build → review` in one push, pauses MANDATORY at the grill (unless `--skip-grill`). Stops one click short of archive. |
 
 # Beads — task layer
 
 paperflow uses Beads (`bd`) as the system of record for goals, phases, and tasks. Goals live as Beads tasks tagged `kind:goal`; phases as `kind:phase` children; work-tasks as children of phases. `/paperflow:build` claims tasks via `bd update <id> --claim` and closes via `bd update <id> --close`. `bd ready --label goal-<slug>:phase-<name>` returns the next ready work-task within the active phase.
 
-Install: `brew install beads` or `npm i -g beads`. Per-repo init: `paperflow-bd-init` (run once on first Goal in a repo).
+Install: `brew install beads` or `npm i -g beads`. Per-repo init: `paperflow-doctor --ensure-bd` (run once on first Goal in a repo; `/paperflow:goal` calls it automatically). The legacy `paperflow-bd-init` binary has been folded into doctor.
 
 # Specs, plans, design docs
 

@@ -2,6 +2,7 @@
 # paperflow-doctor — health & integrity check for the paperflow installation.
 # Modes:  --fast (default; cache-aware, may re-exec --full once if cache stale)
 #         --full (run every check, write cache at ~/.paperflow/doctor.cache.json)
+#         --ensure-bd (targeted: bd init the nearest git-repo root if not done)
 # Exit:   0 ok  · 1 warnings  · 2 critical (or paperflow-preflight reported failure)
 # Cache TTL: 86400s. macOS-portable bash 3.2; jq required, no node/python.
 # Auto-fixes hook scripts, helper bins, and renderers when sources are present.
@@ -25,8 +26,36 @@ WORST=0  # 0 ok · 1 warn · 2 critical
 case "${1:-}" in
     "" | "--fast") MODE="--fast" ;;
     "--full")      MODE="--full" ;;
-    *) printf 'usage: paperflow-doctor [--fast | --full]\n' >&2; exit 1 ;;
+    "--ensure-bd") MODE="--ensure-bd" ;;
+    *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd]\n' >&2; exit 1 ;;
 esac
+
+# ── --ensure-bd: targeted Beads init for the current repo ──────────
+# Folded in from the legacy `paperflow-bd-init` binary (Cut 2, 2026-05).
+# Walks up to the nearest git repo root, runs `bd init` if .beads/ is
+# missing, exits 0 on success / already-init. JSON on stdout, exit 2 on
+# failure. Skips the rest of doctor's checks.
+if [ "$MODE" = "--ensure-bd" ]; then
+    if ! command -v bd >/dev/null 2>&1; then
+        jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{ok:false, action:"missing_dep", db_path:"", error:"bd not on PATH (brew install beads)", ts:$ts}'
+        exit 2
+    fi
+    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    if [ -d "$REPO_ROOT/.beads" ]; then
+        jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg path "$REPO_ROOT/.beads" \
+            '{ok:true, action:"already_init", db_path:$path, ts:$ts}'
+        exit 0
+    fi
+    if ( cd "$REPO_ROOT" && bd init >/dev/null 2>&1 ); then
+        jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg path "$REPO_ROOT/.beads" \
+            '{ok:true, action:"init", db_path:$path, ts:$ts}'
+        exit 0
+    fi
+    jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg root "$REPO_ROOT" \
+        '{ok:false, action:"init_failed", db_path:"", error:"bd init failed at \($root)", ts:$ts}'
+    exit 2
+fi
 
 # ── helpers ────────────────────────────────────────────────────────
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -140,7 +169,6 @@ done
 # bin-name|source-basename pairs (paperflow-target uses get-terminal-target.sh).
 for pair in \
     paperflow-validate:paperflow-validate \
-    paperflow-bd-init:paperflow-bd-init \
     paperflow-target:get-terminal-target.sh \
     paperflow-continue:paperflow-continue \
     paperflow-preflight:paperflow-preflight \

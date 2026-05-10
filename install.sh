@@ -7,7 +7,7 @@
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
 #   - six lifecycle skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
-#     (plus the bootstrap skill at ~/.claude/skills/bootstrap/ and the
+#     (plus the setup skill at ~/.claude/skills/setup/ and the
 #      autopilot skill at ~/.claude/skills/autopilot/ — 8 total)
 #   - terminal-target helper at ~/.local/bin/paperflow-target
 #   - ~/.claude/CLAUDE.md (only if missing)
@@ -319,7 +319,7 @@ mkdir -p "$HOME/docs/paperflow/specs" \
          "$HOME/.claude/skills/review" \
          "$HOME/.claude/skills/install" \
          "$HOME/.claude/skills/resume" \
-         "$HOME/.claude/skills/bootstrap" \
+         "$HOME/.claude/skills/setup" \
          "$HOME/.claude/skills/autopilot" \
          "$HOME/Library/LaunchAgents"
 ok "ready"
@@ -333,6 +333,20 @@ for s in paperflow-goal paperflow-plan paperflow-build paperflow-review paperflo
         ok "removed legacy skill folder: $s"
     fi
 done
+
+# One-time legacy cleanup — bootstrap skill folder renamed to setup (Cut 3,
+# 2026-05). Drop the old folder when the plugin is host-installed.
+if [ -d "$HOME/.claude/skills/bootstrap" ]; then
+    rm -rf "$HOME/.claude/skills/bootstrap"
+    ok "removed legacy skill folder: bootstrap (renamed to setup)"
+fi
+
+# One-time legacy cleanup — paperflow-bd-init folded into paperflow-doctor
+# --ensure-bd (Cut 2, 2026-05). Drop the deployed binary if present.
+if [ -e "$HOME/.local/bin/paperflow-bd-init" ]; then
+    rm -f "$HOME/.local/bin/paperflow-bd-init"
+    ok "removed legacy binary: paperflow-bd-init (use: paperflow-doctor --ensure-bd)"
+fi
 
 # ─── 2. Detect Node v22+ ────────────────────────────────────────────
 log "Node.js"
@@ -656,7 +670,7 @@ if [ -d "$HOME/.claude/plugins/cache" ] \
         2>/dev/null | head -1 | grep -q .; then
     PAPERFLOW_PLUGIN_INSTALLED=1
     log "Plugin detected — host skill copy + threshold refresh will be skipped"
-    for s in goal plan build review install resume bootstrap autopilot; do
+    for s in goal plan build review install resume setup autopilot; do
         if [ -d "$HOME/.claude/skills/$s" ]; then
             rm -rf "$HOME/.claude/skills/$s"
             ok "swept duplicate host skill: $s (plugin owns /paperflow:$s)"
@@ -669,7 +683,7 @@ log "Skills"
 if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
     skip "provided by plugin — host copy skipped (slashes: /paperflow:goal etc.)"
 else
-    for s in goal plan build review install resume bootstrap autopilot; do
+    for s in goal plan build review install resume setup autopilot; do
         if [ -f "$REPO/skills/$s/SKILL.md" ]; then
             mkdir -p "$HOME/.claude/skills/$s"
             cp "$REPO/skills/$s/SKILL.md" "$HOME/.claude/skills/$s/SKILL.md"
@@ -846,11 +860,10 @@ cp "$REPO/bin/paperflow-audit-site" "$HOME/.local/bin/paperflow-audit-site"
 chmod +x "$HOME/.local/bin/paperflow-audit-site"
 ok "installed at ~/.local/bin/paperflow-audit-site"
 
-# ─── 10e. Beads bootstrap helper ───────────────────────────────────
-log "Helper: paperflow-bd-init"
-cp "$REPO/bin/paperflow-bd-init" "$HOME/.local/bin/paperflow-bd-init"
-chmod +x "$HOME/.local/bin/paperflow-bd-init"
-ok "installed at ~/.local/bin/paperflow-bd-init"
+# ─── 10e. Beads bootstrap helper — folded into paperflow-doctor ────
+# Per-repo `bd init` now runs through `paperflow-doctor --ensure-bd`. The
+# legacy `paperflow-bd-init` binary is removed in the legacy-cleanup pass
+# at the top of this installer.
 
 # ─── 10e1. Runtime preflight at ~/.local/bin/paperflow-preflight ───
 # Sed-substitutes __NODE_BIN__ and __BRIDGE_JS__ into the cmux spawn
@@ -1030,7 +1043,7 @@ log "Status"
     [ -f "$HOME/docs/paperflow/_lib/doc.js" ]          && ok "doc renderer  : present"    || err "doc renderer  : missing"
     [ -f "$HOME/docs/paperflow/_lib/grill.js" ]        && ok "grill render. : present"    || err "grill render. : missing"
     if [ "$PAPERFLOW_PLUGIN_INSTALLED" = "1" ]; then
-        ok "skills        : 8 via plugin (/paperflow:goal, /paperflow:plan, …, /paperflow:autopilot, /paperflow:bootstrap)"
+        ok "skills        : 8 via plugin (/paperflow:goal, /paperflow:plan, …, /paperflow:autopilot, /paperflow:setup)"
     else
         [ -f "$HOME/.claude/skills/goal/SKILL.md" ]      && ok "goal skill    : present"    || err "goal skill    : missing"
         [ -f "$HOME/.claude/skills/plan/SKILL.md" ]      && ok "plan skill    : present"    || err "plan skill    : missing"
@@ -1038,7 +1051,7 @@ log "Status"
         [ -f "$HOME/.claude/skills/review/SKILL.md" ]    && ok "review skill  : present"    || err "review skill  : missing"
         [ -f "$HOME/.claude/skills/install/SKILL.md" ]   && ok "install skill : present"    || err "install skill : missing"
         [ -f "$HOME/.claude/skills/resume/SKILL.md" ]    && ok "resume skill  : present"    || err "resume skill  : missing"
-        [ -f "$HOME/.claude/skills/bootstrap/SKILL.md" ] && ok "bootstrap     : present"    || err "bootstrap     : missing"
+        [ -f "$HOME/.claude/skills/setup/SKILL.md" ]     && ok "setup skill   : present"    || err "setup skill   : missing"
         [ -f "$HOME/.claude/skills/autopilot/SKILL.md" ] && ok "autopilot     : present"    || err "autopilot     : missing"
     fi
     [ -d "$HOME/docs/paperflow/audits" ]                      && ok "audits dir    : ready"      || err "audits dir    : missing"
@@ -1051,7 +1064,6 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-continue" ]              && ok "continue laun. : executable" || err "continue laun. : missing"
     [ -x "$HOME/.local/bin/paperflow-validate" ]              && ok "validator     : executable" || err "validator     : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-site" ]            && ok "audit wrapper : executable" || err "audit wrapper : missing"
-    [ -x "$HOME/.local/bin/paperflow-bd-init" ]               && ok "bd-init helper : executable" || err "bd-init helper : missing"
     [ -x "$HOME/.local/bin/paperflow-preflight" ]             && ok "preflight     : executable" || err "preflight     : missing"
     [ -x "$HOME/.local/bin/paperflow-doctor" ]                && ok "doctor        : executable" || err "doctor        : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
@@ -1161,7 +1173,7 @@ warn_running_claude() {
 }
 warn_running_claude
 
-# Write the sentinel marker so the bootstrap skill can detect that a host-side
+# Write the sentinel marker so the setup skill can detect that a host-side
 # install has succeeded at least once. Format:
 #   version=<version>
 #   ts=<iso-8601>

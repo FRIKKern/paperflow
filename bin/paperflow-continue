@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # paperflow-continue — spawn a fresh Claude Code session in a new terminal tab
-# pre-loaded with a mission's resume_prompt. Phase 1: tmux + iTerm + Apple Terminal.
+# pre-loaded with a Goal's (or legacy mission's) resume_prompt.
+# Phase 1: tmux + iTerm + Apple Terminal.
 #
 # Usage:
 #   paperflow-continue <slug>
 #   paperflow-continue --dry-run <slug>
 #
-# Reads ~/docs/paperflow/missions/<slug>.json for the resume_prompt, then
-# opens a new tab/window in the current terminal (or falls back to Apple
+# Sidecar resolution order:
+#   1. ~/docs/paperflow/goals/<slug>/index.json   (Goal — current canonical)
+#   2. ~/docs/paperflow/missions/<slug>.json      (legacy mission archive)
+#
+# Then opens a new tab/window in the current terminal (or falls back to Apple
 # Terminal) running:
 #   cd ~ && claude --dangerously-skip-permissions <resume_prompt>
 
@@ -41,9 +45,16 @@ if [ -z "$SLUG" ]; then
     exit 2
 fi
 
+GOAL_JSON="$HOME/docs/paperflow/goals/${SLUG}/index.json"
 MISSION_JSON="$HOME/docs/paperflow/missions/${SLUG}.json"
-if [ ! -f "$MISSION_JSON" ]; then
-    printf 'Mission JSON not found: %s\n' "$MISSION_JSON" >&2
+SIDECAR=""
+if [ -f "$GOAL_JSON" ]; then
+    SIDECAR="$GOAL_JSON"
+elif [ -f "$MISSION_JSON" ]; then
+    SIDECAR="$MISSION_JSON"
+else
+    printf 'No sidecar found for slug "%s". Looked at:\n  %s\n  %s\n' "$SLUG" "$GOAL_JSON" "$MISSION_JSON" >&2
+    printf 'Run /paperflow:goal snapshot first to write the Goal sidecar.\n' >&2
     exit 1
 fi
 
@@ -52,9 +63,9 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
-RESUME_PROMPT="$(jq -r '.resume_prompt // empty' "$MISSION_JSON")"
+RESUME_PROMPT="$(jq -r '.resume_prompt // empty' "$SIDECAR")"
 if [ -z "$RESUME_PROMPT" ]; then
-    printf 'No resume_prompt found in %s\n' "$MISSION_JSON" >&2
+    printf 'No resume_prompt found in %s\n' "$SIDECAR" >&2
     exit 1
 fi
 
@@ -84,7 +95,7 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
     printf 'paperflow-continue: dry-run\n'
     printf '  slug          : %s\n' "$SLUG"
-    printf '  mission json  : %s\n' "$MISSION_JSON"
+    printf '  sidecar       : %s\n' "$SIDECAR"
     printf '  terminal path : %s\n' "$PATH_TAKEN"
     printf '  command       : %s\n' "$CMD"
     exit 0
