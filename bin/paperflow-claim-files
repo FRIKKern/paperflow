@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# paperflow-claim-files — Beads label-based file ownership for paperflow.
+#
+# Usage:
+#   paperflow-claim-files claim   <task-id> <path> [<path> …]
+#   paperflow-claim-files check   <path> [<path> …]
+#   paperflow-claim-files release <task-id>
+#
+# Adds / queries / removes `file-claim:<path>` labels on Beads tasks so the
+# paperflow orchestrator can detect file conflicts before dispatching a
+# parallel subagent. `check` exits 2 + JSON when conflicts exist.
+
+set -euo pipefail
+
+usage() {
+    cat <<'USAGE' >&2
+paperflow-claim-files claim   <task-id> <path>...
+paperflow-claim-files check   <path>...
+paperflow-claim-files release <task-id>
+USAGE
+    exit 64
+}
+
+cmd="${1:-}"
+[ -z "$cmd" ] && usage
+shift || true
+command -v bd >/dev/null 2>&1 || { echo "bd not found in PATH" >&2; exit 127; }
+command -v jq >/dev/null 2>&1 || { echo "jq not found in PATH" >&2; exit 127; }
+
+case "$cmd" in
+  claim)
+    task="${1:-}"; shift || true
+    [ -z "$task" ] || [ "$#" -eq 0 ] && usage
+    for p in "$@"; do
+        bd update "$task" --add-label "file-claim:${p}" >/dev/null
+    done
+    printf '{"ok":true,"task":"%s","claimed":%s}\n' \
+        "$task" "$(printf '%s\n' "$@" | jq -R . | jq -sc .)"
+    ;;
+  check)
+    [ "$#" -eq 0 ] && usage
+    conflicts="$(
+        for p in "$@"; do
+            bd list --label "file-claim:${p}" --status in_progress --json 2>/dev/null \
+              | jq -c --arg p "$p" '.[] | {task_id: .id, title, file: $p}'
+        done | jq -cs '
+            group_by(.task_id)
+            | map({task_id: .[0].task_id, title: .[0].title, files: (map(.file) | unique)})
+        '
+    )"
+    n="$(printf '%s' "$conflicts" | jq 'length')"
+    if [ "$n" -eq 0 ]; then
+        printf '{"ok":true,"conflicts":[]}\n'
+        exit 0
+    else
+        printf '{"ok":false,"conflicts":%s}\n' "$conflicts"
+        exit 2
+    fi
+    ;;
+  release)
+    task="${1:-}"
+    [ -z "$task" ] && usage
+    labels="$(bd show "$task" --json 2>/dev/null \
+              | jq -r '.labels[]? | select(startswith("file-claim:"))')"
+    if [ -z "$labels" ]; then
+        printf '{"ok":true,"task":"%s","released":[]}\n' "$task"
+        exit 0
+    fi
+    released=()
+    while IFS= read -r lbl; do
+        [ -z "$lbl" ] && continue
+        bd update "$task" --remove-label "$lbl" >/dev/null
+        released+=("$lbl")
+    done <<< "$labels"
+    printf '{"ok":true,"task":"%s","released":%s}\n' \
+        "$task" "$(printf '%s\n' "${released[@]}" | jq -R . | jq -sc .)"
+    ;;
+  *) usage ;;
+esac

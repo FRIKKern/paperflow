@@ -113,6 +113,8 @@ sequenceDiagram
 
 The orchestration is a thin chain over existing skills. Each numbered step below maps to one arrow in the diagram. Autopilot calls each `/paperflow:*` skill the same way Claude resolves any other slash invocation — natural orchestration through the skills surface, not bundled agents and not shell-out.
 
+**Subagent defaults:** autopilot composes the other skills; it inherits whichever named-agent default each delegated skill chooses (`paperflow-doc-writer` from `/paperflow:plan`'s draft, `paperflow-code-editor` from `/paperflow:build`, `paperflow-researcher` from `/paperflow:review`). Autopilot itself dispatches no subagents directly.
+
 1. **Parse args.** Strip flags first, then collect the remainder as the vision string. Required: a non-empty vision after stripping flags. If empty, abort with: `autopilot needs a one-line vision — e.g. /paperflow:autopilot "rewrite onboarding"`. Recognised flag: `--skip-grill` (boolean).
 
 2. **Open the Goal.** Invoke `/paperflow:goal "<vision>"`. The goal skill picks a slug, creates the goal-task + three default phase-tasks, writes both pointer files, renders the Goal HTML. Capture `$GOAL_ID` and the Goal HTML URL. Surface the URL to the user before continuing — they should be able to watch the run in browser.

@@ -207,7 +207,7 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
    paperflow-active-scope --clear
    ```
 
-7. **Render the Goal HTML.** Read the full subtree via `bd show $GOAL_ID --json` + `bd list --label goal-<slug> --json`. Write `~/docs/paperflow/goals/<slug>/index.html` with: ingress (vision + overall progress), one section per phase in order (active phase highlighted, per-phase progress bar), tasks listed under their phase, action bar at the bottom routing through the bridge. The auto-open hook fires on Write and reuses the existing tab via cmux.
+7. **Render the Goal HTML.** Subagent default: `paperflow-doc-writer` for the initial Goal HTML write (>50 lines of new HTML, crosses the prose threshold). Snapshot re-renders that change ≤ 5 lines stay orchestrator-direct (exempt list). Fall back to `general-purpose` only when the task crosses categories. Read the full subtree via `bd show $GOAL_ID --json` + `bd list --label goal-<slug> --json`. Write `~/docs/paperflow/goals/<slug>/index.html` with: ingress (vision + overall progress), one section per phase in order (active phase highlighted, per-phase progress bar), tasks listed under their phase, action bar at the bottom routing through the bridge. The auto-open hook fires on Write and reuses the existing tab via cmux.
 
    **Every paperflow HTML you write MUST include** `<script>window.PAPERFLOW_GOAL_ID = "<goal-id>";</script>` near the existing `window.DOC_PATH` block. The goal-path rail (`lib/goal-path-rail.js`) reads this to know which Goal's events to show. Without it the rail falls back to a server-side `?source=<doc-path>` lookup — slower, and silent on freshly-created docs that don't yet have any events.
 

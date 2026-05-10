@@ -907,6 +907,16 @@ cp "$REPO/bin/paperflow-goal-merge" "$HOME/.local/bin/paperflow-goal-merge"
 chmod +x "$HOME/.local/bin/paperflow-goal-merge"
 ok "installed at ~/.local/bin/paperflow-goal-merge"
 
+# ─── 10i. file-claim helper at ~/.local/bin/paperflow-claim-files ──
+# Adds / queries / removes file-claim:<path> labels on Beads tasks so the
+# paperflow orchestrator can detect file-write conflicts before dispatching
+# a parallel subagent. Used by /paperflow:build (pre-dispatch check) and
+# /paperflow:plan (claim at task-creation time).
+log "Helper: paperflow-claim-files"
+cp "$REPO/bin/paperflow-claim-files" "$HOME/.local/bin/paperflow-claim-files"
+chmod +x "$HOME/.local/bin/paperflow-claim-files"
+ok "installed at ~/.local/bin/paperflow-claim-files"
+
 # ─── 10h. pf wrapper CLI at ~/.local/bin/pf ────────────────────────
 # Phase 1 substrate. Spawns a cmux Claude in cwd via $CMUX_BUNDLED_CLI_PATH
 # and sends /paperflow:goal or /paperflow:autopilot. Utility subcommands
@@ -1163,6 +1173,7 @@ log "Status"
     [ -x "$HOME/.local/bin/paperflow-doc-meta" ]              && ok "doc-meta      : executable" || err "doc-meta      : missing"
     [ -x "$HOME/.local/bin/paperflow-migrate-legacy-goals" ]  && ok "migrate helper : executable" || err "migrate helper : missing"
     [ -x "$HOME/.local/bin/paperflow-goal-merge" ]            && ok "goal-merge    : executable" || err "goal-merge    : missing"
+    [ -x "$HOME/.local/bin/paperflow-claim-files" ]           && ok "claim-files   : executable" || err "claim-files   : missing"
     [ -x "$HOME/.local/bin/pf" ]                              && ok "pf wrapper   : executable" || err "pf wrapper   : missing"
     [ -x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" ] && ok "audit helper  : executable" || err "audit helper  : missing"
     [ -x "$HOME/.local/bin/paperflow-dock-daemon" ]            && ok "dock daemon   : executable" || err "dock daemon   : missing"
