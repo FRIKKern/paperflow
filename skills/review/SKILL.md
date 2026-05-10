@@ -129,7 +129,7 @@ The orchestrator wraps every review activity in a Beads review-task so the audit
    bd dep add <review-task> <review-phase-task>
    ```
 
-3. **Dispatch a subagent.** Brief: the diff (`git diff main...HEAD`), the build-task description, the verification evidence captured at build-close, and the criteria for approval. The subagent reviews and returns `{ verdict: approved | rejected, notes: [...] }`.
+3. **Dispatch a subagent.** Subagent default: `paperflow-researcher` (read-only — cannot accidentally fix while reviewing). Fall back to `general-purpose` only when the task crosses categories. Brief: the diff (`git diff main...HEAD`), the build-task description, the verification evidence captured at build-close, and the criteria for approval. The subagent reviews and returns `{ verdict: approved | rejected, notes: [...] }`.
 
 ### Closing on approval
 

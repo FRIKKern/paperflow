@@ -148,7 +148,7 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
    bd show "$(cat <repo>/.paperflow/active-phase)" --json
    ```
 
-3. **Spawn a subagent** (`subagent_type: general-purpose`) to write the plan. Brief: source spec + goal vision + active phase + the article-style HTML template (eyebrow, H1, byline, ingress, body sections with Mermaid figures + tables, ordered step list with explicit dependency edges between steps). Output path:
+3. **Spawn a subagent.** Subagent default: `paperflow-doc-writer` (read/write/edit only — cannot shell out). Fall back to `general-purpose` only when the task crosses categories. Brief: source spec + goal vision + active phase + the article-style HTML template (eyebrow, H1, byline, ingress, body sections with Mermaid figures + tables, ordered step list with explicit dependency edges between steps). Output path:
 
    ```
    ~/docs/paperflow/plans/<YYYY-MM-DD>-<slug>.html
@@ -158,7 +158,7 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
 
    The subagent returns the URL plus a JSON list of plan steps: `[{ id, title, deps: [step-id…] }]`.
 
-4. **Materialise plan steps as Beads work-tasks.** For each step in the returned list, run:
+4. **Materialise plan steps as Beads work-tasks.** Done by the orchestrator directly (Beads ceremony is exempt from subagent dispatch — see paperflow-thresholds). For each step in the returned list, run:
 
    ```bash
    bd create "<step title>" --label goal-<slug>
@@ -167,11 +167,19 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
 
    Then encode intra-phase order via `bd dep add <child> <parent>` for any step that depends on another step.
 
+   **File-claim labels at creation time.** When the plan step names predicted files (per the file-scope-decomposition discipline below), attach them as `file-claim:<path>` labels on the work-task right away — the build orchestrator's pre-dispatch check will then see them without an extra round trip:
+
+   ```bash
+   ~/.local/bin/paperflow-claim-files claim <work-task-id> <path1> <path2> ...
+   ```
+
+   Plans whose steps don't yet name file scope are fine — `/paperflow:build` will ask the subagent to declare scope at dispatch time and add the labels then.
+
 ### Phase B — Grill (mandatory unless explicitly skipped)
 
 _Section structure adapted from `obra/superpowers/skills/brainstorming` (MIT) — see `THIRD-PARTY-CREDITS.md`._
 
-1. **Spawn a subagent** to read the just-written plan in full and generate 8–15 pointed questions across these categories: architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions. Each question carries a `rationale`, a `recommendation`, a `recommendationReason`, and almost always a Mermaid `diagram`.
+1. **Spawn a subagent.** Subagent default: `paperflow-researcher` for the question-generation pass (read-only — cannot accidentally edit while reviewing). The grill HTML write itself is a `paperflow-doc-writer` dispatch. Fall back to `general-purpose` only when the task crosses categories. The first dispatch reads the just-written plan in full and generates 8–15 pointed questions across these categories: architecture, edge cases, failure modes, observability, scope, security, operations, testing, open decisions. Each question carries a `rationale`, a `recommendation`, a `recommendationReason`, and almost always a Mermaid `diagram`.
 
 2. **Write the grill HTML** to:
 

@@ -195,3 +195,20 @@ paperflow's orchestrator follows a hard subagent-dispatch rule with concrete num
 The single source of truth lives at `lib/shared-thresholds.md` in the paperflow repo. Each non-exempt skill body (`/paperflow:{goal,plan,build,review,install}`) carries an inlined copy refreshed on every `bash install.sh` run between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels.
 
 See the BEGIN/END paperflow-thresholds block in any skill body for the current thresholds, exempt list, and the `Subagent-Run: <task-id>` commit-message convention. `bin/paperflow-audit-orchestrator-budget` flags commits over the 30-LOC gate that lack the trailer.
+
+# Subagents
+
+paperflow ships a tight roster of four named agents in the plugin's `agents/` directory. Each one has a tool palette declared in YAML frontmatter — the runtime physically refuses calls outside its lane. Skills dispatch by named agent instead of `general-purpose` so the wrong tool is unreachable instead of merely discouraged.
+
+| Agent | Tools | Use for |
+|---|---|---|
+| `paperflow-doc-writer` | `Read · Write · Edit · Glob · Grep · WebFetch` | HTML article writes — specs, plans, grills, questionnaires, notes, changelogs, Goal pages. No `Bash` → cannot mutate Beads or shell anything. |
+| `paperflow-code-editor` | `Read · Write · Edit · MultiEdit · Glob · Grep · Bash` | Source-code edits, helper scripts, tests, install.sh changes. Has `Bash` for verification (`bash -n`, `jq empty`, test suites). |
+| `paperflow-researcher` | `Read · Glob · Grep · WebFetch · WebSearch` | Read-only investigation — codebase exploration, web research, code review. No `Write` → cannot accidentally fix while reviewing. |
+| `paperflow-bd-keeper` | `Bash · Read` | Beads-only ceremony — `bd create / claim / close / dep add / list / show`, `file-claim:<path>` label work. No `Write/Edit` → cannot touch source. |
+
+Skills (`/paperflow:plan`, `/paperflow:build`, `/paperflow:review`, `/paperflow:goal`) name the default agent in their dispatch step. Fall back to `general-purpose` only when a single task crosses categories (rare; e.g. a meta-skill that needs both research and source edits in one shot).
+
+# File-claim coordination
+
+`bin/paperflow-claim-files` (installed at `~/.local/bin/paperflow-claim-files`) is the orchestrator's pre-dispatch check. Before sending a writing subagent at files X and Y, run `paperflow-claim-files check X Y` — exit 0 means no overlap with any in-progress task; exit 2 returns JSON listing the conflicting tasks. On clean check, `paperflow-claim-files claim <task-id> X Y` adds `file-claim:<path>` Beads labels to the active task. The discipline lives in `/paperflow:build` and `/paperflow:plan` SKILL bodies.

@@ -76,6 +76,40 @@ Read the JSON from stdout and react by exit code:
 <!-- Step 0.5 (paperflow-doc-meta) is exempt here — `/paperflow:build` claims and verifies tasks, it does not write doc HTMLs directly. -->
 
 
+## File-claim discipline
+
+Before dispatching any subagent that will Write or Edit files, the orchestrator predicts the file scope and registers a Beads claim. This catches the case where two parallel claims would touch overlapping files BEFORE either subagent starts — the OMC research (`~/docs/paperflow/notes/2026-05-10-omc-agent-coordination.html`) §9 Adopt 2 prescription.
+
+**Per-dispatch protocol:**
+
+1. **Predict the file scope.** Read the active task's description. If files aren't named explicitly, the brief to the subagent must instruct it to declare its target files in the first response (and pause if scope expands mid-stream).
+
+2. **Check for conflicts:**
+
+   ```bash
+   ~/.local/bin/paperflow-claim-files check <path1> <path2> ...
+   ```
+
+   Exit 0 (`{"ok":true,"conflicts":[]}`) → no overlap, proceed. Exit 2 → JSON listing in-progress tasks holding overlapping `file-claim:<path>` labels. Abort the dispatch and surface the JSON to the user — they decide whether to wait, re-scope, or proceed knowingly.
+
+3. **Claim the files** on the active work-task:
+
+   ```bash
+   ~/.local/bin/paperflow-claim-files claim "$TASK_ID" <path1> <path2> ...
+   ```
+
+4. **Dispatch the subagent.** Pass the file scope explicitly in the brief.
+
+5. **On subagent return:** the labels are fine to leave for audit (they answer "which task touched which files"). Optional release for cleanliness:
+
+   ```bash
+   ~/.local/bin/paperflow-claim-files release "$TASK_ID"
+   ```
+
+6. **Close the task as usual** via `bd update $TASK_ID --close`.
+
+In sequential mode (the paperflow default) the check will almost always pass — the discipline pays off the day someone runs two `/paperflow:build` instances in parallel against the same repo.
+
 ## When to fire
 
 | Use this skill when | Skip when |
@@ -117,10 +151,11 @@ The loop is small and unforgiving. Each iteration: read the active phase, ask Be
 
    If the claim fails (race with another agent), surface the error and stop. The dependency graph picks again on next invocation.
 
-4. **Dispatch a subagent.** `subagent_type: general-purpose` by default. Brief:
+4. **Dispatch a subagent.** Subagent default: `paperflow-code-editor` for source/script tasks; pick `paperflow-doc-writer` when the task scope is HTML/CSS/Markdown only. Fall back to `general-purpose` only when the task crosses categories (e.g. needs Bash + doc writing in one shot). Brief:
    - The Task ID, title, and full description.
    - The active goal slug + the active phase name.
    - The active branch + worktree path (if `git-worktrees` mode is on).
+   - The predicted file scope (declared before the file-claim check above).
    - The verification gate the subagent must pass before returning.
    - "Return only verified output. Do not summarise."
 

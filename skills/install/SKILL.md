@@ -177,7 +177,7 @@ Beads bootstrap (`bd init`) is deferred to first `/paperflow:goal` in a repo, wh
 
 **The cap is hit at 8** (the six lifecycle skills, the plugin `setup` skill, and the `autopilot` skill). Any new skill PR must remove or merge an existing skill in the same patch — `scripts/check-skill-count.sh` will fail otherwise. Confirm with the user which existing skill the new one displaces before writing.
 
-1. **Spawn a subagent** to draft the SKILL.md. Brief: one-sentence purpose, ≥1 Beads command in body, ≥1 verifiable artifact named, frontmatter `description` with trigger phrases, 60–150 lines.
+1. **Spawn a subagent** to draft the SKILL.md. Subagent default for the install skill stays `general-purpose` — this meta-skill spans research + writing + bd ceremony + bash, so the named-agent palette doesn't fit any single dispatch cleanly. Brief: one-sentence purpose, ≥1 Beads command in body, ≥1 verifiable artifact named, frontmatter `description` with trigger phrases, 60–150 lines.
 2. **Confirm the displacement.** Edit `install.sh` skill loop + status block to swap displaced skill for the new one.
 3. **Run `bash install.sh`** then verify: `find skills -name '*.md' -type f | wc -l` returns exactly 8.
 4. **Open a PR** referencing the displacement.

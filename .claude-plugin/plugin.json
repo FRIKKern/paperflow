@@ -1,6 +1,6 @@
 {
   "name": "paperflow",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Doc-driven Claude Code orchestration — Goals · Phases · Tasks. Specs, plans, and grills as HTML articles you click through.",
   "author": {
     "name": "Frikk Jarl",
