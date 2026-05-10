@@ -4,13 +4,29 @@
 #
 # Prints the cached output the daemon currently serves for <feed-name>. On any
 # transport error we exit 0 and print a diagnostic — `watch` displaying an
-# error is more useful than a blank pane. The 4 known feeds are:
-# active-context · bd-ready · goal-path · auto-open-log.
+# error is more useful than a blank pane. Known feeds:
+# active-context · bd-ready · goal-path · auto-open-log · doctor-status.
+#
+# `doctor-status` is a flat-file feed written by the auto-open-doc.sh hook
+# after every paperflow doc save. It bypasses the daemon — the file IS the
+# cache.
 
 set -eu
-SOCK="${PAPERFLOW_DOCK_SOCK:-$HOME/.paperflow/dock.sock}"
 FEED="${1:?usage: paperflow-dock-feed <feed-name>}"
 
+case "$FEED" in
+  doctor-status)
+    FEED_FILE="$HOME/.paperflow/dock-feeds/doctor-status"
+    if [ -f "$FEED_FILE" ]; then
+      cat "$FEED_FILE"
+    else
+      echo "doctor: not yet probed (save any paperflow doc to populate)"
+    fi
+    exit 0
+    ;;
+esac
+
+SOCK="${PAPERFLOW_DOCK_SOCK:-$HOME/.paperflow/dock.sock}"
 if [ ! -S "$SOCK" ]; then
   echo "paperflow-dock daemon down · run: bash install.sh"
   exit 0

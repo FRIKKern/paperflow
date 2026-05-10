@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# paperflow-goal-merge — fold one Goal into another as a new phase.
+#
+# Usage: paperflow-goal-merge <source-id> <target-id>
+#
+# Both Goals must be open Beads epics (kind:goal). The merge:
+#   1. Creates a new phase-task under <target-id>: "Merged from <src-title>".
+#   2. Adds dep edges from <source>'s existing phase-tasks → the new phase.
+#      (Original deps to <source> are preserved; lineage is additive — Beads
+#      dep removal is not part of paperflow's contract.)
+#   3. Rewrites every ~/docs/paperflow/ HTML whose
+#      window.PAPERFLOW_GOAL_ID equals <source-id> to point at <target-id>.
+#   4. Closes <source-id> with label merged-into-<target-id> and updates its
+#      description with the merge breadcrumb. Reversible at the bd level via
+#      `bd update <source-id> --status open --remove-label merged-into-...`.
+#   5. Emits a kind:event task under <target-id> so the goal-path rail
+#      surfaces the merge.
+#
+# Prints a summary table to stdout. Exits 0 on success, 1 on validation
+# failure, 2 on partial merge (manual cleanup required).
+
+set -eu
+
+usage() {
+  cat >&2 <<EOF
+usage: paperflow-goal-merge <source-id> <target-id>
+
+Folds <source-id> into <target-id> as a new phase. Source is closed with a
+merged-into-<target> label. Reversible at the bd level.
+EOF
+  exit 1
+}
+
+[ $# -eq 2 ] || usage
+SRC="$1"
+TGT="$2"
+[ "$SRC" = "$TGT" ] && { echo "error: source and target are the same id" >&2; exit 1; }
+
+command -v bd >/dev/null 2>&1 || { echo "error: bd not on PATH" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "error: jq not on PATH" >&2; exit 1; }
+
+# Fetch + validate both Goals.
+fetch_goal() {
+  local id="$1" json
+  json="$(bd show "$id" --json 2>/dev/null)" || { echo "error: bd show $id failed (does it exist?)" >&2; exit 1; }
+  # bd show returns either an array or a single object — normalise.
+  local first
+  first="$(printf '%s' "$json" | jq -c 'if type=="array" then .[0] else . end')"
+  [ "$(printf '%s' "$first" | jq -r '.status')" = "open" ] \
+    || { echo "error: $id is not open (status=$(printf '%s' "$first" | jq -r '.status'))" >&2; exit 1; }
+  printf '%s' "$first"
+}
+
+SRC_JSON="$(fetch_goal "$SRC")"
+TGT_JSON="$(fetch_goal "$TGT")"
+
+SRC_TITLE="$(printf '%s' "$SRC_JSON" | jq -r '.title')"
+TGT_TITLE="$(printf '%s' "$TGT_JSON" | jq -r '.title')"
+SRC_DESC="$(printf '%s' "$SRC_JSON"  | jq -r '.description // ""')"
+TGT_SLUG_LBL="$(printf '%s' "$TGT_JSON" | jq -r '.labels[]? | select(startswith("goal-"))' | head -n 1)"
+SRC_SLUG_LBL="$(printf '%s' "$SRC_JSON" | jq -r '.labels[]? | select(startswith("goal-"))' | head -n 1)"
+[ -n "$TGT_SLUG_LBL" ] || { echo "error: target $TGT has no goal-<slug> label" >&2; exit 1; }
+[ -n "$SRC_SLUG_LBL" ] || { echo "error: source $SRC has no goal-<slug> label" >&2; exit 1; }
+
+# 1. Create the merged phase-task under target.
+NEW_PHASE_TITLE="Merged from ${SRC_TITLE} (was ${SRC})"
+MERGE_PHASE_OUT="$(bd create "$NEW_PHASE_TITLE" \
+  --type task \
+  --labels "kind:phase,${TGT_SLUG_LBL},phase-merged-from-${SRC}" \
+  --json 2>/dev/null)" || { echo "error: bd create (merged phase) failed" >&2; exit 2; }
+MERGE_PHASE_ID="$(printf '%s' "$MERGE_PHASE_OUT" | jq -r '.id // empty')"
+[ -n "$MERGE_PHASE_ID" ] || { echo "error: could not parse new phase id from bd create output" >&2; exit 2; }
+bd dep add "$MERGE_PHASE_ID" "$TGT" >/dev/null 2>&1 \
+  || { echo "warn: bd dep add $MERGE_PHASE_ID $TGT failed — continuing" >&2; }
+
+# 2. Re-parent source's phase-tasks under the merged phase.
+SRC_PHASES_JSON="$(bd list --label kind:phase --label "$SRC_SLUG_LBL" --json 2>/dev/null || echo '[]')"
+PHASE_COUNT=0
+for PHASE_ID in $(printf '%s' "$SRC_PHASES_JSON" | jq -r '.[].id // empty'); do
+  bd dep add "$PHASE_ID" "$MERGE_PHASE_ID" >/dev/null 2>&1 \
+    && PHASE_COUNT=$((PHASE_COUNT + 1)) \
+    || echo "warn: dep add $PHASE_ID -> $MERGE_PHASE_ID failed" >&2
+done
+
+# 3. Rewrite docs that point at <source-id>.
+DOC_COUNT=0
+DOC_ROOT="$HOME/docs/paperflow"
+if [ -d "$DOC_ROOT" ]; then
+  # Use grep -l with a permissive pattern (single OR double quote, optional whitespace).
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    /usr/bin/sed -i '' \
+      -e "s|window\.PAPERFLOW_GOAL_ID = \"${SRC}\"|window.PAPERFLOW_GOAL_ID = \"${TGT}\"|g" \
+      -e "s|window\.PAPERFLOW_GOAL_ID = '${SRC}'|window.PAPERFLOW_GOAL_ID = '${TGT}'|g" \
+      "$f" 2>/dev/null && DOC_COUNT=$((DOC_COUNT + 1))
+  done < <(grep -lrE "window\.PAPERFLOW_GOAL_ID[[:space:]]*=[[:space:]]*[\"']${SRC}[\"']" "$DOC_ROOT" 2>/dev/null || true)
+fi
+
+# 4. Close source with breadcrumb. We append, not overwrite, the description.
+TODAY="$(date -u +%Y-%m-%d)"
+NEW_DESC="Merged into ${TGT}: ${TGT_TITLE} on ${TODAY}.
+
+--- original description ---
+${SRC_DESC}"
+bd update "$SRC" \
+  --status closed \
+  --add-label "merged-into-${TGT}" \
+  --description "$NEW_DESC" \
+  >/dev/null 2>&1 \
+  || echo "warn: bd update $SRC (close + label) failed — manual cleanup needed" >&2
+
+# 5. Emit a rail event under target.
+EVENT_TITLE="merged: ${SRC_TITLE} · from ${SRC}"
+EVENT_OUT="$(bd create "$EVENT_TITLE" \
+  --labels "kind:event,${TGT_SLUG_LBL},event:goal-merged,branch:merged-from-${SRC}" \
+  --json 2>/dev/null || echo '')"
+EVENT_ID="$(printf '%s' "$EVENT_OUT" | jq -r '.id // empty' 2>/dev/null || true)"
+if [ -n "$EVENT_ID" ]; then
+  bd dep add "$EVENT_ID" "$TGT" >/dev/null 2>&1 || true
+fi
+
+# 6. Summary.
+cat <<EOF
+
+Merge complete.
+
+  source        : $SRC · $SRC_TITLE
+  target        : $TGT · $TGT_TITLE
+  merged phase  : $MERGE_PHASE_ID  (under target $TGT)
+  phases moved  : $PHASE_COUNT  (from source's phase-tasks)
+  docs rewrote  : $DOC_COUNT  (window.PAPERFLOW_GOAL_ID → $TGT)
+  rail event    : ${EVENT_ID:-<not created>}
+
+Source is now closed with label merged-into-${TGT}. To reverse:
+  bd update $SRC --status open --remove-label merged-into-${TGT}
+  bd update $MERGE_PHASE_ID --status closed
+EOF
