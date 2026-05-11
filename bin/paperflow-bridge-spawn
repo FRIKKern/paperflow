@@ -12,6 +12,13 @@ SPAWN_LOG="$LOG_DIR/bridge-$SID.spawn.log"
 NODE="$(command -v node || ls -d "$HOME"/.nvm/versions/node/v22.*/bin/node 2>/dev/null | sort -V | tail -1)"
 [ -x "$NODE" ] || { printf '{"ok":false,"error":"node-missing"}\n' >&2; exit 1; }
 [ -f "$BRIDGE_JS" ] || { printf '{"ok":false,"error":"bridge-js-missing","path":"%s"}\n' "$BRIDGE_JS" >&2; exit 1; }
+# Propagate cmux env (workspace + surface) into the daemon. claude-bridge.js
+# reads process.env.CMUX_WORKSPACE and .CMUX_SURFACE; without this prefix the
+# daemon records cmux_workspace:null in its jsonl. We translate from the
+# shell-side names (CMUX_WORKSPACE_ID / CMUX_SURFACE_REF) so callers don't
+# need to dual-export.
+CMUX_WORKSPACE="${CMUX_WORKSPACE:-${CMUX_WORKSPACE_ID:-}}" \
+CMUX_SURFACE="${CMUX_SURFACE:-${CMUX_SURFACE_REF:-}}" \
 nohup "$NODE" "$BRIDGE_JS" --owner-pid="$PPID" --session-id="$SID" \
     </dev/null >"$SPAWN_LOG" 2>&1 &
 disown 2>/dev/null || true

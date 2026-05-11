@@ -77,10 +77,12 @@ auto_create_session_goal() {
                         --label phase-review 2>&1 ) | parse_bd_id )"
     [ -n "$phase_id_pf" ] && [ -n "$phase_id_bd" ] && [ -n "$phase_id_rv" ] || return 1
 
-    # Step 4: wire dep edges (phase → goal).
-    ( cd "$repo" && bd dep add "$phase_id_pf" "$goal_id" >/dev/null 2>&1 ) || true
-    ( cd "$repo" && bd dep add "$phase_id_bd" "$goal_id" >/dev/null 2>&1 ) || true
-    ( cd "$repo" && bd dep add "$phase_id_rv" "$goal_id" >/dev/null 2>&1 ) || true
+    # Step 4: attach phases under the goal epic. `bd dep add` rejects
+    # task→epic edges since the epic migration; `bd update --parent`
+    # is the correct command for parent-child relationships with epics.
+    ( cd "$repo" && bd update "$phase_id_pf" --parent "$goal_id" >/dev/null 2>&1 ) || true
+    ( cd "$repo" && bd update "$phase_id_bd" --parent "$goal_id" >/dev/null 2>&1 ) || true
+    ( cd "$repo" && bd update "$phase_id_rv" --parent "$goal_id" >/dev/null 2>&1 ) || true
 
     # Step 5: pointer files (active-phase defaults to pre-flight).
     mkdir -p "$repo/.paperflow" 2>/dev/null

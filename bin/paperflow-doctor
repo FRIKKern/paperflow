@@ -670,6 +670,35 @@ if [ -d "$REPO/skills" ]; then
     fi
 fi
 
+# F6b. pointer-drift: per-repo vs per-scope active-goal can legitimately
+# differ (this repo's last Goal vs this cmux/Claude session's last Goal).
+# Surface as a non-fatal warning when both exist and disagree. No auto-fix
+# — silently picking one can hide real bugs.
+check_pointer_drift() {
+    local repo_root repo_val scope_val
+    repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+    [ -n "$repo_root" ] || return 0
+    [ -r "$repo_root/.paperflow/active-goal" ] || return 0
+    repo_val="$(head -n1 "$repo_root/.paperflow/active-goal" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$repo_val" ] || return 0
+    if command -v paperflow-active-scope >/dev/null 2>&1; then
+        scope_val="$(paperflow-active-scope --read goal 2>/dev/null | tr -d '[:space:]')"
+    elif [ -x "$HOME/.local/bin/paperflow-active-scope" ]; then
+        scope_val="$("$HOME/.local/bin/paperflow-active-scope" --read goal 2>/dev/null | tr -d '[:space:]')"
+    else
+        return 0
+    fi
+    [ -n "$scope_val" ] || return 0
+    if [ "$repo_val" != "$scope_val" ]; then
+        fail; add_issue "pointer-drift" "warning" \
+            "Per-repo pointer (${repo_val}) and per-scope pointer (${scope_val}) disagree — these can legitimately differ if you've worked across repos in this session. Run paperflow-active-scope --write goal ${repo_val} to align if intended." \
+            "paperflow-active-scope --write goal ${repo_val}" false
+    else
+        pass
+    fi
+}
+check_pointer_drift
+
 # F7. write cache
 mkdir -p "$CACHE_DIR" 2>/dev/null
 {

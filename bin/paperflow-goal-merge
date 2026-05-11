@@ -70,8 +70,9 @@ MERGE_PHASE_OUT="$(bd create "$NEW_PHASE_TITLE" \
   --json 2>/dev/null)" || { echo "error: bd create (merged phase) failed" >&2; exit 2; }
 MERGE_PHASE_ID="$(printf '%s' "$MERGE_PHASE_OUT" | jq -r '.id // empty')"
 [ -n "$MERGE_PHASE_ID" ] || { echo "error: could not parse new phase id from bd create output" >&2; exit 2; }
-bd dep add "$MERGE_PHASE_ID" "$TGT" >/dev/null 2>&1 \
-  || { echo "warn: bd dep add $MERGE_PHASE_ID $TGT failed — continuing" >&2; }
+# `bd dep add` rejects task→epic; use --parent for the merged-phase → target-Goal edge.
+bd update "$MERGE_PHASE_ID" --parent "$TGT" >/dev/null 2>&1 \
+  || { echo "warn: bd update $MERGE_PHASE_ID --parent $TGT failed — continuing" >&2; }
 
 # 2. Re-parent source's phase-tasks under the merged phase.
 SRC_PHASES_JSON="$(bd list --label kind:phase --label "$SRC_SLUG_LBL" --json 2>/dev/null || echo '[]')"
@@ -116,7 +117,8 @@ EVENT_OUT="$(bd create "$EVENT_TITLE" \
   --json 2>/dev/null || echo '')"
 EVENT_ID="$(printf '%s' "$EVENT_OUT" | jq -r '.id // empty' 2>/dev/null || true)"
 if [ -n "$EVENT_ID" ]; then
-  bd dep add "$EVENT_ID" "$TGT" >/dev/null 2>&1 || true
+  # task→epic — use --parent.
+  bd update "$EVENT_ID" --parent "$TGT" >/dev/null 2>&1 || true
 fi
 
 # 6. Summary.

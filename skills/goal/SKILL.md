@@ -180,12 +180,12 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
    Capture `$PHASE_PREFLIGHT`, `$PHASE_BUILD`, `$PHASE_REVIEW`.
 
-5. **Wire the dependency edges** — phase-tasks beneath the goal-task:
+5. **Attach phase-tasks under the goal epic** via `--parent`. (`bd dep add` rejects task→epic edges since the Beads epic migration — `--parent` is the correct command.)
 
    ```bash
-   bd dep add $PHASE_PREFLIGHT $GOAL_ID
-   bd dep add $PHASE_BUILD     $GOAL_ID
-   bd dep add $PHASE_REVIEW    $GOAL_ID
+   bd update $PHASE_PREFLIGHT --parent $GOAL_ID
+   bd update $PHASE_BUILD     --parent $GOAL_ID
+   bd update $PHASE_REVIEW    --parent $GOAL_ID
    ```
 
 6. **Write the per-repo pointers** (single-line files):
@@ -302,7 +302,7 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 - `~/docs/paperflow/goals/<slug>/index.html` — the Goal HTML, full Goal → Phase → Task subtree rendered.
 - `<repo>/.paperflow/active-goal` — single-line pointer, Beads goal-task ID.
 - `<repo>/.paperflow/active-phase` — single-line pointer, Beads phase-task ID.
-- A new goal-task plus three phase-tasks in Beads, with three `bd dep add` edges.
+- A new goal-task plus three phase-tasks in Beads, with three `bd update --parent` edges attaching them to the goal epic.
 
 ## Beads commands
 
@@ -312,7 +312,7 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 | `bd create … --type epic --label goal-<slug>` | Create the goal-task (Beads-native epic; drops the old `kind:goal` label). |
 | `bd label add <epic-id> umbrella-<slug>` | Attach a multi-Goal umbrella mid-flight. |
 | `bd create … --label kind:phase --label goal-<slug> --label phase-<name>` | Create a phase-task (×3 by default). |
-| `bd dep add <phase-task> <goal-task>` | Attach phase under goal. |
+| `bd update <phase-task> --parent <goal-task>` | Attach phase-task under goal-epic. |
 | `bd show <goal-task-id> --json` | Read goal metadata for HTML render. |
 | `bd list --label goal-<slug> --json` | Read full subtree for HTML render. |
 | `bd update <goal-task-id> --description "…"` | Edit vision. |

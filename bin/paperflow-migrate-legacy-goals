@@ -107,7 +107,8 @@ for legacy_root in "$PF_DOCS/missions" "$PF_DOCS/goals"; do
                 build)      build_phase_id="$phase_id" ;;
                 review)     review_phase_id="$phase_id" ;;
             esac
-            ( cd "$repo_root" && bd dep add "$phase_id" "$goal_id" >/dev/null 2>&1 )
+            # `bd dep add` rejects task→epic; use --parent for epic relationships.
+            ( cd "$repo_root" && bd update "$phase_id" --parent "$goal_id" >/dev/null 2>&1 )
         done
 
         # Walk legacy tasks[]: each becomes a work-task on the build phase.
