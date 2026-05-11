@@ -1,56 +1,126 @@
 #!/usr/bin/env node
-// claude-bridge: tiny HTTP server that receives POST /build {target, message}
-// from a plan/spec HTML "Build" button and dispatches the message into the
-// originating terminal tab using whatever targeting mechanism that terminal
-// supports (tmux, iTerm AppleScript, Apple Terminal AppleScript, ...).
+// claude-bridge: per-instance HTTP bridge daemon.
 //
-// Foreground for testing:    node claude-bridge.js
-// Logs:                      stdout / stderr
+// One bridge per Claude Code session. Spawns on a dynamic port, owns 4
+// endpoints, registers itself in ~/.paperflow/instances/<session_id>.jsonl,
+// heartbeats every 3s, dies when its owner Claude Code process dies.
 //
-// Endpoints:
+// CLI args (BOTH required, daemon refuses to start without them):
+//   --owner-pid=<pid>      PID of the Claude Code process this bridge serves
+//   --session-id=<id>      Stable session identifier (used for state file name)
+//
+// Optional:
+//   --port-fallback=<n>    Suggested port; ignored (we always bind :0). Kept
+//                          for backwards compatibility with older shims.
+//
+// Endpoints (4 — auxiliaries moved to live-server :8765):
 //   GET  /                       liveness ping
 //   POST /build                  dispatch a message to the originating terminal
-//   POST /marker                 questionnaire-answered sidecar (also fires an
-//                                event:questionnaire-answered when active goal
-//                                is known)
-//   GET  /goal-path?goal=<id>    Goal-path event subtree (paperflow-e5v rail)
-//   GET  /goal-path?source=<rel> Resolve goal_id by latest event with
-//                                source:<rel> label, then return its path
-//   GET  /event/<task-id>        sidecar payload for one event-task
-//   POST /event                  create a kind:event Beads task + sidecar
-//   POST /event/active           write <repo>/.paperflow/active-event-base
-//   GET  /diff?from=<id>&to=<id> bridge-side line-level diff between two events
-//   POST /navigate               swap the live-render-controlled browser tab to
-//                                a different paperflow doc (rail-interactive)
-//   POST /simplify               kick off a leaning-pass + verification job;
-//                                returns {ok, job_id} immediately
-//   GET  /simplify/status?job=   poll a Simplify job; returns {state, …}
-//   POST /simplify/accept        promote a simplified-<n> event to branch:main
-//                                (also overwrites the source HTML on disk)
-//   POST /simplify/reject        close a simplified-<n> event with a reason
+//                                (requires doc_nonce; validates against registry)
+//   POST /marker                 questionnaire-answered sidecar
+//                                (requires doc_nonce; validates against registry)
+//   POST /docs/register          {doc_path, doc_nonce} → appends to JSONL
+//   GET  /docs/:nonce/status     {state, age_ms, banner:{buttons:[...]}}
+//
+// Removed endpoints (return 410 Gone with new_url pointing at :8765):
+//   /event, /event/active, /event/<id>, /goal-path, /diff,
+//   /navigate, /simplify, /simplify/status, /simplify/accept, /simplify/reject
 
 const http = require('http');
 const path = require('path');
 const fs   = require('fs');
-const { execFile, spawn } = require('child_process');
-const crypto = require('crypto');
+const os   = require('os');
+const { execFile } = require('child_process');
 
-const PORT = 8766;
-const HOST = '127.0.0.1';
+// ── CLI arg parsing ─────────────────────────────────────────────────
+function parseArgs(argv) {
+  const out = {};
+  for (const a of argv.slice(2)) {
+    const m = /^--([a-zA-Z0-9_-]+)(?:=(.*))?$/.exec(a);
+    if (!m) continue;
+    out[m[1]] = m[2] === undefined ? true : m[2];
+  }
+  return out;
+}
 
-// Vendored line-level diff. The bridge is the diff engine; the modal is a
-// dumb viewer. See lib/text-diff.js (paperflow-e5v.2.2).
-const textDiff = require(path.join(__dirname, '..', 'lib', 'text-diff.js'));
+const ARGS       = parseArgs(process.argv);
+const OWNER_PID  = parseInt(ARGS['owner-pid'], 10);
+const SESSION_ID = ARGS['session-id'];
 
-// Beads invocations cd into the bridge's own checkout root so they find the
-// .beads/ db deterministically. Cmux spawns the bridge with whatever cwd the
-// terminal happened to have — relying on inheritance is fragile.
-const BD_CWD = path.resolve(__dirname, '..');
+if (!Number.isFinite(OWNER_PID) || OWNER_PID <= 0) {
+  console.error('claude-bridge: --owner-pid=<pid> is required (positive integer)');
+  process.exit(2);
+}
+if (!SESSION_ID || typeof SESSION_ID !== 'string' || /[\/\\.]/.test(SESSION_ID)) {
+  console.error('claude-bridge: --session-id=<id> is required (no slashes or dots)');
+  process.exit(2);
+}
 
-// ── AppleScript string escape (\" and \\) ──────────────────────────
+const HOST           = '127.0.0.1';
+const INSTANCES_DIR  = path.join(os.homedir(), '.paperflow', 'instances');
+const LOGS_DIR       = path.join(os.homedir(), '.paperflow', 'logs');
+const STATE_FILE     = path.join(INSTANCES_DIR, `${SESSION_ID}.jsonl`);
+const LOG_FILE       = path.join(LOGS_DIR, `bridge-${SESSION_ID}.log`);
+const LIVE_BASE_URL  = 'http://localhost:8765/paperflow';
+const HEARTBEAT_MS   = 3000;
+const OWNER_WATCH_MS = 5000;
+const LIVENESS_MAX_MS = 10000;
+
+// Optional cmux surface info inherited from the spawning environment.
+const CMUX_WORKSPACE = process.env.CMUX_WORKSPACE || null;
+const CMUX_SURFACE   = process.env.CMUX_SURFACE   || null;
+
+// In-memory registry of doc_nonces this daemon has registered. JSONL on disk
+// is the source of truth on cold-start (currently the daemon is born empty
+// each spawn, so the memory set is sufficient — the JSONL is for the doctor).
+const REGISTRY = new Map(); // doc_nonce → { doc_path, registered_at }
+
+// ── small helpers ───────────────────────────────────────────────────
+function ensureDir(d) {
+  try { fs.mkdirSync(d, { recursive: true }); } catch (_) { /* */ }
+}
+
+function logLine(msg) {
+  ensureDir(LOGS_DIR);
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch (_) { /* */ }
+}
+
+function appendStateLine(obj) {
+  // Best-effort append. The file was atomically created at startup so a
+  // partial-line race is unlikely; the doctor tolerates malformed lines.
+  try { fs.appendFileSync(STATE_FILE, JSON.stringify(obj) + '\n'); }
+  catch (e) { logLine(`state append failed: ${e.message}`); }
+}
+
+function ownerAlive() {
+  try { process.kill(OWNER_PID, 0); return true; }
+  catch (_) { return false; }
+}
+
+function nonceSafe(n) {
+  return typeof n === 'string' && /^[a-zA-Z0-9_-]+$/.test(n) && n.length <= 128;
+}
+
+function collectBody(req, cb) {
+  let body = '';
+  req.on('data', c => (body += c));
+  req.on('end', () => {
+    let payload;
+    try { payload = body ? JSON.parse(body) : {}; }
+    catch (e) { return cb(e); }
+    cb(null, payload);
+  });
+}
+
+function jsonRes(res, code, body) {
+  res.writeHead(code, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+// ── AppleScript escape + per-target dispatch (carried over) ─────────
 const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-// ── per-target dispatch ─────────────────────────────────────────────
 function viaTmux(pane, message, cb) {
   execFile('tmux', ['send-keys', '-t', pane, message, 'Enter'],
     err => cb(err, err ? null : 'tmux:' + pane));
@@ -70,7 +140,6 @@ function viaITerm(sessionId, message, cb) {
 }
 
 function viaAppleTerminal(tty, message, cb) {
-  // Find the tab whose tty matches, `do script` into it, then bring window + app to front.
   const script = `
     tell application "Terminal"
       repeat with w in windows
@@ -93,18 +162,16 @@ function viaAppleTerminal(tty, message, cb) {
 }
 
 function viaCmux(target, message, cb) {
-  // cmux.app: use the bundled CLI to send text + Enter to a specific surface.
-  // The surface ref is captured at write-time by get-terminal-target.sh.
   const cli = target.cmux_cli || '/Applications/cmux.app/Contents/Resources/bin/cmux';
   const sendArgs = ['send'];
   if (target.cmux_workspace) sendArgs.push('--workspace', target.cmux_workspace);
-  if (target.cmux_surface) sendArgs.push('--surface', target.cmux_surface);
+  if (target.cmux_surface)   sendArgs.push('--surface',   target.cmux_surface);
   sendArgs.push(message);
   execFile(cli, sendArgs, err1 => {
     if (err1) return cb(err1);
     const keyArgs = ['send-key'];
     if (target.cmux_workspace) keyArgs.push('--workspace', target.cmux_workspace);
-    if (target.cmux_surface) keyArgs.push('--surface', target.cmux_surface);
+    if (target.cmux_surface)   keyArgs.push('--surface',   target.cmux_surface);
     keyArgs.push('Return');
     execFile(cli, keyArgs, err2 =>
       cb(err2, err2 ? null : 'cmux:' + (target.cmux_surface || target.cmux_workspace)));
@@ -112,8 +179,6 @@ function viaCmux(target, message, cb) {
 }
 
 function viaActivateAndType(pid, message, cb) {
-  // Generic fallback: bring PID's app to front, then send keystrokes.
-  // ~200ms focus flicker — works for Ghostty/Warp/Alacritty/etc.
   const script = `
     tell application "System Events"
       set frontmost of (first process whose unix id is ${parseInt(pid, 10)}) to true
@@ -147,238 +212,152 @@ function dispatch(target, message, cb) {
   cb(new Error('unsupported target: ' + JSON.stringify(target)));
 }
 
-// ── Goal-path helpers ────────────────────────────────────────────────
-//
-// Sidecar files live at ~/.paperflow/events/<event-task-id>.{html,md,json}.
-// The directory is paperflow-wide (single-user) — same scope as the
-// statusline cache.
-const EVENTS_DIR = path.join(process.env.HOME, '.paperflow', 'events');
-
-function ensureEventsDir() {
-  try { fs.mkdirSync(EVENTS_DIR, { recursive: true }); } catch (_) { /* */ }
-}
-
-// Resolve `goal-<slug>` from a goal-task ID by asking Beads for its labels.
-// `bd show <id> --json` returns an array of issues. The first label that
-// starts with "goal-" wins.
-function resolveGoalSlug(goalId, cb) {
-  execFile('bd', ['show', goalId, '--json'], { maxBuffer: 8 * 1024 * 1024, cwd: BD_CWD },
-    (err, stdout) => {
-      if (err) return cb(err);
-      let arr;
-      try { arr = JSON.parse(stdout); }
-      catch (e) { return cb(new Error('bd show: invalid JSON: ' + e.message)); }
-      if (!Array.isArray(arr) || !arr.length) {
-        return cb(new Error('bd show: no issue: ' + goalId));
-      }
-      const labels = arr[0].labels || [];
-      const slugLabel = labels.find(l => typeof l === 'string' && l.startsWith('goal-'));
-      if (!slugLabel) return cb(new Error('no goal-<slug> label on ' + goalId));
-      cb(null, slugLabel);
-    });
-}
-
-// Resolve a goal-task id from a doc-relative source path. Lists every
-// kind:event whose labels include `source:<rel>`, picks the most recent
-// one (lexicographic created_at sort, last entry wins), then derives
-// the goal-task by stripping the trailing segment from the event-task's
-// hierarchical Beads ID. Events are created with `--parent <goal_id>`
-// (see createEvent), so an event id like `bd-a1b2.7` belongs to goal
-// `bd-a1b2`. Returns null when no matching event exists.
-function resolveGoalIdFromSource(sourceRel, cb) {
-  execFile('bd',
-    ['list', '--label', 'kind:event', '--label', `source:${sourceRel}`, '--json', '--no-default-args'],
-    { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-    (err, stdout) => {
-      const finish = (s) => {
-        let arr = [];
-        try { arr = JSON.parse(s || '[]'); } catch (_) { /* */ }
-        if (!Array.isArray(arr) || !arr.length) return cb(null, null);
-        arr.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-        const latest = arr[arr.length - 1];
-        const id = String(latest.id || '');
-        const parts = id.split('.');
-        if (parts.length < 2) {
-          // Not hierarchical — fall back to the id itself.
-          return cb(null, id || null);
-        }
-        cb(null, parts.slice(0, parts.length - 1).join('.'));
-      };
-      if (err) {
-        return execFile('bd',
-          ['list', '--label', 'kind:event', '--label', `source:${sourceRel}`, '--json'],
-          { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-          (e2, s2) => { if (e2) return cb(e2); finish(s2); });
-      }
-      finish(stdout);
-    });
-}
-
-// Load a sidecar by event-task ID. Tries .html, then .md, then .json.
-function loadSidecar(eventId, cb) {
-  const exts = ['.html', '.md', '.json'];
-  let i = 0;
-  function tryNext() {
-    if (i >= exts.length) return cb(new Error('no sidecar for ' + eventId));
-    const p = path.join(EVENTS_DIR, eventId + exts[i++]);
-    fs.readFile(p, 'utf8', (err, data) => {
-      if (err) return tryNext();
-      cb(null, { ext: exts[i - 1], path: p, content: data });
-    });
-  }
-  tryNext();
-}
-
-// Repo-relative path-traversal guard — same shape as /marker uses for `plan`.
-function safeRelPath(p) {
-  return typeof p === 'string'
-      && !p.includes('..')
-      && !p.startsWith('/');
-}
-
-// Body collect helper.
-function collectBody(req, cb) {
-  let body = '';
-  req.on('data', c => (body += c));
-  req.on('end', () => {
-    let payload;
-    try { payload = body ? JSON.parse(body) : {}; }
-    catch (e) { return cb(e); }
-    cb(null, payload);
-  });
-}
-
-// ── Simplify state (in-memory) ──────────────────────────────────────
-// job_id → {state, event_id?, branch?, reason?, started_at, doc_path, goal_id}
-// Bridge restart abandons in-flight jobs (acceptable for v1 — see plan).
-const SIMPLIFY_JOBS = new Map();
-const SIMPLIFY_FAIL_LOG = path.join(process.env.HOME, '.paperflow', 'simplify-failures.log');
-const SIMPLIFY_BRIEF_LEAN   = path.join(__dirname, '..', 'lib', 'simplify-leaning-pass-brief.md');
-const SIMPLIFY_BRIEF_VERIFY = path.join(__dirname, '..', 'lib', 'simplify-verification-brief.md');
-const SIMPLIFY_VERIFIER     = path.join(__dirname, 'paperflow-simplify-verify');
-const DOCS_ROOT             = path.join(process.env.HOME, 'docs', 'paperflow');
-
-function logSimplifyFailure(entry) {
-  try {
-    fs.mkdirSync(path.dirname(SIMPLIFY_FAIL_LOG), { recursive: true });
-    fs.appendFileSync(SIMPLIFY_FAIL_LOG,
-      JSON.stringify(Object.assign({ ts: new Date().toISOString() }, entry)) + '\n');
-  } catch (_) { /* */ }
-}
-
-// Internal: create a kind:event Beads task + (optional) sidecar. Used by
-// POST /event AND by /marker so questionnaire submits leave an event trail.
-function createEvent(opts, cb) {
-  const { goal_id, event_type, source_doc, parent_event, branch, payload_html } = opts;
-  if (!goal_id || !event_type) {
-    return cb(new Error('createEvent: need {goal_id, event_type}'));
-  }
-  resolveGoalSlug(goal_id, (slugErr, slugLabel) => {
-    if (slugErr) return cb(slugErr);
-    const labels = [
-      'kind:event',
-      slugLabel,
-      `event:${event_type}`,
-      `branch:${branch || 'main'}`
-    ];
-    if (source_doc)   labels.push(`source:${source_doc}`);
-    if (parent_event) labels.push(`parent-event:${parent_event}`);
-    const title = `${event_type}${source_doc ? ' · ' + source_doc : ''}`;
-    const description = `${event_type} for goal ${goal_id} at ${new Date().toISOString()}`
-      + (source_doc ? `\nsource: ${source_doc}` : '')
-      + (parent_event ? `\nparent-event: ${parent_event}` : '');
-    const args = [
-      'create',
-      title,
-      '-d', description,
-      '--parent', goal_id,
-      '-l', labels.join(','),
-      '--no-inherit-labels',
-      '--silent'
-    ];
-    execFile('bd', args, { maxBuffer: 4 * 1024 * 1024, cwd: BD_CWD }, (err, stdout) => {
-      if (err) return cb(err);
-      const eventId = String(stdout || '').trim();
-      if (!eventId) return cb(new Error('bd create: empty id from --silent'));
-      // Optional sidecar.
-      if (payload_html) {
-        ensureEventsDir();
-        const dst = path.join(EVENTS_DIR, eventId + '.html');
-        fs.writeFile(dst, payload_html, w => {
-          if (w) return cb(w);
-          cb(null, { event_id: eventId, sidecar: dst });
-        });
-      } else {
-        cb(null, { event_id: eventId });
-      }
-    });
-  });
+// ── liveness signal (heartbeat) ─────────────────────────────────────
+let lastHeartbeat = Date.now();
+function heartbeat() {
+  const ts = new Date().toISOString();
+  lastHeartbeat = Date.now();
+  // Touch + append: the doctor's age check uses both file mtime and the most
+  // recent heartbeat line, whichever is younger.
+  appendStateLine({ type: 'heartbeat', ts });
+  try { fs.utimesSync(STATE_FILE, new Date(), new Date()); } catch (_) { /* */ }
 }
 
 // ── HTTP server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
-  // CORS for browser access from http://localhost:8765/...
+  // CORS — buttons POST from http://localhost:8765
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  const port = server.address() ? server.address().port : 0;
+  const url = new URL(req.url, `http://${HOST}:${port}`);
 
+  // ── liveness ─────────────────────────────────────────────────────
   if (req.method === 'GET' && url.pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('claude-bridge ok\n');
   }
 
-  if (req.method === 'POST' && url.pathname === '/build') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
+  // ── POST /docs/register ──────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/docs/register') {
+    collectBody(req, (pErr, payload) => {
+      if (pErr) return jsonRes(res, 400, { error: 'invalid JSON' });
+      const { doc_path, doc_nonce } = payload || {};
+      if (!doc_path || typeof doc_path !== 'string') {
+        return jsonRes(res, 400, { error: 'need {doc_path}' });
       }
-      const { target, message } = payload || {};
-      if (!message) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'need {target, message}' }));
+      if (!nonceSafe(doc_nonce)) {
+        return jsonRes(res, 400, { error: 'doc_nonce must be [a-zA-Z0-9_-]{1,128}' });
+      }
+      const registered_at = new Date().toISOString();
+      REGISTRY.set(doc_nonce, { doc_path, registered_at });
+      appendStateLine({ type: 'registration', doc_path, doc_nonce, registered_at });
+      logLine(`register ${doc_nonce} → ${doc_path}`);
+      return jsonRes(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  // ── GET /docs/:nonce/status ──────────────────────────────────────
+  const statusMatch = /^\/docs\/([a-zA-Z0-9_-]+)\/status$/.exec(url.pathname);
+  if (req.method === 'GET' && statusMatch) {
+    const nonce = statusMatch[1];
+    const entry = REGISTRY.get(nonce);
+    const age_ms = Date.now() - lastHeartbeat;
+    if (!entry) {
+      // Port listening but nonce unknown — stale binding (registry was wiped
+      // or daemon restarted without it). Browser should offer rebind+spawn.
+      // If we want strict 404, swap to jsonRes(res, 404, {state: 'unknown'}).
+      return jsonRes(res, 200, {
+        state: 'unknown',
+        age_ms,
+        banner: { buttons: [] }
+      });
+    }
+    if (!ownerAlive()) {
+      return jsonRes(res, 200, {
+        state: 'session-gone',
+        age_ms,
+        banner: { buttons: ['spawn'] }
+      });
+    }
+    if (age_ms > LIVENESS_MAX_MS) {
+      // Heartbeat stalled — same outcome as owner-dead from the browser's POV.
+      return jsonRes(res, 200, {
+        state: 'session-gone',
+        age_ms,
+        banner: { buttons: ['spawn'] }
+      });
+    }
+    return jsonRes(res, 200, {
+      state: 'live',
+      age_ms,
+      banner: { buttons: [] }
+    });
+  }
+
+  // ── POST /build ──────────────────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/build') {
+    collectBody(req, (pErr, payload) => {
+      if (pErr) return jsonRes(res, 400, { error: 'invalid JSON' });
+      const { target, message, doc_nonce } = payload || {};
+      if (!message) return jsonRes(res, 400, { error: 'need {target, message, doc_nonce}' });
+      if (!nonceSafe(doc_nonce)) {
+        return jsonRes(res, 400, { error: 'doc_nonce required' });
+      }
+      if (!REGISTRY.has(doc_nonce)) {
+        return jsonRes(res, 410, {
+          code: 'stale-binding',
+          message: 'doc_nonce not registered with this daemon — rebind needed'
+        });
+      }
+      if (!ownerAlive()) {
+        return jsonRes(res, 410, {
+          code: 'session-gone',
+          message: 'owner Claude Code process is dead — spawn fresh agent'
+        });
       }
       dispatch(target, message, (err, result) => {
-        const ts = new Date().toISOString();
         if (err) {
-          console.error(`[${ts}] dispatch error:`, err.message, '| target:', JSON.stringify(target));
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: err.message }));
+          logLine(`dispatch error: ${err.message} | target: ${JSON.stringify(target)}`);
+          return jsonRes(res, 500, { error: err.message });
         }
-        console.log(`[${ts}] dispatched → ${result} | msg: ${JSON.stringify(message).slice(0, 80)}`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, result }));
+        logLine(`dispatched → ${result} | msg: ${JSON.stringify(message).slice(0, 80)}`);
+        return jsonRes(res, 200, { ok: true, result });
       });
     });
     return;
   }
 
-  // POST /marker — write a small sidecar file so /paperflow:resume can detect
-  // submitted questionnaires. Body: { kind, plan, submitted_at?, goal_id? }.
-  // The marker file is written next to the doc HTML, named
-  // "<plan-stem>-answered.json". `plan` must be a relative path (no '..',
-  // no leading '/') under ~/docs/paperflow/ — anything else is rejected so
-  // the browser can't write outside the docs tree. When goal_id is set, an
-  // event:questionnaire-answered event is also recorded.
+  // ── POST /marker ─────────────────────────────────────────────────
   if (req.method === 'POST' && url.pathname === '/marker') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-      const { kind, plan, submitted_at, goal_id } = payload || {};
+    collectBody(req, (pErr, payload) => {
+      if (pErr) return jsonRes(res, 400, { error: 'invalid JSON' });
+      const { kind, plan, submitted_at, doc_nonce } = payload || {};
       if (!plan || typeof plan !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'need {plan}' }));
+        return jsonRes(res, 400, { error: 'need {plan, doc_nonce}' });
       }
       if (plan.includes('..') || plan.startsWith('/')) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'plan must be a relative path under ~/docs/paperflow/' }));
+        return jsonRes(res, 400, { error: 'plan must be a relative path under ~/docs/paperflow/' });
       }
-      const docsRoot = path.join(process.env.HOME, 'docs', 'paperflow');
+      if (!nonceSafe(doc_nonce)) {
+        return jsonRes(res, 400, { error: 'doc_nonce required' });
+      }
+      if (!REGISTRY.has(doc_nonce)) {
+        return jsonRes(res, 410, {
+          code: 'stale-binding',
+          message: 'doc_nonce not registered with this daemon — rebind needed'
+        });
+      }
+      if (!ownerAlive()) {
+        return jsonRes(res, 410, {
+          code: 'session-gone',
+          message: 'owner Claude Code process is dead — spawn fresh agent'
+        });
+      }
+      const docsRoot = path.join(os.homedir(), 'docs', 'paperflow');
       const stem = plan.replace(/\.html$/, '');
       const candidates = [
         path.join(docsRoot, 'questionnaires', `${stem}-answered.json`),
@@ -389,8 +368,7 @@ const server = http.createServer((req, res) => {
         catch { return false; }
       });
       if (!target) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'no suitable docs/paperflow/{questionnaires,grills}/ dir' }));
+        return jsonRes(res, 400, { error: 'no suitable docs/paperflow/{questionnaires,grills}/ dir' });
       }
       const ts = new Date().toISOString();
       const marker = JSON.stringify({
@@ -399,670 +377,93 @@ const server = http.createServer((req, res) => {
       });
       fs.writeFile(target, marker, err => {
         if (err) {
-          console.error(`[${ts}] marker write error:`, err.message);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: err.message }));
+          logLine(`marker write error: ${err.message}`);
+          return jsonRes(res, 500, { error: err.message });
         }
-        console.log(`[${ts}] marker → ${target}`);
-        // Best-effort event-trail entry. If no goal_id was supplied or Beads
-        // is unhappy, the marker still succeeds — events are auxiliary.
-        const sourceRel = plan.replace(/^\/+/, '');
-        if (goal_id && typeof goal_id === 'string') {
-          createEvent({
-            goal_id,
-            event_type: 'questionnaire-answered',
-            source_doc: 'questionnaires/' + sourceRel
-          }, eErr => {
-            if (eErr) console.warn(`[${ts}] marker event skipped:`, eErr.message);
-          });
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, path: target }));
+        logLine(`marker → ${target}`);
+        return jsonRes(res, 200, { ok: true, path: target });
       });
     });
     return;
   }
 
-  // GET /goal-path?goal=<task-id>  OR  /goal-path?source=<rel-path>
-  // Returns the event subtree for a Goal as JSON, sorted by created-at.
-  // The ?source= form is a fallback used by lib/goal-path-rail.js when the
-  // doc didn't set window.PAPERFLOW_GOAL_ID — it walks Beads for any
-  // kind:event whose `source:<rel>` matches, takes the latest one's parent
-  // (the goal-task) and resolves from there. Path-traversal guarded.
-  if (req.method === 'GET' && url.pathname === '/goal-path') {
-    const goalId = url.searchParams.get('goal');
-    const source = url.searchParams.get('source');
-    if (!goalId && !source) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'need ?goal=<task-id> or ?source=<rel-path>' }));
-    }
-    if (!goalId) {
-      // Resolve the goal_id from the most recent matching source-event.
-      if (!safeRelPath(source)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'source must be a relative path under ~/docs/paperflow/' }));
-      }
-      return resolveGoalIdFromSource(source, (rErr, resolvedGoalId) => {
-        if (rErr) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: rErr.message }));
-        }
-        if (!resolvedGoalId) {
-          // Same shape as a hit with zero events — keeps the rail hidden.
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ ok: true, slug_label: null, events: [] }));
-        }
-        resolveGoalSlug(resolvedGoalId, (slugErr, slugLabel) => {
-          if (slugErr) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: slugErr.message }));
-          }
-          execFile('bd',
-            ['list', '--label', 'kind:event', '--label', slugLabel, '--json', '--no-default-args'],
-            { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-            (lErr, lOut) => {
-              if (lErr) {
-                return execFile('bd',
-                  ['list', '--label', 'kind:event', '--label', slugLabel, '--json'],
-                  { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-                  (l2Err, l2Out) => {
-                    if (l2Err) {
-                      res.writeHead(500, { 'Content-Type': 'application/json' });
-                      return res.end(JSON.stringify({ error: l2Err.message }));
-                    }
-                    respondGoalPath(res, slugLabel, l2Out);
-                  });
-              }
-              respondGoalPath(res, slugLabel, lOut);
-            });
-        });
-      });
-    }
-    resolveGoalSlug(goalId, (slugErr, slugLabel) => {
-      if (slugErr) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: slugErr.message }));
-      }
-      execFile('bd',
-        ['list', '--label', 'kind:event', '--label', slugLabel, '--json', '--no-default-args'],
-        { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-        (err, stdout) => {
-          // --no-default-args is best-effort: bd may not know the flag on
-          // older versions. Retry once without it on EUSAGE-style failure.
-          if (err) {
-            execFile('bd',
-              ['list', '--label', 'kind:event', '--label', slugLabel, '--json'],
-              { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-              (err2, stdout2) => {
-                if (err2) {
-                  res.writeHead(500, { 'Content-Type': 'application/json' });
-                  return res.end(JSON.stringify({ error: err2.message }));
-                }
-                respondGoalPath(res, slugLabel, stdout2);
-              });
-            return;
-          }
-          respondGoalPath(res, slugLabel, stdout);
-        });
+  // ── 410 Gone for the 9 auxiliary endpoints that moved to :8765 ───
+  // Anything matching these prefixes — short-circuit to a structured 410
+  // with a hint at the new live-server URL.
+  const movedPaths = new Set([
+    '/event', '/event/active',
+    '/goal-path', '/diff',
+    '/navigate',
+    '/simplify', '/simplify/status',
+    '/simplify/accept', '/simplify/reject'
+  ]);
+  if (movedPaths.has(url.pathname) || url.pathname.startsWith('/event/')) {
+    return jsonRes(res, 410, {
+      error: 'moved',
+      new_url: `${LIVE_BASE_URL}${url.pathname}`
     });
-    return;
   }
 
-  // POST /navigate — swap the live-render-controlled browser tab to a
-  // different paperflow doc. Body: {path: "<rel-under-/paperflow/>"}.
-  // Mirrors hooks/auto-open-doc.sh: shells out to macOS `/usr/bin/open <url>`,
-  // which (a) refocuses an existing tab without duplicating it, and (b) on
-  // cmux invokes the URL handler whose tab-reuse contract returns
-  // "OK surface=N placement=reuse|new". Live-render handles the in-page
-  // content swap separately. Path validation is a strict whitelist —
-  // only relative HTML docs under /paperflow/ are permitted, so the
-  // browser can't be steered at off-doc URLs.
-  if (req.method === 'POST' && url.pathname === '/navigate') {
-    collectBody(req, (parseErr, payload) => {
-      const json = (code, body) => {
-        res.writeHead(code, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(body));
-      };
-      if (parseErr) return json(400, { ok: false, error: 'invalid JSON' });
-      const { path: relPath } = payload || {};
-      if (typeof relPath !== 'string') {
-        return json(400, { ok: false, error: 'path must be a string' });
-      }
-      if (relPath.includes('..')) {
-        return json(400, { ok: false, error: 'path must not contain ".."' });
-      }
-      if (relPath.startsWith('/')) {
-        return json(400, { ok: false, error: 'path must be relative (no leading "/")' });
-      }
-      if (/^https?:\/\//i.test(relPath)) {
-        return json(400, { ok: false, error: 'path must not be absolute URL' });
-      }
-      if (!/^[a-zA-Z0-9_./-]+\.html$/.test(relPath)) {
-        return json(400, { ok: false, error: 'path must match [a-zA-Z0-9_./-]+\\.html' });
-      }
-      const fullUrl = `http://localhost:8765/paperflow/${relPath}`;
-      // /usr/bin/open hits cmux's URL handler when run inside cmux.app
-      // (tab-reuse contract); on plain macOS it focuses the existing tab
-      // in the default browser. Either way the live-render hot-reload
-      // swaps content if the URL is already open.
-      execFile('/usr/bin/open', [fullUrl], { timeout: 2000 }, (err, stdout, stderr) => {
-        const ts = new Date().toISOString();
-        if (err) {
-          console.error(`[${ts}] navigate error:`, err.message, '| url:', fullUrl);
-          return json(500, {
-            ok: false,
-            error: err.message,
-            stderr: String(stderr || '').slice(0, 400)
-          });
-        }
-        console.log(`[${ts}] navigate → ${fullUrl} | ${String(stdout || '').trim().slice(0, 120)}`);
-        json(200, { ok: true, target: 'open', url: fullUrl });
-      });
-    });
-    return;
-  }
-
-  // GET /event/<task-id>
-  if (req.method === 'GET' && url.pathname.startsWith('/event/')) {
-    const eventId = decodeURIComponent(url.pathname.slice('/event/'.length));
-    if (!eventId || eventId.includes('/') || eventId.includes('..')) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'bad event id' }));
-    }
-    loadSidecar(eventId, (err, side) => {
-      if (err) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: err.message }));
-      }
-      const ct = side.ext === '.html' ? 'text/html'
-               : side.ext === '.json' ? 'application/json'
-               :                        'text/markdown';
-      res.writeHead(200, { 'Content-Type': ct + '; charset=utf-8' });
-      res.end(side.content);
-    });
-    return;
-  }
-
-  // POST /event — create a new event-task + optional sidecar.
-  // Body: {goal_id, event_type, source_doc?, parent_event?, branch?, payload_html?}
-  if (req.method === 'POST' && url.pathname === '/event') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-      const { goal_id, event_type } = payload || {};
-      if (!goal_id || !event_type) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'need {goal_id, event_type}' }));
-      }
-      createEvent(payload, (err, result) => {
-        const ts = new Date().toISOString();
-        if (err) {
-          console.error(`[${ts}] event error:`, err.message);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: err.message }));
-        }
-        console.log(`[${ts}] event → ${result.event_id} (${event_type})`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, ...result }));
-      });
-    });
-    return;
-  }
-
-  // POST /event/active — write <repo>/.paperflow/active-event-base.
-  // Body: {repo_path, event_id}. Path-traversal guarded: repo_path must
-  // be absolute and contain a .paperflow dir; event_id is a flat token.
-  if (req.method === 'POST' && url.pathname === '/event/active') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-      const { repo_path, event_id } = payload || {};
-      if (!repo_path || typeof repo_path !== 'string'
-          || !repo_path.startsWith('/')
-          || repo_path.includes('..')) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'bad repo_path' }));
-      }
-      if (typeof event_id !== 'string'
-          || event_id.includes('/')
-          || event_id.includes('..')) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'bad event_id' }));
-      }
-      const dir = path.join(repo_path, '.paperflow');
-      try {
-        if (!fs.statSync(dir).isDirectory()) throw new Error('not a directory');
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'no .paperflow dir at ' + dir }));
-      }
-      const dst = path.join(dir, 'active-event-base');
-      fs.writeFile(dst, event_id + '\n', err => {
-        if (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: err.message }));
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, path: dst }));
-      });
-    });
-    return;
-  }
-
-  // GET /diff?from=<id>&to=<id> — line-level diff between two sidecars.
-  if (req.method === 'GET' && url.pathname === '/diff') {
-    const fromId = url.searchParams.get('from');
-    const toId   = url.searchParams.get('to');
-    if (!fromId || !toId) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'need ?from=&to=' }));
-    }
-    if ([fromId, toId].some(id => id.includes('/') || id.includes('..'))) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'bad id' }));
-    }
-    loadSidecar(fromId, (e1, s1) => {
-      if (e1) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'from: ' + e1.message }));
-      }
-      loadSidecar(toId, (e2, s2) => {
-        if (e2) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: 'to: ' + e2.message }));
-        }
-        const chunks = textDiff.diff(s1.content, s2.content);
-        const html = textDiff.formatDiffHtml(chunks);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, from: fromId, to: toId, diffHtml: html }));
-      });
-    });
-    return;
-  }
-
-  // POST /simplify — body: {doc_path, goal_id}. Spawns a leaning-pass + verify
-  // pipeline asynchronously, returns {ok, job_id} immediately.
-  if (req.method === 'POST' && url.pathname === '/simplify') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-      const { doc_path, goal_id } = payload || {};
-      if (!doc_path || !goal_id) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'need {doc_path, goal_id}' }));
-      }
-      if (!safeRelPath(doc_path)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'doc_path must be relative under ~/docs/paperflow/' }));
-      }
-      const job_id = crypto.randomBytes(6).toString('hex');
-      SIMPLIFY_JOBS.set(job_id, {
-        state: 'running', started_at: new Date().toISOString(),
-        doc_path, goal_id
-      });
-      // Fire-and-forget. The pipeline writes back to SIMPLIFY_JOBS.
-      runSimplifyPipeline(job_id, doc_path, goal_id);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, job_id }));
-    });
-    return;
-  }
-
-  // GET /simplify/status?job=<id>
-  if (req.method === 'GET' && url.pathname === '/simplify/status') {
-    const job = url.searchParams.get('job');
-    if (!job || !SIMPLIFY_JOBS.has(job)) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'unknown job' }));
-    }
-    const j = SIMPLIFY_JOBS.get(job);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(j));
-  }
-
-  // POST /simplify/accept — body: {simplified_event_id}.
-  // Reads the simplified payload, overwrites the source HTML on disk,
-  // relabels the event branch from simplified-<n> to main.
-  if (req.method === 'POST' && url.pathname === '/simplify/accept') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-      const { simplified_event_id } = payload || {};
-      if (!simplified_event_id || typeof simplified_event_id !== 'string'
-          || simplified_event_id.includes('/') || simplified_event_id.includes('..')) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'bad simplified_event_id' }));
-      }
-      acceptSimplified(simplified_event_id, (err, info) => {
-        if (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: err.message }));
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, ...info }));
-      });
-    });
-    return;
-  }
-
-  // POST /simplify/reject — body: {simplified_event_id, reason?}. Closes the
-  // event-task via bd close.
-  if (req.method === 'POST' && url.pathname === '/simplify/reject') {
-    collectBody(req, (parseErr, payload) => {
-      if (parseErr) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'invalid JSON' }));
-      }
-      const { simplified_event_id, reason } = payload || {};
-      if (!simplified_event_id || typeof simplified_event_id !== 'string'
-          || simplified_event_id.includes('/') || simplified_event_id.includes('..')) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: 'bad simplified_event_id' }));
-      }
-      const args = ['close', simplified_event_id];
-      if (reason) args.push('--reason', String(reason).slice(0, 280));
-      execFile('bd', args, { cwd: BD_CWD }, (err) => {
-        if (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: err.message }));
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, closed: simplified_event_id }));
-      });
-    });
-    return;
-  }
-
+  // ── unknown ──────────────────────────────────────────────────────
   res.writeHead(404); res.end();
 });
 
-// ── Simplify pipeline ─────────────────────────────────────────────────
-function setJob(jobId, patch) {
-  const cur = SIMPLIFY_JOBS.get(jobId) || {};
-  SIMPLIFY_JOBS.set(jobId, Object.assign(cur, patch));
-}
+// ── startup: bind dynamic port, write state file atomically ─────────
+ensureDir(INSTANCES_DIR);
 
-// Read the prior leaning-pass briefs from disk once at boot. We re-read on
-// every job so authors can iterate the brief without restarting the bridge.
-function readBrief(p) {
-  try { return fs.readFileSync(p, 'utf8'); } catch (_) { return ''; }
-}
+server.listen(0, HOST, () => {
+  const port = server.address().port;
 
-// Spawn `claude --print` with stdin = brief + payload. cb(err, stdout).
-function runClaudePrint(stdinPayload, cb) {
-  let claudeBin;
+  // Atomic state-file create: write to tmp + rename. Open with 'wx' so the
+  // file MUST be new — a stale file from a crashed previous instance with
+  // the same session_id would otherwise let two daemons race.
+  const tmp = STATE_FILE + '.tmp-' + process.pid;
+  const session = {
+    type: 'session',
+    session_id: SESSION_ID,
+    port,
+    owner_pid: OWNER_PID,
+    cmux_workspace: CMUX_WORKSPACE,
+    cmux_surface: CMUX_SURFACE,
+    started_at: new Date().toISOString(),
+    pid: process.pid
+  };
   try {
-    claudeBin = require('child_process').execSync('command -v claude', { encoding: 'utf8' }).trim();
-  } catch (_) { claudeBin = 'claude'; }
-  const proc = spawn(claudeBin, ['--print', '--dangerously-skip-permissions'], {
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
-  let out = '', err = '';
-  proc.stdout.on('data', d => { out += d; });
-  proc.stderr.on('data', d => { err += d; });
-  proc.on('error', e => cb(e));
-  proc.on('close', code => {
-    if (code !== 0) return cb(new Error(`claude --print exited ${code}: ${err.slice(0, 400)}`));
-    cb(null, out);
-  });
-  proc.stdin.write(stdinPayload);
-  proc.stdin.end();
-}
-
-// Pick the next simplified-N branch number. Scans existing events for this
-// goal+source_doc and looks for branch:simplified-* labels.
-function nextSimplifiedBranch(goal_id, source_doc, cb) {
-  resolveGoalSlug(goal_id, (slugErr, slugLabel) => {
-    if (slugErr) return cb(slugErr);
-    execFile('bd',
-      ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json', '--no-default-args'],
-      { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-      (err, stdout) => {
-        const tryFallback = err
-          ? cb2 => execFile('bd',
-              ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json'],
-              { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD }, cb2)
-          : cb2 => cb2(null, stdout);
-        tryFallback((e2, s2) => {
-          if (e2) return cb(e2);
-          let arr = [];
-          try { arr = JSON.parse(s2 || '[]'); } catch (_) { /* */ }
-          let max = 0;
-          for (const it of (Array.isArray(arr) ? arr : [])) {
-            for (const l of (it.labels || [])) {
-              const m = /^branch:simplified-(\d+)$/.exec(l);
-              if (m) max = Math.max(max, parseInt(m[1], 10));
-            }
-          }
-          cb(null, max + 1, slugLabel);
-        });
-      });
-  });
-}
-
-// Find the most recent event-task on the source doc's goal-path lineage.
-// Returns the event-task ID (or null when none — fall back to the goal-task).
-function findLatestSourceEvent(goal_id, source_doc, cb) {
-  resolveGoalSlug(goal_id, (slugErr, slugLabel) => {
-    if (slugErr) return cb(slugErr);
-    execFile('bd',
-      ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json', '--no-default-args'],
-      { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-      (err, stdout) => {
-        const finish = (s) => {
-          let arr = [];
-          try { arr = JSON.parse(s || '[]'); } catch (_) { /* */ }
-          if (!Array.isArray(arr) || !arr.length) return cb(null, null);
-          arr.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-          cb(null, arr[arr.length - 1].id);
-        };
-        if (err) {
-          execFile('bd',
-            ['list', '--label', 'kind:event', '--label', slugLabel, '--label', `source:${source_doc}`, '--json'],
-            { maxBuffer: 16 * 1024 * 1024, cwd: BD_CWD },
-            (e2, s2) => { if (e2) return cb(e2); finish(s2); });
-          return;
-        }
-        finish(stdout);
-      });
-  });
-}
-
-function runSimplifyPipeline(jobId, doc_path, goal_id) {
-  const ts = () => new Date().toISOString();
-  const docAbs = path.join(DOCS_ROOT, doc_path);
-  let originalHtml;
-  try { originalHtml = fs.readFileSync(docAbs, 'utf8'); }
-  catch (e) {
-    setJob(jobId, { state: 'failed', reason: `cannot read source doc: ${e.message}` });
-    logSimplifyFailure({ job: jobId, doc_path, reason: 'read', error: e.message });
-    return;
+    fs.writeFileSync(tmp, JSON.stringify(session) + '\n', { flag: 'wx' });
+    fs.renameSync(tmp, STATE_FILE);
+  } catch (e) {
+    console.error(`claude-bridge: cannot write state file ${STATE_FILE}: ${e.message}`);
+    try { fs.unlinkSync(tmp); } catch (_) { /* */ }
+    process.exit(3);
   }
 
-  // 1. Run the leaning-pass subagent.
-  const leanBrief = readBrief(SIMPLIFY_BRIEF_LEAN);
-  if (!leanBrief) {
-    setJob(jobId, { state: 'failed', reason: 'leaning-pass brief missing' });
-    return;
-  }
-  console.log(`[${ts()}] simplify ${jobId} → leaning-pass starting (${doc_path})`);
-  runClaudePrint(leanBrief + originalHtml, (err, candidate) => {
-    if (err) {
-      setJob(jobId, { state: 'failed', reason: `leaning-pass: ${err.message}` });
-      logSimplifyFailure({ job: jobId, doc_path, reason: 'leaning-pass', error: err.message });
-      return;
+  logLine(`listening port=${port} session=${SESSION_ID} owner_pid=${OWNER_PID}`);
+  console.log(`claude-bridge listening on http://${HOST}:${port} (session=${SESSION_ID}, owner_pid=${OWNER_PID})`);
+
+  // Schedule heartbeat + owner-watch. setInterval refs keep the loop alive,
+  // which is exactly what we want — bridge runs until SIGTERM or owner death.
+  setInterval(heartbeat, HEARTBEAT_MS);
+  setInterval(() => {
+    if (!ownerAlive()) {
+      logLine(`owner pid ${OWNER_PID} is gone; self-SIGTERM`);
+      // Raise SIGTERM on ourselves so the orderly-shutdown handler runs once.
+      try { process.kill(process.pid, 'SIGTERM'); } catch (_) { process.exit(0); }
     }
-    candidate = String(candidate || '').trim();
-    if (!candidate || candidate.length < 100) {
-      setJob(jobId, { state: 'failed', reason: 'leaning-pass returned empty/tiny output' });
-      logSimplifyFailure({ job: jobId, doc_path, reason: 'lean-empty', size: candidate.length });
-      return;
-    }
-
-    // 2. Structural verifier — write to a tmp file pair, exec the verifier.
-    const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'pf-simplify-'));
-    const origTmp = path.join(tmpDir, 'orig.html');
-    const candTmp = path.join(tmpDir, 'cand.html');
-    fs.writeFileSync(origTmp, originalHtml);
-    fs.writeFileSync(candTmp, candidate);
-    execFile(SIMPLIFY_VERIFIER, [origTmp, candTmp], { maxBuffer: 4 * 1024 * 1024 }, (vErr, vOut) => {
-      if (vErr) {
-        setJob(jobId, { state: 'failed', reason: `verifier: ${vErr.message}` });
-        logSimplifyFailure({ job: jobId, doc_path, reason: 'verifier-exec', error: vErr.message });
-        return;
-      }
-      let v;
-      try { v = JSON.parse(vOut); }
-      catch (e) {
-        setJob(jobId, { state: 'failed', reason: 'verifier: invalid JSON' });
-        logSimplifyFailure({ job: jobId, doc_path, reason: 'verifier-json', error: e.message });
-        return;
-      }
-      if (!v.ok) {
-        const failNames = (v.checks || []).filter(c => !c.passed).map(c => c.name).join(',');
-        setJob(jobId, { state: 'failed', reason: `structural-fail: ${failNames}` });
-        logSimplifyFailure({ job: jobId, doc_path, reason: 'structural', checks: v.checks });
-        return;
-      }
-
-      // 3. Verification subagent.
-      const verBrief = readBrief(SIMPLIFY_BRIEF_VERIFY);
-      const verPayload = verBrief
-        + '\nORIGINAL:\n' + originalHtml
-        + '\n---\nCANDIDATE:\n' + candidate
-        + '\n---\n';
-      console.log(`[${ts()}] simplify ${jobId} → verification subagent`);
-      runClaudePrint(verPayload, (e2, vsOut) => {
-        if (e2) {
-          setJob(jobId, { state: 'failed', reason: `verification-subagent: ${e2.message}` });
-          logSimplifyFailure({ job: jobId, doc_path, reason: 'verification-subagent', error: e2.message });
-          return;
-        }
-        const verdict = String(vsOut || '').trim().split('\n').find(Boolean) || '';
-        if (!/^PASS\b/i.test(verdict)) {
-          setJob(jobId, { state: 'failed', reason: `verification-fail: ${verdict.slice(0, 200)}` });
-          logSimplifyFailure({ job: jobId, doc_path, reason: 'verification', verdict });
-          return;
-        }
-
-        // 4. Branch counter + parent-event resolution.
-        nextSimplifiedBranch(goal_id, doc_path, (bErr, n /*, slugLabel */) => {
-          if (bErr) {
-            setJob(jobId, { state: 'failed', reason: `branch-counter: ${bErr.message}` });
-            logSimplifyFailure({ job: jobId, doc_path, reason: 'branch-counter', error: bErr.message });
-            return;
-          }
-          findLatestSourceEvent(goal_id, doc_path, (lErr, parentEventId) => {
-            // Non-fatal — when no prior event exists, omit parent-event.
-            const branch = `simplified-${n}`;
-            createEvent({
-              goal_id,
-              event_type: 'plan-simplified',
-              source_doc: doc_path,
-              parent_event: parentEventId || undefined,
-              branch,
-              payload_html: candidate
-            }, (cErr, result) => {
-              if (cErr) {
-                setJob(jobId, { state: 'failed', reason: `event-create: ${cErr.message}` });
-                logSimplifyFailure({ job: jobId, doc_path, reason: 'event-create', error: cErr.message });
-                return;
-              }
-              setJob(jobId, {
-                state: 'done', event_id: result.event_id, branch,
-                verdict: verdict.slice(0, 200)
-              });
-              console.log(`[${ts()}] simplify ${jobId} → done (${result.event_id} ${branch})`);
-            });
-          });
-        });
-      });
-    });
-  });
-}
-
-// Accept a simplified-<n> event: read its sidecar, write to source doc,
-// relabel the Beads task's branch from simplified-<n> to main.
-function acceptSimplified(eventId, cb) {
-  loadSidecar(eventId, (sErr, side) => {
-    if (sErr) return cb(sErr);
-    if (side.ext !== '.html') return cb(new Error('sidecar is not HTML: ' + side.ext));
-    execFile('bd', ['show', eventId, '--json'], { maxBuffer: 4 * 1024 * 1024, cwd: BD_CWD },
-      (eErr, eOut) => {
-        if (eErr) return cb(eErr);
-        let arr;
-        try { arr = JSON.parse(eOut); } catch (e) { return cb(e); }
-        if (!Array.isArray(arr) || !arr.length) return cb(new Error('no event-task ' + eventId));
-        const labels = arr[0].labels || [];
-        const sourceLabel = labels.find(l => typeof l === 'string' && l.startsWith('source:'));
-        if (!sourceLabel) return cb(new Error('event has no source: label'));
-        const sourceRel = sourceLabel.slice('source:'.length);
-        if (!safeRelPath(sourceRel)) return cb(new Error('unsafe source rel-path'));
-        const dst = path.join(DOCS_ROOT, sourceRel);
-        fs.writeFile(dst, side.content, wErr => {
-          if (wErr) return cb(wErr);
-          // Relabel branch:simplified-<n> → branch:main.
-          const branchLabel = labels.find(l => typeof l === 'string' && /^branch:simplified-/.test(l));
-          if (!branchLabel) return cb(null, { source_doc: sourceRel, written: dst, relabeled: false });
-          execFile('bd',
-            ['update', eventId, '--remove-label', branchLabel, '--add-label', 'branch:main'],
-            { cwd: BD_CWD },
-            (uErr) => {
-              // Older Beads may not support --remove-label / --add-label;
-              // fall through quietly — the source HTML write is the load-bearing
-              // piece, the relabel is a nicety.
-              if (uErr) {
-                return cb(null, { source_doc: sourceRel, written: dst, relabeled: false, relabel_error: uErr.message });
-              }
-              cb(null, { source_doc: sourceRel, written: dst, relabeled: true });
-            });
-        });
-      });
-  });
-}
-
-// Format the goal-path response: parse `bd list --json`, normalise events
-// into a chronological array with branch + parent-event fields hoisted out
-// of the labels for client convenience.
-function respondGoalPath(res, slugLabel, stdout) {
-  let arr;
-  try { arr = JSON.parse(stdout || '[]'); }
-  catch (e) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ error: 'bd list: invalid JSON: ' + e.message }));
-  }
-  const events = (Array.isArray(arr) ? arr : [])
-    .filter(it => Array.isArray(it.labels) && it.labels.includes('kind:event'))
-    .map(it => {
-      const ls = it.labels || [];
-      const findPrefix = pre => {
-        const l = ls.find(x => typeof x === 'string' && x.startsWith(pre));
-        return l ? l.slice(pre.length) : null;
-      };
-      return {
-        id: it.id,
-        title: it.title,
-        created_at: it.created_at,
-        event_type: findPrefix('event:'),
-        branch: findPrefix('branch:') || 'main',
-        parent_event: findPrefix('parent-event:'),
-        source_doc: findPrefix('source:'),
-        labels: ls
-      };
-    })
-    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, slug_label: slugLabel, events }));
-}
-
-server.listen(PORT, HOST, () => {
-  console.log(`claude-bridge listening on http://${HOST}:${PORT}`);
+  }, OWNER_WATCH_MS);
 });
+
+// ── orderly shutdown ────────────────────────────────────────────────
+let shuttingDown = false;
+function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const ts = new Date().toISOString();
+  appendStateLine({ type: 'orphan', ts, reason });
+  logLine(`shutdown reason=${reason}`);
+  try { server.close(() => process.exit(0)); } catch (_) { process.exit(0); }
+  // Hard exit fallback if server.close drags.
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+
+process.on('SIGTERM', () => shutdown('sigterm'));
+process.on('SIGINT',  () => shutdown('sigint'));
