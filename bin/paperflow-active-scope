@@ -38,8 +38,27 @@ Examples:
 EOF
 }
 
-# Try cmux first (500ms timeout), then $CLAUDE_SESSION_ID, then unscoped.
+# Detect the current paperflow scope. Order of precedence:
+#   1. $CMUX_WORKSPACE_ID (+ optional $CMUX_SURFACE_REF) — exported by
+#      cmux at shell spawn, stable per-session. Preferred.
+#   2. cmux identify CLI — focused-workspace query, may drift between
+#      calls if user changes focus. Fallback when env not set.
+#   3. $CLAUDE_SESSION_ID — fallback when not running under cmux.
+#   4. "unscoped" — single-machine, single-user mode.
 _detect_scope() {
+  # Preferred path: env vars set at shell spawn are stable per-session.
+  # `cmux identify` queries currently-focused workspace, which can drift
+  # between consecutive calls if the user changes focus.
+  if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    local ws_safe="${CMUX_WORKSPACE_ID//[\/:.]/-}"
+    if [ -n "${CMUX_SURFACE_REF:-}" ]; then
+      local sf_safe="${CMUX_SURFACE_REF//[\/:.]/-}"
+      printf 'cmux-%s-%s' "$ws_safe" "$sf_safe"
+    else
+      printf 'cmux-%s' "$ws_safe"
+    fi
+    return 0
+  fi
   local cmux="/Applications/cmux.app/Contents/Resources/bin/cmux"
   if [ -x "$cmux" ] || command -v cmux >/dev/null 2>&1; then
     [ -x "$cmux" ] || cmux="$(command -v cmux)"
@@ -182,6 +201,36 @@ cmd_migrate_legacy() {
     echo "Migrated ${scope}: goal=${g} phase=${p}"
   else
     echo "Nothing to migrate"
+  fi
+
+  # Scan for orphan cmux-style pointers from the old cmux-identify code
+  # path (e.g. active-goal-cmux-workspace-3). Those are pre-2026-05 file
+  # names that don't match the current UUID-shape scope. We never auto-
+  # migrate them — the mapping from friendly name to UUID isn't knowable
+  # — but we surface them so the user can rename or delete manually.
+  local orphans=""
+  local f base suffix hyphens
+  for f in "$PF_DIR"/active-goal-cmux-* "$PF_DIR"/active-phase-cmux-*; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    case "$base" in
+      active-goal-*)  suffix="${base#active-goal-}"  ;;
+      active-phase-*) suffix="${base#active-phase-}" ;;
+      *) continue ;;
+    esac
+    [ "$suffix" = "$scope" ] && continue
+    # UUID-shape scopes have 4 hyphens in the cmux-<UUID> portion.
+    # Anything with fewer is old-shape (cmux-workspace-N etc.).
+    hyphens="$(printf '%s' "$suffix" | tr -cd '-' | wc -c | tr -d ' ')"
+    if [ "$hyphens" -lt 4 ]; then
+      orphans="$orphans  $base ($(head -n1 "$f" 2>/dev/null | tr -d '[:space:]'))
+"
+    fi
+  done
+  if [ -n "$orphans" ]; then
+    printf '\nOrphan cmux-style pointers (old cmux-identify code path, harmless):\n%s' "$orphans"
+    echo "  To migrate one: paperflow-active-scope --write goal <id> (writes to current scope)."
+    echo "  To delete:      rm \$HOME/.paperflow/active-{goal,phase}-cmux-<old-name>"
   fi
 }
 

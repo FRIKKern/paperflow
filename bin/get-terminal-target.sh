@@ -24,46 +24,87 @@
 #                               cmux_cli, cmux_workspace, cmux_surface, tty,
 #                               term_session_id, tmux_pane, pid) — kept for
 #                               docs predating the per-instance migration.
-#   PAPERFLOW_SKIP_REGISTER=1   skip the POST /docs/register handshake (used
-#                               by smoke-tests and the doctor; not a normal
-#                               code path).
+#   PAPERFLOW_SKIP_REGISTER=1   skip the POST /docs/register handshake. Used
+#                               by the doctor to inspect a live daemon without
+#                               side-effects on the nonce registry. Does NOT
+#                               bypass the no-daemon checks at steps 1–2 —
+#                               those still require a healthy jsonl.
 
 set -e
 
 DOC_PATH="${1:-}"
 
 # ── 1. resolve session_id ───────────────────────────────────────────
-# Source of truth (in order): CLAUDE_SESSION_ID env var; else
-# CMUX_WORKSPACE_ID+CMUX_SURFACE_REF combo; else process-tree walk for
-# a parent `claude` process PID. First source that resolves wins.
+# Source of truth (in order):
+#   1. $CLAUDE_SESSION_ID env var (most explicit)
+#   2. $CMUX_WORKSPACE_ID + $CMUX_SURFACE_REF combo
+#   3. process-tree walk for parent `claude` PID, then look up the
+#      daemon's recorded session_id by matching owner_pid in the
+#      instance jsonl registry (the daemon may have been spawned
+#      with a UUID — paperflow-bridge-spawn falls back to uuidgen
+#      when CLAUDE_SESSION_ID isn't set in the spawning env)
+#   4. last-resort: return the claude PID itself (legacy code path)
 resolve_session_id() {
   if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
     printf '%s\n' "$CLAUDE_SESSION_ID"
     return 0
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ -n "${CMUX_SURFACE_REF:-}" ]; then
-    # Combine workspace + surface into a stable per-pane id. Replace any
-    # path-unsafe chars so the result is fine as a filename.
     local combined="${CMUX_WORKSPACE_ID}-${CMUX_SURFACE_REF}"
     printf '%s\n' "${combined//[\/.]/_}"
     return 0
   fi
+
   # Walk up process tree looking for a `claude` ancestor.
+  local claude_pid=""
   local pid="$$"
   local tries=0
   while [ "$pid" -gt 1 ] && [ "$tries" -lt 20 ]; do
     local comm ppid
     comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
     if [ "$(basename "$comm" 2>/dev/null)" = "claude" ]; then
-      printf '%s\n' "$pid"
-      return 0
+      claude_pid="$pid"
+      break
     fi
     ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
     [ -n "$ppid" ] || break
     pid="$ppid"
     tries=$((tries + 1))
   done
-  return 1
+
+  if [ -z "$claude_pid" ]; then
+    return 1
+  fi
+
+  # Try to find a daemon jsonl whose first line's owner_pid matches
+  # the claude ancestor PID. This is the robust lookup — the daemon
+  # may have written under a UUID-shaped session_id we cannot derive
+  # from the environment.
+  local instances_dir="${HOME}/.paperflow/instances"
+  if [ -d "$instances_dir" ]; then
+    local f first_line owner sid
+    for f in "$instances_dir"/*.jsonl; do
+      [ -e "$f" ] || continue
+      first_line="$(head -n 1 "$f" 2>/dev/null || true)"
+      [ -n "$first_line" ] || continue
+      owner="$(printf '%s' "$first_line" \
+        | /usr/bin/env jq -r 'select(.type=="session") | .owner_pid // empty' 2>/dev/null || true)"
+      if [ "$owner" = "$claude_pid" ]; then
+        sid="$(printf '%s' "$first_line" \
+          | /usr/bin/env jq -r 'select(.type=="session") | .session_id // empty' 2>/dev/null || true)"
+        if [ -n "$sid" ]; then
+          printf '%s\n' "$sid"
+          return 0
+        fi
+      fi
+    done
+  fi
+
+  # Last-resort fallback: return the claude PID as the session_id.
+  # This preserves legacy behaviour when no daemon jsonl exists yet
+  # (e.g. during install bootstrap).
+  printf '%s\n' "$claude_pid"
+  return 0
 }
 
 SESSION_ID="$(resolve_session_id || true)"
@@ -148,7 +189,11 @@ if [ -z "$DOC_NONCE" ]; then
 fi
 
 # ── 4. POST /docs/register synchronously ────────────────────────────
-if [ "${PAPERFLOW_SKIP_REGISTER:-}" != "1" ]; then
+# Skip the register POST when no doc_path was supplied — the registry
+# binds doc_path→doc_nonce, so an empty doc_path can't be registered
+# (daemon returns HTTP 400). Callers that just want a target (the user
+# pasting `paperflow-target` output) shouldn't trigger a register.
+if [ "${PAPERFLOW_SKIP_REGISTER:-}" != "1" ] && [ -n "$DOC_PATH" ]; then
   REGISTER_BODY="$(/usr/bin/env jq -n \
     --arg dp "${DOC_PATH:-}" \
     --arg dn "$DOC_NONCE" \
