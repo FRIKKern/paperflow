@@ -118,6 +118,26 @@ function jsonRes(res, code, body) {
   res.end(JSON.stringify(body));
 }
 
+// Classify a dispatch error as "the receiving surface is gone" vs. an
+// unexpected internal bug. Returns true if the error should surface to the
+// browser as 410 {code:"session-gone"} rather than 500 raw errno.
+function isSurfaceGoneError(err) {
+  if (!err) return false;
+  const code = err.code || '';
+  if (code === 'EPIPE' || code === 'ENOTCONN' || code === 'ECONNRESET' ||
+      code === 'EBADF' || code === 'ESRCH') {
+    return true;
+  }
+  // Scan stderr from execFile children (cmux, tmux, osascript) for the
+  // signatures we've seen when the surface has gone away mid-send.
+  const stderr = String(err.stderr || err.message || '');
+  if (/Broken pipe/i.test(stderr)) return true;
+  if (/Failed to write to socket/i.test(stderr)) return true;
+  if (/no such process/i.test(stderr)) return true;
+  if (/session .* (not found|gone)/i.test(stderr)) return true;
+  return false;
+}
+
 // ── AppleScript escape + per-target dispatch (carried over) ─────────
 const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
@@ -322,7 +342,20 @@ const server = http.createServer((req, res) => {
       dispatch(target, message, (err, result) => {
         if (err) {
           logLine(`dispatch error: ${err.message} | target: ${JSON.stringify(target)}`);
-          return jsonRes(res, 500, { error: err.message });
+          if (isSurfaceGoneError(err)) {
+            return jsonRes(res, 410, {
+              ok: false,
+              code: 'session-gone',
+              message: 'cmux surface died mid-send',
+              errno: err.code || null
+            });
+          }
+          return jsonRes(res, 500, {
+            ok: false,
+            code: 'dispatch-failed',
+            message: err.message,
+            errno: err.code || null
+          });
         }
         logLine(`dispatched → ${result} | msg: ${JSON.stringify(message).slice(0, 80)}`);
         return jsonRes(res, 200, { ok: true, result });
@@ -458,8 +491,12 @@ function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   const ts = new Date().toISOString();
+  // Order matters: append orphan FIRST so any concurrent reader briefly sees
+  // it on disk, THEN unlink the file so the doctor reaper doesn't have to.
   appendStateLine({ type: 'orphan', ts, reason });
   logLine(`shutdown reason=${reason}`);
+  try { fs.unlinkSync(STATE_FILE); }
+  catch (e) { logLine(`state unlink failed: ${e.message}`); }
   try { server.close(() => process.exit(0)); } catch (_) { process.exit(0); }
   // Hard exit fallback if server.close drags.
   setTimeout(() => process.exit(0), 1500).unref();

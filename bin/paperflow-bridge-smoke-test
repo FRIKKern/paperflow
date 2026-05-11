@@ -109,7 +109,16 @@ if [ "$STATE" != "live" ]; then
 fi
 log_step "step1-status" "PASS" "state=live nonce=${DOC_NONCE:0:8}..."
 
-# ── Step 2: kill bridge, confirm orphan from doc's POV ──────────────
+# ── Step 2: kill bridge, confirm orphan + unlink from doc's POV ─────
+# Capture JSONL appends to a side-file BEFORE killing the bridge — the
+# shutdown handler appends the orphan line then unlinks the JSONL, so by
+# the time we inspect the FS the file is gone. tail -F follows the file
+# across rename/unlink and gives us the final orphan record.
+TAIL_LOG="$(mktemp -t pf-smoke-tail.XXXXXX)"
+( tail -n +1 -F "$STATE_FILE" >"$TAIL_LOG" 2>/dev/null ) &
+TAIL_PID=$!
+sleep 0.2  # let tail attach and snapshot existing content
+
 kill -TERM "$BRIDGE_PID" 2>/dev/null || true
 for _ in $(seq 1 20); do
     kill -0 "$BRIDGE_PID" 2>/dev/null || break
@@ -117,11 +126,29 @@ for _ in $(seq 1 20); do
 done
 if kill -0 "$BRIDGE_PID" 2>/dev/null; then
     kill -KILL "$BRIDGE_PID" 2>/dev/null || true
+    kill -TERM "$TAIL_PID" 2>/dev/null || true
     fail_and_emit "step2-kill" "bridge did not exit on SIGTERM within 2s"
 fi
 
-if ! grep -q '"type":"orphan"' "$STATE_FILE" 2>/dev/null; then
-    fail_and_emit "step2-orphan-line" "no orphan line appended to $STATE_FILE"
+# Give tail a moment to flush the final append before we tear it down.
+sleep 0.3
+kill -TERM "$TAIL_PID" 2>/dev/null || true
+wait "$TAIL_PID" 2>/dev/null || true
+
+if ! grep -q '"type":"orphan"' "$TAIL_LOG" 2>/dev/null; then
+    rm -f "$TAIL_LOG" 2>/dev/null
+    fail_and_emit "step2-orphan-line" "no orphan line observed in tailed state file"
+fi
+rm -f "$TAIL_LOG" 2>/dev/null
+
+# JSONL must be unlinked within 1s of SIGTERM (G3 acceptance gate).
+UNLINK_OK=""
+for _ in $(seq 1 10); do
+    if [ ! -e "$STATE_FILE" ]; then UNLINK_OK="yes"; break; fi
+    sleep 0.1
+done
+if [ "$UNLINK_OK" != "yes" ]; then
+    fail_and_emit "step2-jsonl-unlinked" "state file $STATE_FILE still present 1s after SIGTERM"
 fi
 
 # Port should be unreachable now.
@@ -129,7 +156,7 @@ if curl -sS --max-time 1 "http://localhost:$PORT/docs/$DOC_NONCE/status" >/dev/n
     fail_and_emit "step2-port-released" "port $PORT still answers after bridge death"
 fi
 BRIDGE_PID=""
-log_step "step2-kill" "PASS" "orphan line present, port $PORT refused"
+log_step "step2-kill" "PASS" "orphan observed, JSONL unlinked, port $PORT refused"
 
 # ── Step 3: spawn-continuation via aux-daemon (isolated test port) ──
 # Use a tmp docs root so spawn-continuation cannot mutate live docs/.
