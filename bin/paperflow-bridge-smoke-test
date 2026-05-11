@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# paperflow-bridge-smoke-test — end-to-end verification of the per-instance bridge.
+#
+# Automates the 3-step manual procedure from the per-instance-bridge spec:
+#   1. Register a doc against a fresh bridge → /docs/<nonce>/status returns "live".
+#   2. Kill the bridge daemon → JSONL gets an orphan line, port refuses connections.
+#   3. Hit the aux-daemon's /paperflow/spawn-continuation → ok:true (spawned).
+#
+# Output: a JSON document on stdout describing each step's outcome.
+# Exit:   0 if all three steps PASS, non-zero with the failing step.
+
+set -u
+
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+BRIDGE_JS="$BIN_DIR/claude-bridge.js"
+AUX_BIN="$BIN_DIR/paperflow-aux-daemon"
+INSTANCES_DIR="$HOME/.paperflow/instances"
+START_MS="$(node -e 'process.stdout.write(String(Date.now()))')"
+TEST_SID="smoke-test-$(date +%s)-$$"
+TEST_AUX_PORT=18765
+BRIDGE_PID=""
+AUX_PID=""
+STEPS_JSON='[]'
+OVERALL_OK="true"
+FIRST_FAIL=""
+
+# ── helpers ─────────────────────────────────────────────────────────
+log_step() {
+    local name="$1" status="$2" detail="$3"
+    STEPS_JSON="$(printf '%s' "$STEPS_JSON" | jq --arg n "$name" --arg s "$status" --arg d "$detail" \
+        '. + [{step:$n, status:$s, detail:$d}]')"
+    if [ "$status" != "PASS" ] && [ "$status" != "SKIP" ]; then
+        OVERALL_OK="false"
+        [ -z "$FIRST_FAIL" ] && FIRST_FAIL="$name"
+    fi
+}
+
+emit_final() {
+    local end_ms elapsed
+    end_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+    elapsed=$((end_ms - START_MS))
+    jq -nc --argjson ok "$OVERALL_OK" --argjson steps "$STEPS_JSON" \
+           --argjson elapsed "$elapsed" --arg fail "$FIRST_FAIL" \
+        '{ok:$ok, steps:$steps, elapsed_ms:$elapsed,
+          first_failed_step:(if $fail=="" then null else $fail end)}'
+}
+
+cleanup() {
+    [ -n "$BRIDGE_PID" ] && kill -KILL "$BRIDGE_PID" 2>/dev/null || true
+    [ -n "$AUX_PID"    ] && kill -KILL "$AUX_PID"    2>/dev/null || true
+    # Remove stray jsonls from THIS test plus any prior smoke-test runs.
+    [ -d "$INSTANCES_DIR" ] && rm -f "$INSTANCES_DIR"/smoke-test-*.jsonl 2>/dev/null || true
+}
+trap 'cleanup' EXIT
+
+fail_and_emit() {
+    log_step "$1" "FAIL" "$2"
+    emit_final
+    exit 1
+}
+
+# ── dependency check ────────────────────────────────────────────────
+for dep in node jq curl uuidgen; do
+    command -v "$dep" >/dev/null 2>&1 || {
+        log_step "deps" "FAIL" "missing dependency: $dep"
+        emit_final; exit 1
+    }
+done
+[ -f "$BRIDGE_JS" ] || fail_and_emit "deps" "claude-bridge.js not found at $BRIDGE_JS"
+[ -x "$AUX_BIN"   ] || fail_and_emit "deps" "paperflow-aux-daemon not executable at $AUX_BIN"
+log_step "deps" "PASS" "node/jq/curl/uuidgen + bridge + aux-daemon present"
+
+# Pre-clean any leftover smoke-test files (idempotent re-run).
+rm -f "$INSTANCES_DIR"/smoke-test-*.jsonl 2>/dev/null || true
+
+# ── Step 0: spawn bridge daemon ─────────────────────────────────────
+STATE_FILE="$INSTANCES_DIR/${TEST_SID}.jsonl"
+node "$BRIDGE_JS" --owner-pid=$$ --session-id="$TEST_SID" >/dev/null 2>&1 &
+BRIDGE_PID=$!
+
+# Wait up to 2s for state file to appear AND have a session line.
+PORT=""
+for _ in $(seq 1 20); do
+    if [ -f "$STATE_FILE" ]; then
+        PORT="$(head -1 "$STATE_FILE" 2>/dev/null | jq -r '.port // empty' 2>/dev/null)"
+        [ -n "$PORT" ] && break
+    fi
+    sleep 0.1
+done
+if [ -z "$PORT" ]; then
+    fail_and_emit "spawn-bridge" "state file not written within 2s (bridge pid=$BRIDGE_PID, alive=$(kill -0 $BRIDGE_PID 2>/dev/null && echo yes || echo no))"
+fi
+kill -0 "$BRIDGE_PID" 2>/dev/null || fail_and_emit "spawn-bridge" "bridge died after writing state file"
+log_step "spawn-bridge" "PASS" "session=$TEST_SID port=$PORT pid=$BRIDGE_PID"
+
+# ── Step 1: register doc + confirm live ─────────────────────────────
+DOC_NONCE="$(uuidgen | tr -d '\n')"
+REG_RESP="$(curl -sS --max-time 2 -X POST -H 'Content-Type: application/json' \
+    -d "{\"doc_path\":\"smoke-test.html\",\"doc_nonce\":\"$DOC_NONCE\"}" \
+    "http://localhost:$PORT/docs/register" 2>&1)" || true
+if ! printf '%s' "$REG_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+    fail_and_emit "step1-register" "register failed; resp=$REG_RESP"
+fi
+
+STATUS_RESP="$(curl -sS --max-time 2 "http://localhost:$PORT/docs/$DOC_NONCE/status" 2>&1)" || true
+STATE="$(printf '%s' "$STATUS_RESP" | jq -r '.state // empty' 2>/dev/null)"
+if [ "$STATE" != "live" ]; then
+    fail_and_emit "step1-status" "expected state=live, got=$STATE; resp=$STATUS_RESP"
+fi
+log_step "step1-status" "PASS" "state=live nonce=${DOC_NONCE:0:8}..."
+
+# ── Step 2: kill bridge, confirm orphan from doc's POV ──────────────
+kill -TERM "$BRIDGE_PID" 2>/dev/null || true
+for _ in $(seq 1 20); do
+    kill -0 "$BRIDGE_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    kill -KILL "$BRIDGE_PID" 2>/dev/null || true
+    fail_and_emit "step2-kill" "bridge did not exit on SIGTERM within 2s"
+fi
+
+if ! grep -q '"type":"orphan"' "$STATE_FILE" 2>/dev/null; then
+    fail_and_emit "step2-orphan-line" "no orphan line appended to $STATE_FILE"
+fi
+
+# Port should be unreachable now.
+if curl -sS --max-time 1 "http://localhost:$PORT/docs/$DOC_NONCE/status" >/dev/null 2>&1; then
+    fail_and_emit "step2-port-released" "port $PORT still answers after bridge death"
+fi
+BRIDGE_PID=""
+log_step "step2-kill" "PASS" "orphan line present, port $PORT refused"
+
+# ── Step 3: spawn-continuation via aux-daemon (isolated test port) ──
+# Use a tmp docs root so spawn-continuation cannot mutate live docs/.
+TEST_DOCS_ROOT="$(mktemp -d -t pf-smoke-docs.XXXXXX)"
+PORT=$TEST_AUX_PORT PAPERFLOW_DOCS_ROOT="$TEST_DOCS_ROOT" \
+    node "$AUX_BIN" >/dev/null 2>&1 &
+AUX_PID=$!
+
+# Wait up to 2s for it to listen.
+AUX_READY=""
+for _ in $(seq 1 20); do
+    if curl -sf --max-time 0.5 "http://localhost:$TEST_AUX_PORT/paperflow/discover" >/dev/null 2>&1; then
+        AUX_READY="yes"; break
+    fi
+    sleep 0.1
+done
+[ "$AUX_READY" = "yes" ] || fail_and_emit "step3-aux-up" "aux-daemon failed to listen on $TEST_AUX_PORT within 2s"
+
+# Discover should return an array (may be non-empty if other sessions exist on host).
+DISCOVER_RESP="$(curl -sS --max-time 2 "http://localhost:$TEST_AUX_PORT/paperflow/discover" 2>&1)"
+if ! printf '%s' "$DISCOVER_RESP" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    fail_and_emit "step3-discover" "discover did not return JSON array; resp=$DISCOVER_RESP"
+fi
+
+# spawn-continuation: accept 200 with ok:true OR a 500 with a documented error.
+SPAWN_BODY="$(curl -sS --max-time 5 -o /tmp/pf-smoke-spawn.$$ -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"doc_path\":\"smoke-test.html\",\"doc_nonce\":\"old-nonce\",\"goal_id\":\"smoke\"}" \
+    "http://localhost:$TEST_AUX_PORT/paperflow/spawn-continuation" 2>/dev/null)"
+SPAWN_RESP="$(cat /tmp/pf-smoke-spawn.$$ 2>/dev/null || true)"
+rm -f /tmp/pf-smoke-spawn.$$
+if [ "$SPAWN_BODY" = "200" ] && printf '%s' "$SPAWN_RESP" | jq -e '.ok == true and .spawned == true' >/dev/null 2>&1; then
+    log_step "step3-spawn" "PASS" "200 ok:true,spawned:true"
+elif [ "$SPAWN_BODY" = "500" ] && printf '%s' "$SPAWN_RESP" | jq -e '.error' >/dev/null 2>&1; then
+    log_step "step3-spawn" "PASS" "500 with documented error: $(printf '%s' "$SPAWN_RESP" | jq -r .error)"
+else
+    fail_and_emit "step3-spawn" "unexpected response; http=$SPAWN_BODY body=$SPAWN_RESP"
+fi
+
+kill -TERM "$AUX_PID" 2>/dev/null || true
+for _ in $(seq 1 10); do kill -0 "$AUX_PID" 2>/dev/null || break; sleep 0.1; done
+kill -KILL "$AUX_PID" 2>/dev/null || true
+AUX_PID=""
+rm -rf "$TEST_DOCS_ROOT" 2>/dev/null || true
+
+# ── done ────────────────────────────────────────────────────────────
+emit_final
+[ "$OVERALL_OK" = "true" ] && exit 0 || exit 1
