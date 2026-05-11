@@ -3,7 +3,9 @@
 #
 # Installs the full doc-workflow stack:
 #   - live-server LaunchAgent (~/docs hot reload, port 8765)
-#   - claude-bridge LaunchAgent (browser → terminal, port 8766)
+#   - paperflow-aux LaunchAgent (auxiliary daemon, future host service)
+#   - claude-bridge: per-instance, spawned by the SessionStart hook
+#     (no LaunchAgent; one bridge per Claude Code session on port 8766)
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
 #   - six lifecycle skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
@@ -503,50 +505,55 @@ else
     err "not reachable — check $HOME/.local/log/docs-livereload.err.log"
 fi
 
-# ─── 5. claude-bridge ───────────────────────────────────────────────
-# On cmux.app systems we cannot run the bridge as a LaunchAgent: cmux's socket
-# is in access_mode "cmuxOnly" and rejects connections whose responsible-process
-# ancestor is launchd, returning "Failed to write to socket (Broken pipe)" on
-# every dispatch. The bridge MUST be a child of cmux.app to inherit the trust
-# cmux's auth requires. We achieve that with `cmux new-workspace --command`,
-# which spawns the bridge as a managed cmux subprocess.
-#
-# On non-cmux systems (Apple Terminal / iTerm / plain Ghostty), keep the
-# LaunchAgent path — same behavior as before.
-if [ -n "${CMUX_SOCKET:-}" ] && [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "$CMUX_BUNDLED_CLI_PATH" ]; then
-    log "claude-bridge (cmux mode)"
-    # Tear down any existing LaunchAgent — it would race for port 8766 and
-    # always lose the cmux dispatch even if the port-bind succeeded.
-    if launchctl print "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1; then
-        launchctl bootout "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1 || true
-        skip "removed legacy LaunchAgent (cmux requires in-app spawn)"
-    fi
-    if pgrep -f "node.*claude-bridge\.js" >/dev/null 2>&1; then
-        skip "already running"
+# ─── 5. claude-bridge: legacy cleanup (per-instance bridge takes over) ─
+# As of paperflow-22c the bridge is spawned per Claude Code session by the
+# SessionStart hook (see ~/.local/bin/paperflow-bridge-spawn). Neither the
+# singleton LaunchAgent nor the cmux paperflow-bridge workspace is needed
+# anymore. Idempotent cleanup: bootout + remove the old plist if present,
+# delete the cmux workspace if present. Safe on re-run.
+log "claude-bridge: legacy cleanup"
+BR_PLIST_LEGACY="$HOME/Library/LaunchAgents/$BR_LABEL.plist"
+if launchctl print "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1 || true
+    ok "booted out legacy LaunchAgent $BR_LABEL"
+else
+    skip "legacy LaunchAgent $BR_LABEL not loaded"
+fi
+if [ -f "$BR_PLIST_LEGACY" ]; then
+    rm -f "$BR_PLIST_LEGACY"
+    ok "removed legacy plist $BR_PLIST_LEGACY"
+else
+    skip "legacy plist $BR_PLIST_LEGACY not present"
+fi
+if command -v cmux >/dev/null 2>&1 \
+   || { [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "$CMUX_BUNDLED_CLI_PATH" ]; }; then
+    CMUX_CLI="${CMUX_BUNDLED_CLI_PATH:-$(command -v cmux)}"
+    if "$CMUX_CLI" list 2>/dev/null | grep -q 'paperflow-bridge'; then
+        "$CMUX_CLI" delete-workspace paperflow-bridge >/dev/null 2>&1 \
+            && ok "deleted legacy cmux workspace paperflow-bridge" \
+            || skip "cmux delete-workspace paperflow-bridge failed (verb may differ)"
     else
-        "$CMUX_BUNDLED_CLI_PATH" new-workspace \
-            --name "paperflow-bridge" \
-            --command "$NODE_BIN $REPO/bin/claude-bridge.js" \
-            >/dev/null 2>&1 \
-                && ok "spawned via cmux new-workspace" \
-                || err "cmux new-workspace failed"
-    fi
-    if wait_for_port 8766 20; then
-        ok "up at http://localhost:8766"
-    else
-        err "not reachable — check the paperflow-bridge workspace in cmux"
+        skip "legacy cmux workspace paperflow-bridge not present"
     fi
 else
-    log "LaunchAgent: $BR_LABEL"
-    BR_PLIST="$HOME/Library/LaunchAgents/$BR_LABEL.plist"
-    render "$REPO/launchagents/claude-bridge.plist.tmpl" "$BR_PLIST" "$BR_LABEL"
-    reload_agent "$BR_LABEL" "$BR_PLIST"
-    if ensure_agent_up "$BR_LABEL" 8766; then
-        ok "up at http://localhost:8766"
-    else
-        err "not reachable — check $HOME/.local/log/claude-bridge.err.log"
-    fi
+    skip "cmux not installed — no workspace cleanup needed"
 fi
+
+# ─── 5b. paperflow-aux daemon (LaunchAgent) ────────────────────────
+# One-per-host auxiliary daemon. Takes over the live-server role on 8765
+# (replacement is staged in a separate task; this step ships the plist).
+AUX_LABEL="${LABEL_PREFIX}.paperflow-aux"
+log "LaunchAgent: $AUX_LABEL"
+AUX_PLIST="$HOME/Library/LaunchAgents/$AUX_LABEL.plist"
+render "$REPO/launchagents/paperflow-aux.plist.tmpl" "$AUX_PLIST" "$AUX_LABEL"
+# Bootout first if already loaded so the freshly-rendered plist takes effect
+# (kickstart -k re-execs the old plist; bootstrap of an already-loaded label
+# is a no-op). Idempotent.
+if launchctl print "gui/$(id -u)/$AUX_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$AUX_LABEL" >/dev/null 2>&1 || true
+fi
+launchctl bootstrap "gui/$(id -u)" "$AUX_PLIST" >/dev/null 2>&1 || true
+ok "loaded $AUX_LABEL"
 
 # ─── 6. Shared renderers in ~/docs/paperflow/_lib/ ──────────────────
 log "Renderers"
@@ -629,6 +636,40 @@ else
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
     ok "merged PostToolUse event-on-save"
+fi
+
+# Per-instance bridge lifecycle (paperflow-22c). SessionStart forks a
+# bridge owned by this Claude Code process; SessionEnd sends SIGTERM so
+# the daemon writes a clean orphan event before exit (the owner-watch in
+# claude-bridge.js would catch it within 5s anyway). Both are idempotent —
+# the jq -e dedup matches on the exact command string we write.
+HOOK_BRIDGE_SPAWN='$HOME/.local/bin/paperflow-bridge-spawn'
+HOOK_BRIDGE_KILL='pkill -TERM -f "claude-bridge.js.*--session-id=${CLAUDE_SESSION_ID}" >/dev/null 2>&1 || true'
+
+if jq -e --arg cmd "$HOOK_BRIDGE_SPAWN" '.hooks.SessionStart[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
+    skip "SessionStart bridge-spawn hook already present"
+else
+    TMP="$(mktemp)"
+    jq --arg cmd "$HOOK_BRIDGE_SPAWN" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{
+        hooks: [{ type: "command",
+                  command: $cmd,
+                  timeout: 5 }]
+    }])' "$SETTINGS" > "$TMP"
+    mv "$TMP" "$SETTINGS"
+    ok "merged SessionStart bridge-spawn"
+fi
+
+if jq -e --arg cmd "$HOOK_BRIDGE_KILL" '.hooks.SessionEnd[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
+    skip "SessionEnd bridge-kill hook already present"
+else
+    TMP="$(mktemp)"
+    jq --arg cmd "$HOOK_BRIDGE_KILL" '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{
+        hooks: [{ type: "command",
+                  command: $cmd,
+                  timeout: 3 }]
+    }])' "$SETTINGS" > "$TMP"
+    mv "$TMP" "$SETTINGS"
+    ok "merged SessionEnd bridge-kill"
 fi
 
 # ─── 8b. paperflow Dock (cmux) ──────────────────────────────────────
@@ -938,6 +979,7 @@ merge_statusline_settings
 # migration step in 10g, which it precedes.
 
 deploy_helper paperflow-target          get-terminal-target.sh
+deploy_helper paperflow-aux-daemon
 deploy_helper paperflow-continue
 deploy_helper paperflow-validate
 deploy_helper paperflow-audit-site
@@ -958,6 +1000,13 @@ deploy_helper pf
 deploy_helper paperflow-active-scope
 deploy_helper paperflow-audit-orchestrator-budget
 deploy_helper paperflow-backfill-goal-id
+
+# Per-instance bridge spawn wrapper (paperflow-22c). The wrapper resolves
+# claude-bridge.js via `dirname "$0"`, so we co-install both under
+# ~/.local/bin/ — that makes the lookup work both in-repo (where they sit
+# side-by-side in bin/) and post-install (where they sit side-by-side here).
+deploy_helper paperflow-bridge-spawn
+deploy_helper claude-bridge.js
 
 # ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
 # Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
@@ -1137,19 +1186,18 @@ log "Status"
     else
         err "live-server   : DOWN"
     fi
-    # In cmux mode the bridge isn't a LaunchAgent, so just probe the port.
-    if [ -n "${CMUX_SOCKET:-}" ]; then
-        if wait_for_port 8766 4; then
-            ok "claude-bridge : up    (http://localhost:8766, cmux mode)"
-        else
-            err "claude-bridge : DOWN  (open the paperflow-bridge cmux workspace)"
-        fi
+    # Per-instance bridges (paperflow-22c) are owned by individual Claude
+    # Code sessions, not the installer. The port may be free at install time
+    # if no session is active — treat absence as informational, not a failure.
+    if wait_for_port 8766 2; then
+        ok "claude-bridge : up    (http://localhost:8766, per-instance)"
     else
-        if ensure_agent_up "$BR_LABEL" 8766; then
-            ok "claude-bridge : up    (http://localhost:8766)"
-        else
-            err "claude-bridge : DOWN"
-        fi
+        skip "claude-bridge : not up at install time (spawned per session)"
+    fi
+    if wait_for_port 8765 2; then
+        ok "paperflow-aux : up    (http://localhost:8765)"
+    else
+        skip "paperflow-aux : not yet responding on 8765 (may share port with live-server)"
     fi
     status_f "$CLAUDE_MD"                                "CLAUDE.md    "
     status_x "$HOME/.claude/hooks/inject-principles.sh"  "inject hook  "
@@ -1175,6 +1223,7 @@ log "Status"
     status_f "$HOME/docs/paperflow/_lib/goal-path-rail.js"    "rail renderer"
     status_f "$HOME/docs/paperflow/_lib/text-diff.js"         "text-diff lib"
     status_x "$HOME/.local/bin/paperflow-target"              "target helper"
+    status_x "$HOME/.local/bin/paperflow-aux-daemon"          "aux daemon   "
     status_x "$HOME/.local/bin/paperflow-continue"            "continue laun."
     status_x "$HOME/.local/bin/paperflow-validate"            "validator    "
     status_x "$HOME/.local/bin/paperflow-audit-site"          "audit wrapper"
@@ -1231,15 +1280,15 @@ else
                   "Inspect: $HOME/.local/bin/paperflow-active-scope --resolve"
 fi
 
-# 2. Bridge listening on 8766. Tolerant: any HTTP response (2xx/3xx/4xx/5xx)
-# proves the process is alive — we don't require a /health endpoint.
+# 2. Per-instance bridge (paperflow-22c) — owned by Claude Code sessions,
+# not the installer. Probe 8766 informationally only; a fresh install with no
+# active session has no bridge to probe and must not fail here.
 if curl -fsS --max-time 2 -o /dev/null http://localhost:8766/ 2>/dev/null \
    || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' http://localhost:8766/ 2>/dev/null \
         | grep -qE '^[2345]'; then
-    ok "bridge port 8766"
+    ok "bridge port 8766 (a session is up)"
 else
-    selftest_fail "claude-bridge not responding on port 8766" \
-                  "Inspect: lsof -i :8766     (a stale process may hold the port)"
+    ok "bridge port 8766: no active session (per-instance bridges spawn on SessionStart)"
 fi
 
 # 3. Live-server on 8765 — same tolerant check.

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# paperflow-bridge-spawn — SessionStart hook helper.
+# Forks claude-bridge.js for this Claude Code session, waits ≤2s for the
+# instance state file, emits one-line JSON to stdout. Exit 0 = ok, 1 = fail.
+set -u
+SID="${CLAUDE_SESSION_ID:-$(uuidgen 2>/dev/null || /usr/bin/uuidgen)}"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BRIDGE_JS="$DIR/claude-bridge.js"
+INST="$HOME/.paperflow/instances/$SID.jsonl"
+LOG_DIR="$HOME/.paperflow/logs"; mkdir -p "$LOG_DIR" "$(dirname "$INST")"
+SPAWN_LOG="$LOG_DIR/bridge-$SID.spawn.log"
+NODE="$(command -v node || ls -d "$HOME"/.nvm/versions/node/v22.*/bin/node 2>/dev/null | sort -V | tail -1)"
+[ -x "$NODE" ] || { printf '{"ok":false,"error":"node-missing"}\n' >&2; exit 1; }
+[ -f "$BRIDGE_JS" ] || { printf '{"ok":false,"error":"bridge-js-missing","path":"%s"}\n' "$BRIDGE_JS" >&2; exit 1; }
+nohup "$NODE" "$BRIDGE_JS" --owner-pid="$PPID" --session-id="$SID" \
+    </dev/null >"$SPAWN_LOG" 2>&1 &
+disown 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -f "$INST" ] && break; sleep 0.1
+done
+[ -f "$INST" ] || { printf '{"ok":false,"error":"spawn-timeout","session_id":"%s"}\n' "$SID" >&2; exit 1; }
+PORT="$(awk -F'"port":' 'NR==1 && NF>1 {p=$2; sub(/[^0-9].*/,"",p); print p; exit}' "$INST")"
+printf '{"ok":true,"session_id":"%s","port":%s}\n' "$SID" "${PORT:-0}"

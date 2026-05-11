@@ -1,0 +1,415 @@
+#!/usr/bin/env node
+// paperflow-aux-daemon — always-up auxiliary daemon for paperflow.
+//
+// One per host. Listens on 8765 (overridable via $PORT) and serves two
+// concerns out of the same process:
+//
+//   1. Static files from ~/docs/paperflow/ (the live-server stand-in;
+//      WebSocket live-reload is currently a TODO — see note below).
+//   2. The paperflow auxiliary API surface, namespaced under /paperflow/:
+//        GET  /paperflow/discover                  (this task)
+//        POST /paperflow/spawn-continuation        (this task)
+//        [future] /event*, /goal-path, /diff,
+//        [future] /simplify*                       (follow-up task)
+//
+// The split exists because the per-instance bridge (bin/claude-bridge.js)
+// owns Claude-Code-session-scoped state (nonce registry, owner-pid liveness).
+// The auxiliary daemon owns host-scoped state: walking the per-instance
+// JSONL registries, spawning new Claude sessions, serving docs.
+//
+// CLI flags: none. Honours $PORT (default 8765) and $PAPERFLOW_DOCS_ROOT
+// (default ~/docs/paperflow).
+//
+// TODO(live-reload): the legacy live-server provided WebSocket-driven hot
+// reload of every doc on save. This wrapper currently does NOT — adding it
+// is a follow-up (likely by embedding the `livereload` npm package). The
+// connection pill on each doc will still poll the per-instance bridge for
+// status, so the loss of live-reload is a developer-experience regression
+// only, not a contract break.
+
+'use strict';
+
+const http = require('http');
+const net  = require('net');
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
+const { spawn } = require('child_process');
+
+// ── config ──────────────────────────────────────────────────────────
+const PORT          = parseInt(process.env.PORT || '8765', 10);
+const HOST          = process.env.HOST || '127.0.0.1';
+const DOCS_ROOT     = process.env.PAPERFLOW_DOCS_ROOT
+  || path.join(os.homedir(), 'docs', 'paperflow');
+const INSTANCES_DIR = path.join(os.homedir(), '.paperflow', 'instances');
+const LOGS_DIR      = path.join(os.homedir(), '.paperflow', 'logs');
+const LOG_FILE      = path.join(LOGS_DIR, 'aux-daemon.log');
+const HEARTBEAT_STALE_MS = 10000; // a JSONL with no heartbeat newer than 10s
+                                  // is suspect but still returned (see spec).
+const TCP_PROBE_TIMEOUT_MS = 100;
+const CONTINUE_BIN  = path.join(__dirname, 'paperflow-continue');
+
+// ── tiny helpers ────────────────────────────────────────────────────
+function ensureDir(d) {
+  try { fs.mkdirSync(d, { recursive: true }); } catch (_) { /* */ }
+}
+
+function logLine(msg) {
+  ensureDir(LOGS_DIR);
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch (_) { /* */ }
+}
+
+function jsonRes(res, code, body) {
+  res.writeHead(code, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+function collectBody(req, cb) {
+  let body = '';
+  req.on('data', c => (body += c));
+  req.on('end', () => {
+    if (!body) return cb(null, {});
+    try { cb(null, JSON.parse(body)); }
+    catch (e) { cb(e); }
+  });
+}
+
+function pidAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (_) { return false; }
+}
+
+// TCP connect with timeout; resolves to true if a TCP handshake completes.
+function probePort(port) {
+  return new Promise(resolve => {
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      return resolve(false);
+    }
+    const sock = new net.Socket();
+    let settled = false;
+    const done = ok => {
+      if (settled) return;
+      settled = true;
+      try { sock.destroy(); } catch (_) { /* */ }
+      resolve(ok);
+    };
+    sock.setTimeout(TCP_PROBE_TIMEOUT_MS);
+    sock.once('connect', () => done(true));
+    sock.once('timeout', () => done(false));
+    sock.once('error',   () => done(false));
+    try { sock.connect(port, '127.0.0.1'); }
+    catch (_) { done(false); }
+  });
+}
+
+// ── instance JSONL parsing ──────────────────────────────────────────
+// Each ~/.paperflow/instances/<session_id>.jsonl contains one `session`
+// line at the top followed by `heartbeat`/`registration`/`orphan` lines.
+// Returns { session: <obj>|null, latestTs: <iso>|null }.
+function readInstanceFile(filePath) {
+  let raw;
+  try { raw = fs.readFileSync(filePath, 'utf8'); }
+  catch (_) { return { session: null, latestTs: null }; }
+  const lines = raw.split('\n').filter(Boolean);
+  let session = null;
+  let latestTs = null;
+  for (const line of lines) {
+    let obj;
+    try { obj = JSON.parse(line); }
+    catch (_) { continue; }
+    if (!session && obj.type === 'session') {
+      session = obj;
+    }
+    if (obj && typeof obj.ts === 'string') {
+      if (!latestTs || obj.ts > latestTs) latestTs = obj.ts;
+    }
+  }
+  return { session, latestTs };
+}
+
+// Find the cmux_workspace recorded for whichever dead session originally
+// registered `doc_nonce`. Walks every instance JSONL, parses the session
+// line plus all registration lines, returns the first cmux_workspace it
+// finds for a matching nonce.
+//
+// Returns null when no match (legacy orphaned doc with no recorded nonce,
+// or session predating cmux_workspace tagging). Callers must tolerate null
+// and fall through to paperflow-continue's terminal-detection cascade.
+function lookupWorkspaceForNonce(docNonce) {
+  if (!docNonce || typeof docNonce !== 'string') return null;
+  let entries;
+  try { entries = fs.readdirSync(INSTANCES_DIR); }
+  catch (_) { return null; }
+  for (const name of entries) {
+    if (!name.endsWith('.jsonl')) continue;
+    const filePath = path.join(INSTANCES_DIR, name);
+    let raw;
+    try { raw = fs.readFileSync(filePath, 'utf8'); }
+    catch (_) { continue; }
+    const lines = raw.split('\n').filter(Boolean);
+    let session = null;
+    let nonceMatch = false;
+    for (const line of lines) {
+      let obj;
+      try { obj = JSON.parse(line); }
+      catch (_) { continue; }
+      if (!session && obj.type === 'session') session = obj;
+      if (obj && obj.type === 'registration' && obj.doc_nonce === docNonce) {
+        nonceMatch = true;
+      }
+    }
+    if (nonceMatch && session && session.cmux_workspace) {
+      return session.cmux_workspace;
+    }
+  }
+  return null;
+}
+
+async function gatherInstances(workspaceFilter) {
+  ensureDir(INSTANCES_DIR);
+  let entries;
+  try { entries = fs.readdirSync(INSTANCES_DIR); }
+  catch (_) { return []; }
+
+  const out = [];
+  for (const name of entries) {
+    if (!name.endsWith('.jsonl')) continue;
+    const filePath = path.join(INSTANCES_DIR, name);
+    const { session, latestTs } = readInstanceFile(filePath);
+    if (!session || !session.session_id) continue;
+
+    if (workspaceFilter && session.cmux_workspace !== workspaceFilter) continue;
+
+    // Active probe: TCP connect to the recorded port AND check owner pid.
+    const port = parseInt(session.port, 10);
+    const pidOk = pidAlive(parseInt(session.owner_pid, 10));
+    const portOk = pidOk ? await probePort(port) : false;
+    const alive = pidOk && portOk;
+
+    // Heartbeat freshness: latestTs is the newest line ts in the file.
+    let heartbeat_age_ms = null;
+    if (latestTs) {
+      const t = Date.parse(latestTs);
+      if (Number.isFinite(t)) heartbeat_age_ms = Date.now() - t;
+    }
+
+    out.push({
+      session_id: session.session_id,
+      port,
+      cmux_workspace: session.cmux_workspace || null,
+      started_at: session.started_at || null,
+      alive,
+      heartbeat_age_ms,
+      heartbeat_stale: heartbeat_age_ms != null
+        && heartbeat_age_ms > HEARTBEAT_STALE_MS
+    });
+  }
+
+  // Newest first by started_at (Q9 default). Fall back to session_id for
+  // stable ordering when started_at is missing.
+  out.sort((a, b) => {
+    const at = a.started_at || '';
+    const bt = b.started_at || '';
+    if (at !== bt) return bt.localeCompare(at);
+    return (b.session_id || '').localeCompare(a.session_id || '');
+  });
+  return out;
+}
+
+// ── static file serving (fallback for non-/paperflow/ paths) ────────
+// Read-only, no directory listings, no .. escapes. Anything missing is 404.
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm':  'text/html; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.ico':  'image/x-icon',
+  '.txt':  'text/plain; charset=utf-8',
+  '.md':   'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
+  '.ttf':  'font/ttf'
+};
+
+function serveStatic(req, res, urlPath) {
+  // The legacy live-server mounted ~/docs at /; ~/docs/paperflow is reachable
+  // as /paperflow/... — but /paperflow/ is reserved here for the API. So we
+  // serve from DOCS_ROOT (~/docs/paperflow) directly, accepting URLs like
+  // /_lib/doc.css and /specs/foo.html. To stay compatible with the legacy
+  // /paperflow/<rest> prefix, we ALSO try stripping a leading /paperflow/
+  // — but only after the API router has had its chance (handled by caller).
+  let rel = decodeURIComponent(urlPath.replace(/^\/+/, ''));
+  if (!rel || rel.endsWith('/')) rel += 'index.html';
+
+  // Defend against path traversal — resolve and ensure the result lies
+  // within DOCS_ROOT.
+  const full = path.resolve(DOCS_ROOT, rel);
+  if (!full.startsWith(DOCS_ROOT + path.sep) && full !== DOCS_ROOT) {
+    res.writeHead(403); return res.end();
+  }
+
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) {
+      res.writeHead(404); return res.end();
+    }
+    const ext = path.extname(full).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Length': st.size,
+      'Cache-Control': 'no-cache'
+    });
+    fs.createReadStream(full).pipe(res);
+  });
+}
+
+// ── /paperflow/spawn-continuation ───────────────────────────────────
+function handleSpawnContinuation(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, { error: 'invalid JSON' });
+    const { doc_path, doc_nonce, goal_id } = payload || {};
+    if (!doc_path || typeof doc_path !== 'string') {
+      return jsonRes(res, 400, { error: 'need {doc_path}' });
+    }
+    if (doc_nonce !== undefined && doc_nonce !== null
+        && typeof doc_nonce !== 'string') {
+      return jsonRes(res, 400, { error: 'doc_nonce must be a string if provided' });
+    }
+    if (!fs.existsSync(CONTINUE_BIN)) {
+      logLine(`spawn-continuation: paperflow-continue missing at ${CONTINUE_BIN}`);
+      return jsonRes(res, 500, { error: `paperflow-continue not found at ${CONTINUE_BIN}` });
+    }
+
+    // Build argv. The --bind-doc / --goal-id flags are forward-compatible:
+    // they may be unknown to the current paperflow-continue shell script
+    // (which will exit 2 on unknown flag). Until task paperflow-40y lands
+    // that flag support, we accept that and return the spawn outcome —
+    // the daemon's contract here is "kicked off a process".
+    //
+    // --workspace: look up the dead session's cmux_workspace via the
+    // registered doc_nonce. When present, paperflow-continue prefers
+    // `cmux new-surface --workspace <id>` so the rebound doc lands in
+    // the same workspace as its dead session. When absent (legacy nonce,
+    // session predating cmux tagging, missing JSONL), we omit the flag
+    // and paperflow-continue falls back to its terminal cascade — no error.
+    const args = [];
+    args.push('--bind-doc', doc_path);
+    if (typeof goal_id === 'string' && goal_id) {
+      args.push('--goal-id', goal_id);
+    }
+    let workspace = null;
+    if (typeof doc_nonce === 'string' && doc_nonce) {
+      try { workspace = lookupWorkspaceForNonce(doc_nonce); }
+      catch (e) {
+        logLine(`spawn-continuation: workspace lookup threw: ${e.message}`);
+        workspace = null;
+      }
+      if (workspace) args.push('--workspace', workspace);
+    }
+
+    let child;
+    try {
+      child = spawn(CONTINUE_BIN, args, {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env
+      });
+      child.unref();
+    } catch (e) {
+      logLine(`spawn-continuation: spawn() threw: ${e.message}`);
+      return jsonRes(res, 500, { error: e.message });
+    }
+
+    child.on('error', err => {
+      // Async — by this point we've already responded. Log only.
+      logLine(`spawn-continuation: child error: ${err.message}`);
+    });
+
+    logLine(`spawn-continuation: doc_path=${doc_path} goal_id=${goal_id || ''} workspace=${workspace || ''} pid=${child.pid}`);
+    return jsonRes(res, 200, { ok: true, spawned: true });
+  });
+}
+
+// ── /paperflow/discover ─────────────────────────────────────────────
+async function handleDiscover(req, res, url) {
+  const workspace = url.searchParams.get('workspace');
+  try {
+    const list = await gatherInstances(workspace || null);
+    return jsonRes(res, 200, list);
+  } catch (e) {
+    logLine(`discover error: ${e.message}`);
+    return jsonRes(res, 500, { error: e.message });
+  }
+}
+
+// ── HTTP server ─────────────────────────────────────────────────────
+const server = http.createServer((req, res) => {
+  // CORS — same shape as claude-bridge so doc.js POSTs work from any port.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+  let url;
+  try { url = new URL(req.url, `http://${HOST}:${PORT}`); }
+  catch (_) { res.writeHead(400); return res.end(); }
+
+  const pathname = url.pathname;
+
+  // ── API routes ──────────────────────────────────────────────────
+  if (req.method === 'GET' && pathname === '/paperflow/discover') {
+    return handleDiscover(req, res, url);
+  }
+  if (req.method === 'POST' && pathname === '/paperflow/spawn-continuation') {
+    return handleSpawnContinuation(req, res);
+  }
+
+  // Reserve the /paperflow/ namespace so future endpoints (follow-up task)
+  // don't accidentally collide with static files. Unknown /paperflow/* is
+  // a 404, NOT a static-file lookup.
+  if (pathname.startsWith('/paperflow/')) {
+    return jsonRes(res, 404, { error: 'unknown paperflow endpoint', path: pathname });
+  }
+
+  // ── static fallback ─────────────────────────────────────────────
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405); return res.end();
+  }
+  serveStatic(req, res, pathname);
+});
+
+server.on('error', err => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`paperflow-aux-daemon: port ${PORT} already in use`);
+    process.exit(4);
+  }
+  console.error(`paperflow-aux-daemon: server error: ${err && err.message}`);
+  process.exit(5);
+});
+
+server.listen(PORT, HOST, () => {
+  logLine(`listening on http://${HOST}:${PORT} (docs_root=${DOCS_ROOT})`);
+  console.log(`paperflow-aux-daemon listening on http://${HOST}:${PORT}`);
+  console.log(`  docs_root    : ${DOCS_ROOT}`);
+  console.log(`  instances_dir: ${INSTANCES_DIR}`);
+});
+
+// ── orderly shutdown ────────────────────────────────────────────────
+let shuttingDown = false;
+function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logLine(`shutdown reason=${reason}`);
+  try { server.close(() => process.exit(0)); } catch (_) { process.exit(0); }
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+process.on('SIGTERM', () => shutdown('sigterm'));
+process.on('SIGINT',  () => shutdown('sigint'));

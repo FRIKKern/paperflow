@@ -3,6 +3,7 @@
 # Modes:  --fast (default; cache-aware, may re-exec --full once if cache stale)
 #         --full (run every check, write cache at ~/.paperflow/doctor.cache.json)
 #         --ensure-bd (targeted: bd init the nearest git-repo root if not done)
+#         --bindings (audit doc HTMLs against live bridge registrations; JSON only)
 # Exit:   0 ok  · 1 warnings  · 2 critical (or paperflow-preflight reported failure)
 # Cache TTL: 86400s. macOS-portable bash 3.2; jq required, no node/python.
 # Auto-fixes hook scripts, helper bins, and renderers when sources are present.
@@ -23,12 +24,33 @@ ISSUES_JSONL=""
 AUTOFIXED_JSONL=""
 WORST=0  # 0 ok · 1 warn · 2 critical
 
-case "${1:-}" in
-    "" | "--fast") MODE="--fast" ;;
-    "--full")      MODE="--full" ;;
-    "--ensure-bd") MODE="--ensure-bd" ;;
-    *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd]\n' >&2; exit 1 ;;
-esac
+# Per-instance-bridge constants (Q11 of 2026-05-11-bridge-binding-contract).
+INSTANCES_DIR="$HOME/.paperflow/instances"
+HEARTBEAT_FRESH_S=10   # ≤ 10 s of slack on the last heartbeat/registration
+TCP_PROBE_TIMEOUT_S=1  # bash's /dev/tcp redirect blocks; cap with `nc` -w when available
+REAP_AGE_S=300         # ≥ 5 min mtime + dead PID → reap orphan JSONL (under --repair)
+DOCS_ROOT="$HOME/docs/paperflow"
+REAP_ENABLED=0         # set to 1 when --repair is passed (Q11/Q12 reap-on-repair)
+# Seed REAPED_JSONL from the pre-exec env var (paths reaped before the
+# fast→full re-exec carry across). Newline-delimited list of reaped paths.
+REAPED_JSONL="${PAPERFLOW_DOCTOR_REAPED:-}"
+
+# Args: one mode flag + optional --repair (instance-check reaps under --repair).
+# --repair only affects the instance-check pass; other auto-fixes (hooks/bins/
+# renderers) already run unconditionally because they're side-effect-free.
+MODE_SEEN=0
+for arg in "$@"; do
+    case "$arg" in
+        ""|"--fast")   MODE="--fast";   MODE_SEEN=1 ;;
+        "--full")      MODE="--full";   MODE_SEEN=1 ;;
+        "--ensure-bd") MODE="--ensure-bd"; MODE_SEEN=1 ;;
+        "--bindings")  MODE="--bindings";  MODE_SEEN=1 ;;
+        "--repair")    REAP_ENABLED=1 ;;
+        *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd | --bindings] [--repair]\n' >&2; exit 1 ;;
+    esac
+done
+# default mode when only --repair was passed
+[ "$MODE_SEEN" = "0" ] && MODE="--fast"
 
 # ── --ensure-bd: targeted Beads init for the current repo ──────────
 # Folded in from the legacy `paperflow-bd-init` binary (Cut 2, 2026-05).
@@ -57,8 +79,116 @@ if [ "$MODE" = "--ensure-bd" ]; then
     exit 2
 fi
 
+# (--bindings subcommand handler is defined below, after helpers, because it
+# reuses extract_doc_target + tcp_listening + iso_age_seconds.)
+
 # ── helpers ────────────────────────────────────────────────────────
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+now_epoch() { date +%s 2>/dev/null || echo 0; }
+
+# pid_alive PID  → 0 if alive, non-zero otherwise.  `kill -0` works for any
+# process whose owner you can signal; macOS returns ESRCH only for truly-gone PIDs.
+pid_alive() {
+    [ -n "${1:-}" ] || return 1
+    case "$1" in *[!0-9]*) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null
+}
+
+# tcp_listening PORT  → 0 if something is accepting on localhost:PORT.
+# Prefer `nc -z -w<TIMEOUT>` (POSIX-ish, ships with macOS); fall back to /dev/tcp.
+tcp_listening() {
+    local port="$1"
+    case "$port" in ""|*[!0-9]*) return 1 ;; esac
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w "$TCP_PROBE_TIMEOUT_S" 127.0.0.1 "$port" >/dev/null 2>&1
+        return $?
+    fi
+    # bash builtin TCP — no timeout, but only used as last resort.
+    ( exec 3<>"/dev/tcp/127.0.0.1/$port" ) >/dev/null 2>&1
+}
+
+# instance_last_signal_ts JSONL_PATH  → ISO timestamp of latest heartbeat or
+# registration line, or empty when none recorded yet. We accept both because
+# a fresh daemon may not have emitted its first heartbeat (3 s cadence) but
+# has already accepted at least one registration.
+instance_last_signal_ts() {
+    local path="$1"
+    [ -f "$path" ] || return 1
+    # tac substitute: print lines in reverse using awk so the freshest signal wins.
+    awk '/"type":"heartbeat"/ || /"type":"registration"/' "$path" 2>/dev/null \
+        | tail -1 \
+        | jq -r '(.registered_at // .ts) // empty' 2>/dev/null
+}
+
+# iso_age_seconds ISO_TIMESTAMP  → integer seconds since that ISO ts, or empty
+# when input is empty/unparseable. Uses `date -j -f` (BSD) which is what ships
+# on macOS; we deliberately do NOT depend on GNU coreutils.
+iso_age_seconds() {
+    local iso="$1"
+    [ -n "$iso" ] || return 1
+    # strip fractional seconds + trailing Z so BSD date can parse.
+    local stripped
+    stripped="$(printf '%s' "$iso" | sed 's/\..*Z$//; s/Z$//')"
+    local epoch
+    epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "$stripped" +%s 2>/dev/null)" || return 1
+    [ -n "$epoch" ] || return 1
+    echo $(( $(now_epoch) - epoch ))
+}
+
+# file_age_seconds PATH  → integer seconds since file mtime, or empty when
+# the file is missing. macOS BSD stat (`-f %m`) — no GNU dependency.
+file_age_seconds() {
+    local path="$1" mt now
+    [ -f "$path" ] || return 1
+    mt="$(stat -f %m "$path" 2>/dev/null)" || return 1
+    [ -n "$mt" ] || return 1
+    now="$(now_epoch)"
+    echo $(( now - mt ))
+}
+
+# cmux_surface_alive WORKSPACE_REF SURFACE_REF  → 0 if the surface still
+# exists in the named cmux workspace; 1 otherwise. Returns 0 (alive) and
+# emits a side-channel signal "cmux:unavailable" via global CMUX_AVAILABLE=0
+# when cmux is not on PATH, so callers can treat it as "skip this leg".
+# The triple-check spec (Q11): PID + (cmux-surface OR cmux-unavailable) +
+# heartbeat. Implementation greps `cmux list-pane-surfaces --workspace W`
+# for the recorded surface ref — exit-status is unreliable across cmux
+# versions, but the surface ref's literal presence is a stable signal.
+CMUX_AVAILABLE=1
+if ! command -v cmux >/dev/null 2>&1; then
+    CMUX_AVAILABLE=0
+fi
+cmux_surface_alive() {
+    local ws="$1" sf="$2"
+    [ "$CMUX_AVAILABLE" = "1" ] || return 0     # gracefully skip the leg
+    [ -n "$ws" ] && [ -n "$sf" ] || return 0    # no recorded refs → skip
+    cmux list-pane-surfaces --workspace "$ws" 2>/dev/null | grep -qE "(^|[[:space:]])${sf}([[:space:]]|$)"
+}
+
+# extract_doc_target FILE  → JSON object {bridge_url,doc_nonce} for the
+# window.CLAUDE_TARGET literal embedded in the doc, or {} when missing.
+# Best-effort regex over the assignment up to the terminating semicolon —
+# CLAUDE_TARGET is small (single object, ~10 fields), so a non-validating
+# scan is good enough to surface state without pulling in a JS parser.
+extract_doc_target() {
+    local file="$1" url="" nonce=""
+    [ -f "$file" ] || { printf '%s' '{}'; return 0; }
+    # Slurp the assignment window. awk reads from `window.CLAUDE_TARGET = ` up
+    # to the first `;` after it; that's the assignment statement we want.
+    local blob
+    blob="$(awk '
+        /window\.CLAUDE_TARGET[[:space:]]*=/ { capturing=1 }
+        capturing { buf = buf $0 "\n"; if (index($0, ";")) { print buf; exit } }
+    ' "$file" 2>/dev/null)"
+    [ -n "$blob" ] || { printf '%s' '{}'; return 0; }
+    url="$(printf '%s' "$blob"   | grep -oE '"bridge_url"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                                  | head -1 | sed -E 's/.*"bridge_url"[^"]*"([^"]*)"/\1/')"
+    nonce="$(printf '%s' "$blob" | grep -oE '"doc_nonce"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                                  | head -1 | sed -E 's/.*"doc_nonce"[^"]*"([^"]*)"/\1/')"
+    jq -nc --arg u "$url" --arg n "$nonce" \
+        '{bridge_url:(if $u=="" then null else $u end), doc_nonce:(if $n=="" then null else $n end)}'
+}
 
 bump_worst() {
     case "$1" in
@@ -85,6 +215,13 @@ add_autofixed() {
 "
 }
 
+# add_reaped PATH — record a reaped instance JSONL for the JSON output.
+# Caller is responsible for the actual `rm`; this is bookkeeping only.
+add_reaped() {
+    REAPED_JSONL="${REAPED_JSONL}$1
+"
+}
+
 pass() { CHECKS_RUN=$((CHECKS_RUN+1)); CHECKS_PASSED=$((CHECKS_PASSED+1)); }
 fail() { CHECKS_RUN=$((CHECKS_RUN+1)); }
 
@@ -102,16 +239,105 @@ emit_and_exit() {
     local ec=0
     [ "$WORST" = "2" ] && ec=2
     [ "$WORST" = "1" ] && ec=1
-    local issues_arr autofixed_arr ok_val
+    local issues_arr autofixed_arr reaped_arr ok_val
     issues_arr="$(printf '%s' "$ISSUES_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
     autofixed_arr="$(printf '%s' "$AUTOFIXED_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    reaped_arr="$(printf '%s' "$REAPED_JSONL" | awk 'NF{printf "%s\n",$0}' \
+                  | jq -R . | jq -cs '. // []' 2>/dev/null || printf '[]')"
     [ "$ec" = "0" ] && ok_val=true || ok_val=false
     jq -nc --argjson ok "$ok_val" --argjson exit_code "$ec" --arg ts "$(now_iso)" \
            --argjson checks_run "$CHECKS_RUN" --argjson checks_passed "$CHECKS_PASSED" \
            --argjson auto_fixed "$autofixed_arr" --argjson issues "$issues_arr" \
-        '{ok:$ok, exit:$exit_code, ts:$ts, checks_run:$checks_run, checks_passed:$checks_passed, auto_fixed:$auto_fixed, issues:$issues}'
+           --argjson reaped "$reaped_arr" \
+           --argjson i_total "${INSTANCES_TOTAL:-0}" --argjson i_live "${INSTANCES_LIVE:-0}" \
+           --argjson i_orphan "${INSTANCES_ORPHAN:-0}" --argjson i_stuck "${INSTANCES_STUCK:-0}" \
+           --argjson i_late "${INSTANCES_LATE:-0}" --argjson i_surface_dead "${INSTANCES_SURFACE_DEAD:-0}" \
+        '{ok:$ok, exit:$exit_code, ts:$ts, checks_run:$checks_run, checks_passed:$checks_passed,
+          auto_fixed:$auto_fixed, issues:$issues, reaped:$reaped,
+          instance_check:{total:$i_total, live:$i_live, orphan:$i_orphan,
+                          daemon_stuck:$i_stuck, heartbeat_late:$i_late,
+                          surface_dead:$i_surface_dead}}'
     exit "$ec"
 }
+
+# ── --bindings: audit doc HTMLs against live bridge registrations ──
+# Distinct from the standard sweep. Used by paperflow-4t5 (migration) to know
+# which docs still reference defunct bridges. Returns JSON; exits 0 always.
+if [ "$MODE" = "--bindings" ]; then
+    # 1. Walk every live instance JSONL, build the set of registered (port,nonce).
+    #    LIVE_PAIRS is a newline-delimited table: "<port>\t<nonce>".
+    LIVE_PAIRS=""
+    LIVE_PORTS=" "
+    if [ -d "$INSTANCES_DIR" ]; then
+        for f in "$INSTANCES_DIR"/*.jsonl; do
+            [ -f "$f" ] || continue
+            # First line is the session record — extract port + owner_pid.
+            port="$(head -1 "$f" 2>/dev/null | jq -r '.port // empty' 2>/dev/null)"
+            owner_pid="$(head -1 "$f" 2>/dev/null | jq -r '.owner_pid // empty' 2>/dev/null)"
+            [ -n "$port" ] || continue
+            # Aliveness = owner alive + port listening. Skip dead daemons; their
+            # nonces are no longer queryable, so any doc bound to them is orphaned.
+            pid_alive "$owner_pid" || continue
+            tcp_listening "$port"  || continue
+            LIVE_PORTS="${LIVE_PORTS}${port} "
+            # Every registration line in this JSONL is currently mapped (the
+            # in-memory registry rebuilds from the file on restart per G3).
+            while IFS= read -r nonce; do
+                [ -n "$nonce" ] || continue
+                LIVE_PAIRS="${LIVE_PAIRS}${port}	${nonce}
+"
+            done < <(grep '"type":"registration"' "$f" 2>/dev/null \
+                       | jq -r '.doc_nonce // empty' 2>/dev/null)
+        done
+    fi
+
+    # 2. Walk every doc HTML; categorise each.
+    DOCS_JSONL=""
+    BOUND_LIVE=0; BOUND_ORPHANED=0; UNBOUND_STALE=0
+    DOC_DIRS="goals plans specs grills questionnaires notes changelog audits"
+    for dir in $DOC_DIRS; do
+        [ -d "$DOCS_ROOT/$dir" ] || continue
+        while IFS= read -r doc; do
+            [ -f "$doc" ] || continue
+            target="$(extract_doc_target "$doc")"
+            url="$(printf   '%s' "$target" | jq -r '.bridge_url // empty' 2>/dev/null)"
+            nonce="$(printf '%s' "$target" | jq -r '.doc_nonce  // empty' 2>/dev/null)"
+            state=""; port=""
+            if [ -z "$url" ]; then
+                # Legacy doc (cmux_surface-only, or no target at all).
+                state="unbound-stale"; UNBOUND_STALE=$((UNBOUND_STALE+1))
+            else
+                # Strip "http(s)://host:" prefix and any path suffix → port.
+                port="$(printf '%s' "$url" | sed -E 's@^[a-z]+://[^:/]*:?@@; s@/.*$@@')"
+                if [ -n "$port" ] && [ -n "$nonce" ] \
+                   && printf '%s' "$LIVE_PAIRS" | grep -qF "$(printf '%s\t%s' "$port" "$nonce")"; then
+                    state="bound-live"; BOUND_LIVE=$((BOUND_LIVE+1))
+                elif [ -n "$port" ] && [ "${LIVE_PORTS#* $port }" != "$LIVE_PORTS" ]; then
+                    # Port has a live daemon, but the nonce is not in its registry
+                    # (e.g. daemon restarted and lost the in-memory registration).
+                    state="unbound-stale"; UNBOUND_STALE=$((UNBOUND_STALE+1))
+                else
+                    state="bound-orphaned"; BOUND_ORPHANED=$((BOUND_ORPHANED+1))
+                fi
+            fi
+            doc_line="$(jq -nc --arg p "$doc" --arg s "$state" \
+                              --arg u "${url:-}" --arg n "${nonce:-}" --arg port "${port:-}" \
+                '{path:$p, state:$s, bridge_url:(if $u=="" then null else $u end),
+                  doc_nonce:(if $n=="" then null else $n end),
+                  port:(if $port=="" then null else ($port|tonumber? // null) end)}')"
+            DOCS_JSONL="${DOCS_JSONL}${doc_line}
+"
+        done < <(find "$DOCS_ROOT/$dir" -maxdepth 4 -name '*.html' -type f 2>/dev/null)
+    done
+
+    docs_arr="$(printf '%s' "$DOCS_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    jq -nc --argjson docs "$docs_arr" \
+           --argjson bl "$BOUND_LIVE" --argjson bo "$BOUND_ORPHANED" --argjson us "$UNBOUND_STALE" \
+           --arg ts "$(now_iso)" \
+        '{ok:true, ts:$ts, docs:$docs,
+          summary:{bound_live:$bl, bound_orphaned:$bo, unbound_stale:$us}}'
+    exit 0
+fi
 
 # ── 0. paperflow-preflight gate ────────────────────────────────────
 # Services down beats config drift — propagate preflight JSON unchanged.
@@ -215,7 +441,110 @@ for asset in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js 
                     "bash $REPO/install.sh" true
 done
 
-# ── 6. fast-mode gate: merge cache or re-exec ──────────────────────
+# ── 6. instance-check: per-instance bridge state files (Q11 + Q12) ─
+# Triple-check each ~/.paperflow/instances/<sid>.jsonl. The spec triple is:
+#   PID alive  AND  (cmux-surface-alive OR cmux-unavailable)  AND
+#   heartbeat ≤ HEARTBEAT_FRESH_S. Port-listening is kept as an additional
+#   structural sanity check (it precedes the heartbeat leg).
+# Categorise into:
+#   live           → all gates pass; pass
+#   orphan         → owner PID dead → reap silently under --repair when the
+#                    JSONL is older than REAP_AGE_S (5 min stale-window);
+#                    otherwise flag with auto_fix_safe:false
+#   surface-dead   → PID alive but the recorded cmux surface no longer
+#                    exists in its workspace (cmux-only; skipped if cmux is
+#                    not on PATH or the JSONL has no cmux refs)
+#   daemon-stuck   → PID alive but port closed → repair hint = SIGTERM
+#   heartbeat-late → other gates green but heartbeat > HEARTBEAT_FRESH_S
+#                    (warning only — daemon may be mid-tool-call)
+INSTANCES_LIVE=0
+INSTANCES_ORPHAN=0
+INSTANCES_STUCK=0
+INSTANCES_LATE=0
+INSTANCES_TOTAL=0
+INSTANCES_SURFACE_DEAD=0
+if [ -d "$INSTANCES_DIR" ]; then
+    for f in "$INSTANCES_DIR"/*.jsonl; do
+        [ -f "$f" ] || continue
+        INSTANCES_TOTAL=$((INSTANCES_TOTAL+1))
+        SID="$(basename "$f" .jsonl)"
+        FIRST="$(head -1 "$f" 2>/dev/null)"
+        OWNER_PID="$(printf '%s' "$FIRST" | jq -r '.owner_pid // empty'      2>/dev/null)"
+        BR_PORT="$(printf   '%s' "$FIRST" | jq -r '.port // empty'           2>/dev/null)"
+        CMUX_WS="$(printf   '%s' "$FIRST" | jq -r '.cmux_workspace // empty' 2>/dev/null)"
+        CMUX_SF="$(printf   '%s' "$FIRST" | jq -r '.cmux_surface // empty'   2>/dev/null)"
+        if [ -z "$OWNER_PID" ] || [ -z "$BR_PORT" ]; then
+            # Malformed state file — treat as orphan (it's not actionable).
+            # Reap-eligible under --repair when age ≥ REAP_AGE_S.
+            F_AGE="$(file_age_seconds "$f" 2>/dev/null || echo 0)"
+            if [ "$REAP_ENABLED" = "1" ] && [ "${F_AGE:-0}" -ge "$REAP_AGE_S" ] 2>/dev/null; then
+                rm -f "$f" 2>/dev/null && add_reaped "$f"
+                continue
+            fi
+            INSTANCES_ORPHAN=$((INSTANCES_ORPHAN+1))
+            add_issue "instance:malformed:$SID" "warning" \
+                      "Instance state file $f is missing session/port/owner_pid" \
+                      "rm $f   # safe to remove; daemon (if any) cannot be matched" false
+            continue
+        fi
+        if ! pid_alive "$OWNER_PID"; then
+            # Reap-on-repair: silently delete when PID is dead AND mtime
+            # is older than the REAP_AGE_S stale-window. Short window =
+            # don't litter the filesystem; long enough = brief race grace.
+            F_AGE="$(file_age_seconds "$f" 2>/dev/null || echo 0)"
+            if [ "$REAP_ENABLED" = "1" ] && [ "${F_AGE:-0}" -ge "$REAP_AGE_S" ] 2>/dev/null; then
+                rm -f "$f" 2>/dev/null && add_reaped "$f"
+                continue
+            fi
+            INSTANCES_ORPHAN=$((INSTANCES_ORPHAN+1))
+            add_issue "instance:orphan:$SID" "warning" \
+                      "Bridge instance $SID is orphaned (owner_pid $OWNER_PID is dead)" \
+                      "rm $f" false
+            continue
+        fi
+        # cmux surface query (Q11 second leg of the spec triple). Skipped
+        # when cmux is unavailable or the JSONL has no surface refs —
+        # gracefully degrades to PID+port+heartbeat in those environments.
+        if [ "$CMUX_AVAILABLE" = "1" ] && [ -n "$CMUX_WS" ] && [ -n "$CMUX_SF" ]; then
+            if ! cmux_surface_alive "$CMUX_WS" "$CMUX_SF"; then
+                INSTANCES_SURFACE_DEAD=$((INSTANCES_SURFACE_DEAD+1))
+                add_issue "instance:surface-dead:$SID" "warning" \
+                          "Bridge instance $SID owner alive but cmux surface $CMUX_SF in $CMUX_WS no longer exists" \
+                          "kill -TERM $OWNER_PID   # surface gone; let the daemon respawn cleanly" false
+                continue
+            fi
+        fi
+        if ! tcp_listening "$BR_PORT"; then
+            INSTANCES_STUCK=$((INSTANCES_STUCK+1))
+            add_issue "instance:daemon-stuck:$SID" "warning" \
+                      "Bridge instance $SID owner is alive (pid $OWNER_PID) but port $BR_PORT is not listening" \
+                      "kill -TERM $OWNER_PID   # let the daemon-watcher respawn cleanly" false
+            continue
+        fi
+        # All structural signals green; check heartbeat freshness (Q11 third leg).
+        LAST_TS="$(instance_last_signal_ts "$f")"
+        AGE="$(iso_age_seconds "$LAST_TS" 2>/dev/null || echo "")"
+        if [ -n "$AGE" ] && [ "$AGE" -gt "$HEARTBEAT_FRESH_S" ] 2>/dev/null; then
+            INSTANCES_LATE=$((INSTANCES_LATE+1))
+            add_issue "instance:heartbeat-late:$SID" "warning" \
+                      "Bridge instance $SID has stale heartbeat (${AGE}s > ${HEARTBEAT_FRESH_S}s)" \
+                      "# investigate — daemon may be mid-tool-call or hung" false
+            continue
+        fi
+        INSTANCES_LIVE=$((INSTANCES_LIVE+1))
+    done
+fi
+# Instance-check counts as ONE logical check regardless of instance count.
+# Passes when every instance file is in the `live` state (or none exist);
+# fails (still recorded in CHECKS_RUN) when any orphan/stuck/late/surface-dead
+# was found. Reaped files don't count toward failure — they're gone.
+if [ "$((INSTANCES_ORPHAN + INSTANCES_STUCK + INSTANCES_LATE + INSTANCES_SURFACE_DEAD))" = "0" ]; then
+    pass
+else
+    fail
+fi
+
+# ── 7. fast-mode gate: merge cache or re-exec ──────────────────────
 if [ "$MODE" = "--fast" ]; then
     if cache_is_fresh; then
         # merge cached issues by id (fresh wins; cache only fills new ids)
@@ -238,7 +567,15 @@ EOF
         emit_and_exit
     elif [ "${PAPERFLOW_DOCTOR_REENTERED:-0}" != "1" ]; then
         export PAPERFLOW_DOCTOR_REENTERED=1
-        exec "$0" --full
+        # Hand off the reaped-path list to the --full re-exec so it shows up
+        # in the final JSON. (The re-exec sweep won't see the reaped files
+        # because they're already gone.) Preserve --repair as well.
+        export PAPERFLOW_DOCTOR_REAPED="$REAPED_JSONL"
+        if [ "$REAP_ENABLED" = "1" ]; then
+            exec "$0" --full --repair
+        else
+            exec "$0" --full
+        fi
     else
         MODE="--full"   # re-entry guard fired; keep going in-place
     fi
