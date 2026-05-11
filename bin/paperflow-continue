@@ -6,6 +6,16 @@
 # Usage:
 #   paperflow-continue <slug>
 #   paperflow-continue --dry-run <slug>
+#   paperflow-continue --bind-doc <doc_path> [--goal-id <id>] <slug>
+#
+# Flags:
+#   --dry-run            Print the resolved command (and resume_prompt) without
+#                        spawning a new terminal tab.
+#   --bind-doc <path>    Augment the resume_prompt to rebind an orphaned doc to
+#                        the new session's bridge daemon. <path> is either
+#                        absolute or relative to ~/docs/paperflow/.
+#   --goal-id <id>       Optional Goal ID context, surfaced inside the
+#                        augmented resume_prompt alongside --bind-doc.
 #
 # Sidecar resolution order:
 #   1. ~/docs/paperflow/goals/<slug>/index.json   (Goal — current canonical)
@@ -19,13 +29,38 @@ set -euo pipefail
 
 DRY_RUN=0
 SLUG=""
+BIND_DOC=""
+GOAL_ID=""
 
-for arg in "$@"; do
+while [ $# -gt 0 ]; do
+    arg="$1"
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         -h|--help)
-            sed -n '2,12p' "$0"
+            sed -n '2,22p' "$0"
             exit 0
+            ;;
+        --bind-doc)
+            if [ $# -lt 2 ]; then
+                printf '%s requires a value\n' "$arg" >&2
+                exit 2
+            fi
+            BIND_DOC="$2"
+            shift
+            ;;
+        --bind-doc=*)
+            BIND_DOC="${arg#--bind-doc=}"
+            ;;
+        --goal-id)
+            if [ $# -lt 2 ]; then
+                printf '%s requires a value\n' "$arg" >&2
+                exit 2
+            fi
+            GOAL_ID="$2"
+            shift
+            ;;
+        --goal-id=*)
+            GOAL_ID="${arg#--goal-id=}"
             ;;
         --*)
             printf 'Unknown flag: %s\n' "$arg" >&2
@@ -38,10 +73,11 @@ for arg in "$@"; do
             fi
             ;;
     esac
+    shift
 done
 
 if [ -z "$SLUG" ]; then
-    printf 'Usage: paperflow-continue [--dry-run] <slug>\n' >&2
+    printf 'Usage: paperflow-continue [--dry-run] [--bind-doc <path>] [--goal-id <id>] <slug>\n' >&2
     exit 2
 fi
 
@@ -67,6 +103,19 @@ RESUME_PROMPT="$(jq -r '.resume_prompt // empty' "$SIDECAR")"
 if [ -z "$RESUME_PROMPT" ]; then
     printf 'No resume_prompt found in %s\n' "$SIDECAR" >&2
     exit 1
+fi
+
+# --bind-doc: append rebind instructions so the new session immediately
+# registers the orphaned doc with the freshly-spawned bridge daemon. The
+# new session's first action after preflight is to run paperflow-target,
+# which POSTs /docs/register against the new daemon's JSONL.
+if [ -n "$BIND_DOC" ]; then
+    BIND_SUFFIX=$'\n\n'
+    if [ -n "$GOAL_ID" ]; then
+        BIND_SUFFIX+="Continue work on Goal ${GOAL_ID}; the doc you'll be rebinding is ${BIND_DOC}."$'\n'
+    fi
+    BIND_SUFFIX+="After paperflow boots in this session, register doc ${BIND_DOC} with the new bridge daemon by running: ~/.local/bin/paperflow-target ${BIND_DOC}"
+    RESUME_PROMPT="${RESUME_PROMPT}${BIND_SUFFIX}"
 fi
 
 # Shell-escape the resume prompt for a single-quoted bash string.
@@ -96,7 +145,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf 'paperflow-continue: dry-run\n'
     printf '  slug          : %s\n' "$SLUG"
     printf '  sidecar       : %s\n' "$SIDECAR"
+    printf '  bind-doc      : %s\n' "${BIND_DOC:-<unset>}"
+    printf '  goal-id       : %s\n' "${GOAL_ID:-<unset>}"
     printf '  terminal path : %s\n' "$PATH_TAKEN"
+    printf '  resume_prompt : %s\n' "$RESUME_PROMPT"
     printf '  command       : %s\n' "$CMD"
     exit 0
 fi
