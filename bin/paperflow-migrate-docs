@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+// paperflow-migrate-docs: rewrite legacy `window.CLAUDE_TARGET` blocks in
+// paperflow HTML docs from surface-bound (cmux_surface) to per-instance
+// (bridge_url + doc_nonce). Surface-bound bindings cannot route after the
+// originating cmux tab dies — see ~/.paperflow/migration-audit-<date>.csv.
+//
+// Flags:
+//   --csv <path>   audit CSV; defaults to newest ~/.paperflow/migration-audit-*.csv
+//   --dry-run      show what would change; write nothing
+//   --force        skip confirmation prompt
+//
+// Output: JSON summary to stdout. Exit 0 on success.
+
+'use strict';
+
+const fs   = require('fs');
+const os   = require('os');
+const path = require('path');
+const readline = require('readline');
+
+// ── CLI arg parsing ─────────────────────────────────────────────────
+function parseArgs(argv) {
+  const out = { flags: {}, _: [] };
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--dry-run' || a === '--force') { out.flags[a.slice(2)] = true; continue; }
+    if (a === '--csv') { out.flags.csv = argv[++i]; continue; }
+    const m = /^--([a-zA-Z0-9_-]+)(?:=(.*))?$/.exec(a);
+    if (m) { out.flags[m[1]] = m[2] === undefined ? true : m[2]; continue; }
+    out._.push(a);
+  }
+  return out;
+}
+
+const ARGS    = parseArgs(process.argv);
+const DRY_RUN = !!ARGS.flags['dry-run'];
+const FORCE   = !!ARGS.flags.force;
+
+// ── Locate CSV ──────────────────────────────────────────────────────
+function findNewestCsv() {
+  const dir = path.join(os.homedir(), '.paperflow');
+  if (!fs.existsSync(dir)) return null;
+  const entries = fs.readdirSync(dir)
+    .filter(f => /^migration-audit-\d{4}-\d{2}-\d{2}\.csv$/.test(f))
+    .map(f => ({ f, full: path.join(dir, f), mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+  return entries.length ? entries[0].full : null;
+}
+
+const CSV_PATH = ARGS.flags.csv || findNewestCsv();
+if (!CSV_PATH) { console.error('error: no migration-audit CSV found'); process.exit(2); }
+if (!fs.existsSync(CSV_PATH)) { console.error(`error: CSV not found: ${CSV_PATH}`); process.exit(2); }
+
+// ── Tiny CSV reader (handles quoted fields with embedded commas) ────
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.length);
+  if (!lines.length) return { header: [], rows: [] };
+  const split = line => {
+    const out = []; let cur = ''; let q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) {
+        if (c === '"' && line[i+1] === '"') { cur += '"'; i++; }
+        else if (c === '"') q = false;
+        else cur += c;
+      } else {
+        if (c === ',') { out.push(cur); cur = ''; }
+        else if (c === '"') q = true;
+        else cur += c;
+      }
+    }
+    out.push(cur);
+    return out;
+  };
+  const header = split(lines[0]);
+  const rows = lines.slice(1).map(l => {
+    const cells = split(l);
+    return Object.fromEntries(header.map((h, i) => [h, cells[i]]));
+  });
+  return { header, rows };
+}
+
+// ── CLAUDE_TARGET rewrite ───────────────────────────────────────────
+// Matches both single-line `= {...};` and multi-line `= {\n  ...\n};` forms.
+// Non-greedy across newlines; brace-aware via a permissive `[^{}]` + nested
+// fallback — but every doc we've seen has a flat object, so a non-greedy
+// match through to the closing `};` is sufficient.
+const TARGET_RE = /window\.CLAUDE_TARGET\s*=\s*(\{[\s\S]*?\})\s*;/;
+
+function parseTargetLiteral(literal) {
+  // The literal is JS, not strict JSON, but every audited doc uses JSON-like
+  // formatting (quoted keys, real `null`s). Try JSON first, fall back to a
+  // sandboxed Function eval — these are local files we already trust.
+  try { return JSON.parse(literal); } catch (_) {}
+  try { return Function(`"use strict";return (${literal});`)(); }
+  catch (e) { throw new Error(`unparseable CLAUDE_TARGET literal: ${e.message}`); }
+}
+
+function rewriteDoc(absPath) {
+  const src = fs.readFileSync(absPath, 'utf8');
+  const m = TARGET_RE.exec(src);
+  if (!m) return { kind: 'no_target' };
+
+  const obj = parseTargetLiteral(m[1]);
+
+  // Idempotency: already migrated if `bridge_url` key is present and no
+  // surface-bound key remains.
+  const isMigrated = Object.prototype.hasOwnProperty.call(obj, 'bridge_url')
+                  && !('cmux_surface' in obj);
+  if (isMigrated) return { kind: 'already_migrated' };
+
+  // Preserve cmux_workspace (may be useful for diagnostics). Drop everything
+  // surface-bound or process-bound — those don't survive a tab restart.
+  const cmux_workspace = obj.cmux_workspace || null;
+
+  const next = {
+    bridge_url:     null,
+    doc_nonce:      null,
+    session_id:     null,
+    cmux_workspace,
+  };
+
+  // Compact single-line form keeps diffs readable in git.
+  const replacement = `window.CLAUDE_TARGET = ${JSON.stringify(next)};`;
+  const updated = src.slice(0, m.index) + replacement + src.slice(m.index + m[0].length);
+
+  if (DRY_RUN) return { kind: 'would_rewrite', before: m[0], after: replacement };
+
+  // Atomic write.
+  const tmp = absPath + '.tmp';
+  fs.writeFileSync(tmp, updated, 'utf8');
+  fs.renameSync(tmp, absPath);
+  return { kind: 'rewritten' };
+}
+
+// ── Main ────────────────────────────────────────────────────────────
+async function confirm(prompt) {
+  if (FORCE || DRY_RUN) return true;
+  if (!process.stdin.isTTY) return false;
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise(res => rl.question(prompt, ans => { rl.close(); res(/^y(es)?$/i.test(ans.trim())); }));
+}
+
+(async () => {
+  const csv = parseCsv(fs.readFileSync(CSV_PATH, 'utf8'));
+  const candidates = csv.rows.filter(r => r.would_break === 'yes');
+
+  const summary = {
+    csv: CSV_PATH,
+    dry_run: DRY_RUN,
+    total_in_csv: csv.rows.length,
+    would_break: candidates.length,
+    rewritten: 0,
+    skipped_already_migrated: 0,
+    skipped_no_target: 0,
+    errors: [],
+  };
+
+  if (!candidates.length) { console.log(JSON.stringify(summary, null, 2)); return; }
+
+  if (!DRY_RUN && !FORCE) {
+    const ok = await confirm(`Rewrite ${candidates.length} doc(s)? [y/N] `);
+    if (!ok) { summary.aborted = true; console.log(JSON.stringify(summary, null, 2)); process.exit(1); }
+  }
+
+  const home = os.homedir();
+  for (const row of candidates) {
+    // CSV paths are relative to $HOME.
+    const rel = row.path;
+    const abs = path.isAbsolute(rel) ? rel : path.join(home, rel);
+    try {
+      if (!fs.existsSync(abs)) { summary.errors.push({ path: rel, reason: 'file_not_found' }); continue; }
+      const r = rewriteDoc(abs);
+      if (r.kind === 'rewritten' || r.kind === 'would_rewrite') summary.rewritten++;
+      else if (r.kind === 'already_migrated') summary.skipped_already_migrated++;
+      else if (r.kind === 'no_target') summary.skipped_no_target++;
+    } catch (e) {
+      summary.errors.push({ path: rel, reason: e.message });
+    }
+  }
+
+  console.log(JSON.stringify(summary, null, 2));
+})();
