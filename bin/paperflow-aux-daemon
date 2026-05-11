@@ -129,6 +129,44 @@ function readInstanceFile(filePath) {
   return { session, latestTs };
 }
 
+// Find the cmux_workspace recorded for whichever dead session originally
+// registered `doc_nonce`. Walks every instance JSONL, parses the session
+// line plus all registration lines, returns the first cmux_workspace it
+// finds for a matching nonce.
+//
+// Returns null when no match (legacy orphaned doc with no recorded nonce,
+// or session predating cmux_workspace tagging). Callers must tolerate null
+// and fall through to paperflow-continue's terminal-detection cascade.
+function lookupWorkspaceForNonce(docNonce) {
+  if (!docNonce || typeof docNonce !== 'string') return null;
+  let entries;
+  try { entries = fs.readdirSync(INSTANCES_DIR); }
+  catch (_) { return null; }
+  for (const name of entries) {
+    if (!name.endsWith('.jsonl')) continue;
+    const filePath = path.join(INSTANCES_DIR, name);
+    let raw;
+    try { raw = fs.readFileSync(filePath, 'utf8'); }
+    catch (_) { continue; }
+    const lines = raw.split('\n').filter(Boolean);
+    let session = null;
+    let nonceMatch = false;
+    for (const line of lines) {
+      let obj;
+      try { obj = JSON.parse(line); }
+      catch (_) { continue; }
+      if (!session && obj.type === 'session') session = obj;
+      if (obj && obj.type === 'registration' && obj.doc_nonce === docNonce) {
+        nonceMatch = true;
+      }
+    }
+    if (nonceMatch && session && session.cmux_workspace) {
+      return session.cmux_workspace;
+    }
+  }
+  return null;
+}
+
 async function gatherInstances(workspaceFilter) {
   ensureDir(INSTANCES_DIR);
   let entries;
@@ -255,10 +293,26 @@ function handleSpawnContinuation(req, res) {
     // (which will exit 2 on unknown flag). Until task paperflow-40y lands
     // that flag support, we accept that and return the spawn outcome —
     // the daemon's contract here is "kicked off a process".
+    //
+    // --workspace: look up the dead session's cmux_workspace via the
+    // registered doc_nonce. When present, paperflow-continue prefers
+    // `cmux new-surface --workspace <id>` so the rebound doc lands in
+    // the same workspace as its dead session. When absent (legacy nonce,
+    // session predating cmux tagging, missing JSONL), we omit the flag
+    // and paperflow-continue falls back to its terminal cascade — no error.
     const args = [];
     args.push('--bind-doc', doc_path);
     if (typeof goal_id === 'string' && goal_id) {
       args.push('--goal-id', goal_id);
+    }
+    let workspace = null;
+    if (typeof doc_nonce === 'string' && doc_nonce) {
+      try { workspace = lookupWorkspaceForNonce(doc_nonce); }
+      catch (e) {
+        logLine(`spawn-continuation: workspace lookup threw: ${e.message}`);
+        workspace = null;
+      }
+      if (workspace) args.push('--workspace', workspace);
     }
 
     let child;
@@ -279,7 +333,7 @@ function handleSpawnContinuation(req, res) {
       logLine(`spawn-continuation: child error: ${err.message}`);
     });
 
-    logLine(`spawn-continuation: doc_path=${doc_path} goal_id=${goal_id || ''} pid=${child.pid}`);
+    logLine(`spawn-continuation: doc_path=${doc_path} goal_id=${goal_id || ''} workspace=${workspace || ''} pid=${child.pid}`);
     return jsonRes(res, 200, { ok: true, spawned: true });
   });
 }
