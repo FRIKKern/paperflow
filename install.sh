@@ -631,6 +631,40 @@ else
     ok "merged PostToolUse event-on-save"
 fi
 
+# Per-instance bridge lifecycle (paperflow-22c). SessionStart forks a
+# bridge owned by this Claude Code process; SessionEnd sends SIGTERM so
+# the daemon writes a clean orphan event before exit (the owner-watch in
+# claude-bridge.js would catch it within 5s anyway). Both are idempotent —
+# the jq -e dedup matches on the exact command string we write.
+HOOK_BRIDGE_SPAWN='$HOME/.local/bin/paperflow-bridge-spawn'
+HOOK_BRIDGE_KILL='pkill -TERM -f "claude-bridge.js.*--session-id=${CLAUDE_SESSION_ID}" >/dev/null 2>&1 || true'
+
+if jq -e --arg cmd "$HOOK_BRIDGE_SPAWN" '.hooks.SessionStart[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
+    skip "SessionStart bridge-spawn hook already present"
+else
+    TMP="$(mktemp)"
+    jq --arg cmd "$HOOK_BRIDGE_SPAWN" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [{
+        hooks: [{ type: "command",
+                  command: $cmd,
+                  timeout: 5 }]
+    }])' "$SETTINGS" > "$TMP"
+    mv "$TMP" "$SETTINGS"
+    ok "merged SessionStart bridge-spawn"
+fi
+
+if jq -e --arg cmd "$HOOK_BRIDGE_KILL" '.hooks.SessionEnd[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
+    skip "SessionEnd bridge-kill hook already present"
+else
+    TMP="$(mktemp)"
+    jq --arg cmd "$HOOK_BRIDGE_KILL" '.hooks.SessionEnd = ((.hooks.SessionEnd // []) + [{
+        hooks: [{ type: "command",
+                  command: $cmd,
+                  timeout: 3 }]
+    }])' "$SETTINGS" > "$TMP"
+    mv "$TMP" "$SETTINGS"
+    ok "merged SessionEnd bridge-kill"
+fi
+
 # ─── 8b. paperflow Dock (cmux) ──────────────────────────────────────
 # Daemon + thin feed client + XDG-compliant dock.json. Skip-on-existing
 # default; --reset-dock overwrites after backing up to .bak.<ts>.
@@ -958,6 +992,13 @@ deploy_helper pf
 deploy_helper paperflow-active-scope
 deploy_helper paperflow-audit-orchestrator-budget
 deploy_helper paperflow-backfill-goal-id
+
+# Per-instance bridge spawn wrapper (paperflow-22c). The wrapper resolves
+# claude-bridge.js via `dirname "$0"`, so we co-install both under
+# ~/.local/bin/ — that makes the lookup work both in-repo (where they sit
+# side-by-side in bin/) and post-install (where they sit side-by-side here).
+deploy_helper paperflow-bridge-spawn
+deploy_helper claude-bridge.js
 
 # ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
 # Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
