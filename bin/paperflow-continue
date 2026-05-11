@@ -7,6 +7,7 @@
 #   paperflow-continue <slug>
 #   paperflow-continue --dry-run <slug>
 #   paperflow-continue --bind-doc <doc_path> [--goal-id <id>] <slug>
+#   paperflow-continue --workspace <id> [other flags] <slug>
 #
 # Flags:
 #   --dry-run            Print the resolved command (and resume_prompt) without
@@ -16,6 +17,12 @@
 #                        absolute or relative to ~/docs/paperflow/.
 #   --goal-id <id>       Optional Goal ID context, surfaced inside the
 #                        augmented resume_prompt alongside --bind-doc.
+#   --workspace <id>     Prefer spawning a new cmux surface inside the named
+#                        cmux workspace. Used by the aux-daemon's
+#                        spawn-continuation path so the rebound doc lands in
+#                        the same workspace as its dead session. Falls back to
+#                        the tmux/iTerm/Terminal cascade when cmux is missing
+#                        or `cmux new-surface` fails.
 #
 # Sidecar resolution order:
 #   1. ~/docs/paperflow/goals/<slug>/index.json   (Goal — current canonical)
@@ -31,6 +38,7 @@ DRY_RUN=0
 SLUG=""
 BIND_DOC=""
 GOAL_ID=""
+WORKSPACE=""
 
 while [ $# -gt 0 ]; do
     arg="$1"
@@ -62,6 +70,17 @@ while [ $# -gt 0 ]; do
         --goal-id=*)
             GOAL_ID="${arg#--goal-id=}"
             ;;
+        --workspace)
+            if [ $# -lt 2 ]; then
+                printf '%s requires a value\n' "$arg" >&2
+                exit 2
+            fi
+            WORKSPACE="$2"
+            shift
+            ;;
+        --workspace=*)
+            WORKSPACE="${arg#--workspace=}"
+            ;;
         --*)
             printf 'Unknown flag: %s\n' "$arg" >&2
             exit 2
@@ -77,7 +96,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$SLUG" ]; then
-    printf 'Usage: paperflow-continue [--dry-run] [--bind-doc <path>] [--goal-id <id>] <slug>\n' >&2
+    printf 'Usage: paperflow-continue [--dry-run] [--bind-doc <path>] [--goal-id <id>] [--workspace <id>] <slug>\n' >&2
     exit 2
 fi
 
@@ -130,15 +149,29 @@ ESCAPED_PROMPT="$(printf '%s' "$RESUME_PROMPT" | sed "s/'/'\\\\''/g")"
 CMD="cd ~ && claude --dangerously-skip-permissions '$ESCAPED_PROMPT'"
 
 # Detect terminal path.
+#
+# When --workspace is set, prefer cmux: a new surface in the named workspace
+# inherits the dead session's workspace context, so the rebound doc lands in
+# the same place as the original session. Falls back to the cascade if cmux
+# isn't installed or `cmux new-surface` fails.
 PATH_TAKEN=""
-if [ -n "${TMUX:-}" ]; then
-    PATH_TAKEN="tmux"
-elif [ "${TERM_PROGRAM:-}" = "iTerm.app" ]; then
-    PATH_TAKEN="iterm"
-elif [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ]; then
-    PATH_TAKEN="apple_terminal"
-else
-    PATH_TAKEN="fallback_apple_terminal"
+CMUX_BIN=""
+if [ -n "$WORKSPACE" ]; then
+    if command -v cmux >/dev/null 2>&1; then
+        CMUX_BIN="$(command -v cmux)"
+        PATH_TAKEN="cmux"
+    fi
+fi
+if [ -z "$PATH_TAKEN" ]; then
+    if [ -n "${TMUX:-}" ]; then
+        PATH_TAKEN="tmux"
+    elif [ "${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+        PATH_TAKEN="iterm"
+    elif [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ]; then
+        PATH_TAKEN="apple_terminal"
+    else
+        PATH_TAKEN="fallback_apple_terminal"
+    fi
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -147,9 +180,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  sidecar       : %s\n' "$SIDECAR"
     printf '  bind-doc      : %s\n' "${BIND_DOC:-<unset>}"
     printf '  goal-id       : %s\n' "${GOAL_ID:-<unset>}"
+    printf '  workspace     : %s\n' "${WORKSPACE:-<unset>}"
     printf '  terminal path : %s\n' "$PATH_TAKEN"
     printf '  resume_prompt : %s\n' "$RESUME_PROMPT"
     printf '  command       : %s\n' "$CMD"
+    if [ "$PATH_TAKEN" = "cmux" ]; then
+        printf '  spawn         : %s new-surface --workspace %s -- %s\n' "$CMUX_BIN" "$WORKSPACE" "$CMD"
+    fi
     exit 0
 fi
 
@@ -164,6 +201,59 @@ osascript_escape() {
     s="${s//\"/\\\"}"
     printf '%s' "$s"
 }
+
+cmux_fallback_cascade() {
+    # Re-detect a fallback path when cmux spawn fails. Skips the cmux branch
+    # to avoid an infinite loop.
+    if [ -n "${TMUX:-}" ]; then
+        PATH_TAKEN="tmux"
+    elif [ "${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+        PATH_TAKEN="iterm"
+    elif [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ]; then
+        PATH_TAKEN="apple_terminal"
+    else
+        PATH_TAKEN="fallback_apple_terminal"
+    fi
+    printf 'paperflow-continue: cmux spawn failed, falling back via %s\n' "$PATH_TAKEN" >&2
+}
+
+case "$PATH_TAKEN" in
+    cmux)
+        # Create a new surface in the named workspace, then type the command
+        # into it. `cmux new-surface` prints the new surface ref on stdout;
+        # we capture it and target it explicitly with `send` / `send-key` so
+        # we don't race against whichever surface cmux happens to focus.
+        SURFACE_OUT=""
+        if ! SURFACE_OUT="$("$CMUX_BIN" new-surface --workspace "$WORKSPACE" 2>&1)"; then
+            printf 'paperflow-continue: cmux new-surface failed: %s\n' "$SURFACE_OUT" >&2
+            cmux_fallback_cascade
+        else
+            # First whitespace-separated token of stdout that looks like a
+            # surface ref (`surface:N`) wins. If no ref is parsed, target by
+            # workspace alone — cmux focuses the new surface by default.
+            SURFACE_REF="$(printf '%s\n' "$SURFACE_OUT" | tr -s ' \t\n' '\n' | grep -E '^surface:[0-9]+$' | head -n1 || true)"
+            SEND_ARGS=(send --workspace "$WORKSPACE")
+            KEY_ARGS=(send-key --workspace "$WORKSPACE")
+            if [ -n "$SURFACE_REF" ]; then
+                SEND_ARGS+=(--surface "$SURFACE_REF")
+                KEY_ARGS+=(--surface "$SURFACE_REF")
+            fi
+            SEND_ARGS+=("$CMD")
+            KEY_ARGS+=(Return)
+            if ! "$CMUX_BIN" "${SEND_ARGS[@]}" >/dev/null 2>&1; then
+                printf 'paperflow-continue: cmux send failed\n' >&2
+                cmux_fallback_cascade
+            elif ! "$CMUX_BIN" "${KEY_ARGS[@]}" >/dev/null 2>&1; then
+                printf 'paperflow-continue: cmux send-key failed\n' >&2
+                cmux_fallback_cascade
+            else
+                printf 'paperflow-continue: opened new cmux surface in workspace %s for slug %s\n' "$WORKSPACE" "$SLUG"
+                exit 0
+            fi
+        fi
+        # Fall through to whichever PATH_TAKEN cmux_fallback_cascade picked.
+        ;;
+esac
 
 case "$PATH_TAKEN" in
     tmux)
