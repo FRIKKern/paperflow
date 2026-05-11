@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# paperflow-migration-audit — produce migration-audit CSV of existing paperflow doc HTMLs.
+# Output: ~/.paperflow/migration-audit-<YYYY-MM-DD>.csv
+# Columns: path,target_shape,cmux_surface,last_modified,would_break
+# Used by per-instance-bridge migration to know which docs need re-rendering.
+set -uo pipefail
+DOCS="${HOME}/docs/paperflow"
+OUT="${HOME}/.paperflow/migration-audit-$(date +%Y-%m-%d).csv"
+mkdir -p "$(dirname "$OUT")"
+echo "path,target_shape,cmux_surface,last_modified,would_break" > "$OUT"
+find "$DOCS"/{goals,plans,specs,grills,questionnaires,notes,changelog,audits} \
+  -type f -name '*.html' 2>/dev/null | while read -r f; do
+  # Only match cmux_surface inside window.CLAUDE_TARGET assignment block — avoid prose mentions in body text.
+  ct=$(grep -ozE 'window\.CLAUDE_TARGET\s*=\s*\{[^}]*\}' "$f" 2>/dev/null | tr -d '\0' | head -c 4000 || true)
+  surf=$(printf '%s' "$ct" | grep -oE '"cmux_surface"[^,}]*' | head -1 | sed 's/"cmux_surface"://;s/"//g' | tr -d ' ' || true)
+  if printf '%s' "$ct" | grep -q 'cmux_surface'; then shape=surface-bound; break_=yes; else shape=workspace-only; break_=no; fi
+  mod=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M' "$f" 2>/dev/null || echo unknown)
+  echo "\"${f#$HOME/}\",${shape},${surf:-none},${mod},${break_}" >> "$OUT"
+done
+total=$(($(wc -l < "$OUT") - 1))
+would=$(grep -c ',yes$' "$OUT" 2>/dev/null || echo 0)
+printf '{"ok":true,"csv":"%s","total":%d,"would_break":%d}\n' "$OUT" "$total" "$would"

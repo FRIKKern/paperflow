@@ -1000,6 +1000,9 @@ deploy_helper pf
 deploy_helper paperflow-active-scope
 deploy_helper paperflow-audit-orchestrator-budget
 deploy_helper paperflow-backfill-goal-id
+deploy_helper paperflow-migrate-docs
+deploy_helper paperflow-migration-audit
+deploy_helper paperflow-bridge-smoke-test
 
 # Per-instance bridge spawn wrapper (paperflow-22c). The wrapper resolves
 # claude-bridge.js via `dirname "$0"`, so we co-install both under
