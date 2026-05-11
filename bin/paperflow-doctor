@@ -3,6 +3,7 @@
 # Modes:  --fast (default; cache-aware, may re-exec --full once if cache stale)
 #         --full (run every check, write cache at ~/.paperflow/doctor.cache.json)
 #         --ensure-bd (targeted: bd init the nearest git-repo root if not done)
+#         --bindings (audit doc HTMLs against live bridge registrations; JSON only)
 # Exit:   0 ok  · 1 warnings  · 2 critical (or paperflow-preflight reported failure)
 # Cache TTL: 86400s. macOS-portable bash 3.2; jq required, no node/python.
 # Auto-fixes hook scripts, helper bins, and renderers when sources are present.
@@ -23,11 +24,18 @@ ISSUES_JSONL=""
 AUTOFIXED_JSONL=""
 WORST=0  # 0 ok · 1 warn · 2 critical
 
+# Per-instance-bridge constants (Q11 of 2026-05-11-bridge-binding-contract).
+INSTANCES_DIR="$HOME/.paperflow/instances"
+HEARTBEAT_FRESH_S=10   # ≤ 10 s of slack on the last heartbeat/registration
+TCP_PROBE_TIMEOUT_S=1  # bash's /dev/tcp redirect blocks; cap with `nc` -w when available
+DOCS_ROOT="$HOME/docs/paperflow"
+
 case "${1:-}" in
     "" | "--fast") MODE="--fast" ;;
     "--full")      MODE="--full" ;;
     "--ensure-bd") MODE="--ensure-bd" ;;
-    *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd]\n' >&2; exit 1 ;;
+    "--bindings")  MODE="--bindings" ;;
+    *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd | --bindings]\n' >&2; exit 1 ;;
 esac
 
 # ── --ensure-bd: targeted Beads init for the current repo ──────────
@@ -57,8 +65,86 @@ if [ "$MODE" = "--ensure-bd" ]; then
     exit 2
 fi
 
+# (--bindings subcommand handler is defined below, after helpers, because it
+# reuses extract_doc_target + tcp_listening + iso_age_seconds.)
+
 # ── helpers ────────────────────────────────────────────────────────
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+now_epoch() { date +%s 2>/dev/null || echo 0; }
+
+# pid_alive PID  → 0 if alive, non-zero otherwise.  `kill -0` works for any
+# process whose owner you can signal; macOS returns ESRCH only for truly-gone PIDs.
+pid_alive() {
+    [ -n "${1:-}" ] || return 1
+    case "$1" in *[!0-9]*) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null
+}
+
+# tcp_listening PORT  → 0 if something is accepting on localhost:PORT.
+# Prefer `nc -z -w<TIMEOUT>` (POSIX-ish, ships with macOS); fall back to /dev/tcp.
+tcp_listening() {
+    local port="$1"
+    case "$port" in ""|*[!0-9]*) return 1 ;; esac
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w "$TCP_PROBE_TIMEOUT_S" 127.0.0.1 "$port" >/dev/null 2>&1
+        return $?
+    fi
+    # bash builtin TCP — no timeout, but only used as last resort.
+    ( exec 3<>"/dev/tcp/127.0.0.1/$port" ) >/dev/null 2>&1
+}
+
+# instance_last_signal_ts JSONL_PATH  → ISO timestamp of latest heartbeat or
+# registration line, or empty when none recorded yet. We accept both because
+# a fresh daemon may not have emitted its first heartbeat (3 s cadence) but
+# has already accepted at least one registration.
+instance_last_signal_ts() {
+    local path="$1"
+    [ -f "$path" ] || return 1
+    # tac substitute: print lines in reverse using awk so the freshest signal wins.
+    awk '/"type":"heartbeat"/ || /"type":"registration"/' "$path" 2>/dev/null \
+        | tail -1 \
+        | jq -r '(.registered_at // .ts) // empty' 2>/dev/null
+}
+
+# iso_age_seconds ISO_TIMESTAMP  → integer seconds since that ISO ts, or empty
+# when input is empty/unparseable. Uses `date -j -f` (BSD) which is what ships
+# on macOS; we deliberately do NOT depend on GNU coreutils.
+iso_age_seconds() {
+    local iso="$1"
+    [ -n "$iso" ] || return 1
+    # strip fractional seconds + trailing Z so BSD date can parse.
+    local stripped
+    stripped="$(printf '%s' "$iso" | sed 's/\..*Z$//; s/Z$//')"
+    local epoch
+    epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "$stripped" +%s 2>/dev/null)" || return 1
+    [ -n "$epoch" ] || return 1
+    echo $(( $(now_epoch) - epoch ))
+}
+
+# extract_doc_target FILE  → JSON object {bridge_url,doc_nonce} for the
+# window.CLAUDE_TARGET literal embedded in the doc, or {} when missing.
+# Best-effort regex over the assignment up to the terminating semicolon —
+# CLAUDE_TARGET is small (single object, ~10 fields), so a non-validating
+# scan is good enough to surface state without pulling in a JS parser.
+extract_doc_target() {
+    local file="$1" url="" nonce=""
+    [ -f "$file" ] || { printf '%s' '{}'; return 0; }
+    # Slurp the assignment window. awk reads from `window.CLAUDE_TARGET = ` up
+    # to the first `;` after it; that's the assignment statement we want.
+    local blob
+    blob="$(awk '
+        /window\.CLAUDE_TARGET[[:space:]]*=/ { capturing=1 }
+        capturing { buf = buf $0 "\n"; if (index($0, ";")) { print buf; exit } }
+    ' "$file" 2>/dev/null)"
+    [ -n "$blob" ] || { printf '%s' '{}'; return 0; }
+    url="$(printf '%s' "$blob"   | grep -oE '"bridge_url"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                                  | head -1 | sed -E 's/.*"bridge_url"[^"]*"([^"]*)"/\1/')"
+    nonce="$(printf '%s' "$blob" | grep -oE '"doc_nonce"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                                  | head -1 | sed -E 's/.*"doc_nonce"[^"]*"([^"]*)"/\1/')"
+    jq -nc --arg u "$url" --arg n "$nonce" \
+        '{bridge_url:(if $u=="" then null else $u end), doc_nonce:(if $n=="" then null else $n end)}'
+}
 
 bump_worst() {
     case "$1" in
@@ -109,9 +195,94 @@ emit_and_exit() {
     jq -nc --argjson ok "$ok_val" --argjson exit_code "$ec" --arg ts "$(now_iso)" \
            --argjson checks_run "$CHECKS_RUN" --argjson checks_passed "$CHECKS_PASSED" \
            --argjson auto_fixed "$autofixed_arr" --argjson issues "$issues_arr" \
-        '{ok:$ok, exit:$exit_code, ts:$ts, checks_run:$checks_run, checks_passed:$checks_passed, auto_fixed:$auto_fixed, issues:$issues}'
+           --argjson i_total "${INSTANCES_TOTAL:-0}" --argjson i_live "${INSTANCES_LIVE:-0}" \
+           --argjson i_orphan "${INSTANCES_ORPHAN:-0}" --argjson i_stuck "${INSTANCES_STUCK:-0}" \
+           --argjson i_late "${INSTANCES_LATE:-0}" \
+        '{ok:$ok, exit:$exit_code, ts:$ts, checks_run:$checks_run, checks_passed:$checks_passed,
+          auto_fixed:$auto_fixed, issues:$issues,
+          instance_check:{total:$i_total, live:$i_live, orphan:$i_orphan,
+                          daemon_stuck:$i_stuck, heartbeat_late:$i_late}}'
     exit "$ec"
 }
+
+# ── --bindings: audit doc HTMLs against live bridge registrations ──
+# Distinct from the standard sweep. Used by paperflow-4t5 (migration) to know
+# which docs still reference defunct bridges. Returns JSON; exits 0 always.
+if [ "$MODE" = "--bindings" ]; then
+    # 1. Walk every live instance JSONL, build the set of registered (port,nonce).
+    #    LIVE_PAIRS is a newline-delimited table: "<port>\t<nonce>".
+    LIVE_PAIRS=""
+    LIVE_PORTS=" "
+    if [ -d "$INSTANCES_DIR" ]; then
+        for f in "$INSTANCES_DIR"/*.jsonl; do
+            [ -f "$f" ] || continue
+            # First line is the session record — extract port + owner_pid.
+            port="$(head -1 "$f" 2>/dev/null | jq -r '.port // empty' 2>/dev/null)"
+            owner_pid="$(head -1 "$f" 2>/dev/null | jq -r '.owner_pid // empty' 2>/dev/null)"
+            [ -n "$port" ] || continue
+            # Aliveness = owner alive + port listening. Skip dead daemons; their
+            # nonces are no longer queryable, so any doc bound to them is orphaned.
+            pid_alive "$owner_pid" || continue
+            tcp_listening "$port"  || continue
+            LIVE_PORTS="${LIVE_PORTS}${port} "
+            # Every registration line in this JSONL is currently mapped (the
+            # in-memory registry rebuilds from the file on restart per G3).
+            while IFS= read -r nonce; do
+                [ -n "$nonce" ] || continue
+                LIVE_PAIRS="${LIVE_PAIRS}${port}	${nonce}
+"
+            done < <(grep '"type":"registration"' "$f" 2>/dev/null \
+                       | jq -r '.doc_nonce // empty' 2>/dev/null)
+        done
+    fi
+
+    # 2. Walk every doc HTML; categorise each.
+    DOCS_JSONL=""
+    BOUND_LIVE=0; BOUND_ORPHANED=0; UNBOUND_STALE=0
+    DOC_DIRS="goals plans specs grills questionnaires notes changelog audits"
+    for dir in $DOC_DIRS; do
+        [ -d "$DOCS_ROOT/$dir" ] || continue
+        while IFS= read -r doc; do
+            [ -f "$doc" ] || continue
+            target="$(extract_doc_target "$doc")"
+            url="$(printf   '%s' "$target" | jq -r '.bridge_url // empty' 2>/dev/null)"
+            nonce="$(printf '%s' "$target" | jq -r '.doc_nonce  // empty' 2>/dev/null)"
+            state=""; port=""
+            if [ -z "$url" ]; then
+                # Legacy doc (cmux_surface-only, or no target at all).
+                state="unbound-stale"; UNBOUND_STALE=$((UNBOUND_STALE+1))
+            else
+                # Strip "http(s)://host:" prefix and any path suffix → port.
+                port="$(printf '%s' "$url" | sed -E 's@^[a-z]+://[^:/]*:?@@; s@/.*$@@')"
+                if [ -n "$port" ] && [ -n "$nonce" ] \
+                   && printf '%s' "$LIVE_PAIRS" | grep -qF "$(printf '%s\t%s' "$port" "$nonce")"; then
+                    state="bound-live"; BOUND_LIVE=$((BOUND_LIVE+1))
+                elif [ -n "$port" ] && [ "${LIVE_PORTS#* $port }" != "$LIVE_PORTS" ]; then
+                    # Port has a live daemon, but the nonce is not in its registry
+                    # (e.g. daemon restarted and lost the in-memory registration).
+                    state="unbound-stale"; UNBOUND_STALE=$((UNBOUND_STALE+1))
+                else
+                    state="bound-orphaned"; BOUND_ORPHANED=$((BOUND_ORPHANED+1))
+                fi
+            fi
+            doc_line="$(jq -nc --arg p "$doc" --arg s "$state" \
+                              --arg u "${url:-}" --arg n "${nonce:-}" --arg port "${port:-}" \
+                '{path:$p, state:$s, bridge_url:(if $u=="" then null else $u end),
+                  doc_nonce:(if $n=="" then null else $n end),
+                  port:(if $port=="" then null else ($port|tonumber? // null) end)}')"
+            DOCS_JSONL="${DOCS_JSONL}${doc_line}
+"
+        done < <(find "$DOCS_ROOT/$dir" -maxdepth 4 -name '*.html' -type f 2>/dev/null)
+    done
+
+    docs_arr="$(printf '%s' "$DOCS_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    jq -nc --argjson docs "$docs_arr" \
+           --argjson bl "$BOUND_LIVE" --argjson bo "$BOUND_ORPHANED" --argjson us "$UNBOUND_STALE" \
+           --arg ts "$(now_iso)" \
+        '{ok:true, ts:$ts, docs:$docs,
+          summary:{bound_live:$bl, bound_orphaned:$bo, unbound_stale:$us}}'
+    exit 0
+fi
 
 # ── 0. paperflow-preflight gate ────────────────────────────────────
 # Services down beats config drift — propagate preflight JSON unchanged.
@@ -215,7 +386,76 @@ for asset in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js 
                     "bash $REPO/install.sh" true
 done
 
-# ── 6. fast-mode gate: merge cache or re-exec ──────────────────────
+# ── 6. instance-check: per-instance bridge state files (Q11 + Q12) ─
+# Triple-check each ~/.paperflow/instances/<sid>.jsonl (PID alive + port
+# listening + heartbeat within HEARTBEAT_FRESH_S). Categorise into:
+#   live           → all 3 pass; pass
+#   orphan         → owner PID dead → file is reapable (auto_fix_safe:false
+#                    per Q12, repair = rm the JSONL after confirmation)
+#   daemon-stuck   → PID alive but port closed → repair hint = SIGTERM
+#   heartbeat-late → PID + port live but heartbeat > HEARTBEAT_FRESH_S
+#                    (warning only — daemon may be mid-tool-call)
+# State counts surface in the cache; --repair handling for orphan files is
+# deferred to the host (Q12 mandates a prompt; we never silently mutate).
+INSTANCES_LIVE=0
+INSTANCES_ORPHAN=0
+INSTANCES_STUCK=0
+INSTANCES_LATE=0
+INSTANCES_TOTAL=0
+if [ -d "$INSTANCES_DIR" ]; then
+    for f in "$INSTANCES_DIR"/*.jsonl; do
+        [ -f "$f" ] || continue
+        INSTANCES_TOTAL=$((INSTANCES_TOTAL+1))
+        SID="$(basename "$f" .jsonl)"
+        FIRST="$(head -1 "$f" 2>/dev/null)"
+        OWNER_PID="$(printf '%s' "$FIRST" | jq -r '.owner_pid // empty' 2>/dev/null)"
+        BR_PORT="$(printf '%s'   "$FIRST" | jq -r '.port // empty'      2>/dev/null)"
+        if [ -z "$OWNER_PID" ] || [ -z "$BR_PORT" ]; then
+            # Malformed state file — treat as orphan (it's not actionable).
+            INSTANCES_ORPHAN=$((INSTANCES_ORPHAN+1))
+            add_issue "instance:malformed:$SID" "warning" \
+                      "Instance state file $f is missing session/port/owner_pid" \
+                      "rm $f   # safe to remove; daemon (if any) cannot be matched" false
+            continue
+        fi
+        if ! pid_alive "$OWNER_PID"; then
+            INSTANCES_ORPHAN=$((INSTANCES_ORPHAN+1))
+            add_issue "instance:orphan:$SID" "warning" \
+                      "Bridge instance $SID is orphaned (owner_pid $OWNER_PID is dead)" \
+                      "rm $f" false
+            continue
+        fi
+        if ! tcp_listening "$BR_PORT"; then
+            INSTANCES_STUCK=$((INSTANCES_STUCK+1))
+            add_issue "instance:daemon-stuck:$SID" "warning" \
+                      "Bridge instance $SID owner is alive (pid $OWNER_PID) but port $BR_PORT is not listening" \
+                      "kill -TERM $OWNER_PID   # let the daemon-watcher respawn cleanly" false
+            continue
+        fi
+        # All structural signals green; check heartbeat freshness (Q11 third leg).
+        LAST_TS="$(instance_last_signal_ts "$f")"
+        AGE="$(iso_age_seconds "$LAST_TS" 2>/dev/null || echo "")"
+        if [ -n "$AGE" ] && [ "$AGE" -gt "$HEARTBEAT_FRESH_S" ] 2>/dev/null; then
+            INSTANCES_LATE=$((INSTANCES_LATE+1))
+            add_issue "instance:heartbeat-late:$SID" "warning" \
+                      "Bridge instance $SID has stale heartbeat (${AGE}s > ${HEARTBEAT_FRESH_S}s)" \
+                      "# investigate — daemon may be mid-tool-call or hung" false
+            continue
+        fi
+        INSTANCES_LIVE=$((INSTANCES_LIVE+1))
+    done
+fi
+# Instance-check counts as ONE logical check regardless of instance count.
+# Passes when every instance file is in the `live` state (or none exist);
+# fails (still recorded in CHECKS_RUN) when any orphan/stuck/late was found.
+# Per Q12, the issues are already auto_fix_safe:false — host always prompts.
+if [ "$((INSTANCES_ORPHAN + INSTANCES_STUCK + INSTANCES_LATE))" = "0" ]; then
+    pass
+else
+    fail
+fi
+
+# ── 7. fast-mode gate: merge cache or re-exec ──────────────────────
 if [ "$MODE" = "--fast" ]; then
     if cache_is_fresh; then
         # merge cached issues by id (fresh wins; cache only fills new ids)
