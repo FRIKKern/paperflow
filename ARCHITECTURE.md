@@ -249,6 +249,14 @@ Subagent-Run: <task-id>
 
 ---
 
+## Persistence (paperflow-daemon)
+
+Registry lives at `~/.paperflow/registry.jsonl`. Append-only, one JSON event per line. Five event types: `session-register`, `session-unregister`, `doc-register`, `doc-unregister`, `heartbeat` (RESERVED, not emitted in v1 — liveness comes from the owner-pid sweep). Replay on boot reconstructs in-memory `sessions` and `docs` maps; `session-unregister` cascades to every doc bound to that session; the HTTP listener binds only after replay completes (atomic boot). Compaction at boot when the file is > 10× live-state line count OR > 10 MB on disk — rewrite as a snapshot then `rename(2)` over the live file. Crash-safe via `appendFileSync` with `O_APPEND` and no in-place edits; a `kill -9` leaves at most one truncated final line which replay discards. On `ENOSPC`/`EIO` the daemon returns 503 and refuses new writes until the next successful append.
+
+For the full contract, see `~/docs/paperflow/specs/2026-05-14-paperflow-daemon-http-contract.html`.
+
+---
+
 ## Bridge HTTP endpoints
 
 `claude-bridge` is a tiny Node HTTP server on `localhost:8766`. Browser buttons POST `{target, message}` (or richer payloads) to one of the endpoints; the bridge dispatches into the originating terminal tab via tmux / iTerm2 / Apple Terminal / cmux.
