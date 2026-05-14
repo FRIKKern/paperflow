@@ -1197,10 +1197,10 @@ log "Status"
     else
         skip "claude-bridge : not up at install time (spawned per session)"
     fi
-    if wait_for_port 8765 2; then
-        ok "paperflow-aux : up    (http://localhost:8765)"
+    if wait_for_port 8767 2; then
+        ok "paperflow-aux : up    (http://localhost:8767)"
     else
-        skip "paperflow-aux : not yet responding on 8765 (may share port with live-server)"
+        skip "paperflow-aux : not yet responding on 8767"
     fi
     status_f "$CLAUDE_MD"                                "CLAUDE.md    "
     status_x "$HOME/.claude/hooks/inject-principles.sh"  "inject hook  "

@@ -256,6 +256,58 @@ hr.section::after {
   margin-bottom: .9rem;
 }
 
+.paperflow-pill {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.5rem;
+  vertical-align: -1px;
+  background: #b9b3a4;
+  /* Don't let any residual textContent expand the box. */
+  overflow: hidden;
+  text-indent: -9999px;
+  line-height: 0;
+}
+.paperflow-pill[data-state="live"]          { background: #2f8f4a; }
+.paperflow-pill[data-state="stale-binding"] { background: #c98417; }
+.paperflow-pill[data-state="session-gone"]  { background: #a23925; }
+.paperflow-pill[data-state="unknown"]       { background: #b9b3a4; }
+
+.paperflow-banner {
+  margin-top: 1rem;
+  padding: .9rem 1rem;
+  background: #fdf6e9;
+  border: 1px solid #e8d8a8;
+  border-radius: 4px;
+  font-family: var(--doc-sans);
+  font-size: .9rem;
+  color: var(--doc-fg, var(--fg));
+  text-align: left;
+}
+.paperflow-banner-text { margin-bottom: .7rem; }
+.paperflow-banner-buttons {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+.paperflow-banner-btn { font-size: .85rem; padding: .5rem 1rem; }
+
+.paperflow-toast {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: .55rem .9rem;
+  background: #1a1a1a;
+  color: #f5f3ec;
+  font-family: var(--doc-sans);
+  font-size: .85rem;
+  border-radius: 4px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
 .doc-action-row {
   display: flex;
   gap: .6rem;
