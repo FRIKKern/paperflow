@@ -189,10 +189,16 @@ if [ -z "$DOC_NONCE" ]; then
 fi
 
 # ── 4. POST /docs/register synchronously ────────────────────────────
-# Skip the register POST when no doc_path was supplied — the registry
-# binds doc_path→doc_nonce, so an empty doc_path can't be registered
-# (daemon returns HTTP 400). Callers that just want a target (the user
-# pasting `paperflow-target` output) shouldn't trigger a register.
+# Default behavior: register. If no doc_path was supplied AND the caller
+# didn't explicitly opt out via PAPERFLOW_SKIP_REGISTER=1, fail loud — a
+# silent skip here is how docs end up with an unregistered doc_nonce in
+# the wild (bridge returns state:'unknown' on /docs/<nonce>/status, and
+# doc.js renders that as "Connection state unknown."). Inspection mode
+# (user pasting `paperflow-target` output for debugging) must opt in.
+if [ -z "$DOC_PATH" ] && [ "${PAPERFLOW_SKIP_REGISTER:-}" != "1" ]; then
+  emit_error 3 "register-failed" "No doc_path argument supplied — registration would be skipped silently. Pass the output file path: paperflow-target <doc_path>. To intentionally inspect without registering, set PAPERFLOW_SKIP_REGISTER=1."
+fi
+
 if [ "${PAPERFLOW_SKIP_REGISTER:-}" != "1" ] && [ -n "$DOC_PATH" ]; then
   REGISTER_BODY="$(/usr/bin/env jq -n \
     --arg dp "${DOC_PATH:-}" \

@@ -191,7 +191,7 @@ _Section structure adapted from `obra/superpowers/skills/brainstorming` (MIT) â€
    ~/docs/paperflow/grills/<YYYY-MM-DD>-<slug>-grill.html
    ```
 
-   Use the shared renderer at `/paperflow/_lib/grill.{css,js}`. Embed `window.CLAUDE_TARGET` from `~/.local/bin/paperflow-target` so the Submit button reaches this orchestrator session via the bridge.
+   Use the shared renderer at `/paperflow/_lib/grill.{css,js}`. Embed `window.CLAUDE_TARGET` from `~/.local/bin/paperflow-target <grill-html-path>` (the path argument is required â€” without it the helper aborts with `register-failed`, which prevents shipping a doc whose `doc_nonce` was never registered with the bridge).
 
 3. **Wait for the user to fill the form and click Submit.** The bridge delivers a message starting with `Grill answers for <plan>:`. Re-enter Phase C with the answers in scope.
 
