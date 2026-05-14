@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# paperflow-session-register — SessionStart hook for the consolidated
+# paperflow-daemon (B3 of paperflow-s2e).
+#
+# Replaces the per-instance claude-bridge.js spawn that paperflow-bridge-spawn
+# used to do. On Claude Code SessionStart this hook POSTs the session's
+# {session_id, cmux_workspace, cmux_surface, tty, pid} to the daemon's
+# /sessions/register endpoint so that subsequent doc-button clicks can be
+# routed back to this Claude Code instance.
+#
+# Failure mode: must NEVER block Claude startup. On any error (daemon down,
+# malformed input, missing tools) log to ~/.paperflow/logs/session-register.log
+# and exit 0. The doc UI surfaces missing routing via its red-pill state.
+
+set -e
+
+LOG_DIR="$HOME/.paperflow/logs"
+INST_DIR="$HOME/.paperflow/instances"
+LOG_FILE="$LOG_DIR/session-register.log"
+DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://localhost:8767}"
+
+mkdir -p "$LOG_DIR" "$INST_DIR" 2>/dev/null || true
+
+log_warn() {
+    local ts
+    ts="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+    printf '[%s] %s\n' "$ts" "$1" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+# Trap: never let a stray non-zero exit block Claude startup.
+trap 'exit 0' ERR
+trap 'exit 0' EXIT
+
+# Read hook stdin payload (Claude Code passes {session_id, transcript_path, cwd}).
+# Non-blocking: if stdin is a tty or empty, STDIN_JSON stays empty.
+STDIN_JSON=""
+if [ ! -t 0 ]; then
+    STDIN_JSON="$(cat 2>/dev/null || true)"
+fi
+
+# Resolve session_id: env → stdin JSON → uuidgen fallback (with warning).
+SID="${CLAUDE_SESSION_ID:-}"
+if [ -z "$SID" ] && [ -n "$STDIN_JSON" ]; then
+    SID="$(printf '%s' "$STDIN_JSON" | /usr/bin/env jq -r '.session_id // empty' 2>/dev/null || true)"
+fi
+if [ -z "$SID" ]; then
+    SID="$(uuidgen 2>/dev/null || /usr/bin/uuidgen 2>/dev/null || true)"
+    log_warn "no CLAUDE_SESSION_ID or stdin session_id — generated uuid $SID (cannot deterministically unregister)"
+fi
+if [ -z "$SID" ]; then
+    log_warn "no session_id and uuidgen unavailable — aborting register"
+    exit 0
+fi
+
+# cmux env — accept either CMUX_WORKSPACE_ID / CMUX_WORKSPACE for workspace,
+# CMUX_SURFACE_REF / CMUX_SURFACE for surface.
+CMUX_WS="${CMUX_WORKSPACE_ID:-${CMUX_WORKSPACE:-}}"
+CMUX_SF="${CMUX_SURFACE_REF:-${CMUX_SURFACE:-}}"
+
+# tty — best effort; SessionStart from a hook context typically has no tty.
+TTY_VAL="$(tty 2>/dev/null || true)"
+case "$TTY_VAL" in
+    /dev/*) ;;          # real tty path
+    *) TTY_VAL="" ;;    # "not a tty" or empty → null in JSON
+esac
+
+# pid — $$ is the hook's pid, not Claude's. Walk parents looking for a
+# `claude` process. Fall back to $PPID.
+resolve_claude_pid() {
+    local pid="$PPID"
+    local steps=0 comm
+    while [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$steps" -lt 12 ]; do
+        comm="$(ps -o comm= -p "$pid" 2>/dev/null | /usr/bin/awk '{print $NF}')"
+        case "$comm" in
+            */claude|claude) printf '%s\n' "$pid"; return 0 ;;
+        esac
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' \t' || echo 0)"
+        [ -z "$pid" ] && break
+        steps=$((steps + 1))
+    done
+    printf '%s\n' "$PPID"
+}
+CLAUDE_PID="$(resolve_claude_pid)"
+if ! [ "$CLAUDE_PID" -gt 0 ] 2>/dev/null; then
+    CLAUDE_PID="$PPID"
+fi
+
+# Compose the JSON body with jq (null when env var unset).
+BODY="$(/usr/bin/env jq -nc \
+    --arg sid "$SID" \
+    --arg ws  "$CMUX_WS" \
+    --arg sf  "$CMUX_SF" \
+    --arg tt  "$TTY_VAL" \
+    --argjson pid "$CLAUDE_PID" \
+    '{session_id: $sid,
+      cmux_workspace: (if $ws == "" then null else $ws end),
+      cmux_surface:   (if $sf == "" then null else $sf end),
+      tty:            (if $tt == "" then null else $tt end),
+      pid: $pid}' 2>/dev/null || true)"
+
+if [ -z "$BODY" ]; then
+    log_warn "failed to compose JSON body (jq missing?) for session=$SID"
+    exit 0
+fi
+
+# POST. --max-time 2 keeps us well under the 5s hook timeout.
+# Note: curl with -w '%{http_code}' writes "000" on connection failure AND
+# returns non-zero — so we use only the curl stdout (no `|| echo 000`
+# fallback) and let "000" naturally surface the unreachable case.
+HTTP_OUT="$(curl --max-time 2 -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    --data "$BODY" \
+    "$DAEMON_URL/sessions/register" 2>>"$LOG_FILE" || true)"
+[ -z "$HTTP_OUT" ] && HTTP_OUT="000"
+
+case "$HTTP_OUT" in
+    200|201|204)
+        # Sidecar instance file — pragmatic discovery for helpers that don't
+        # have CLAUDE_SESSION_ID in their env.
+        printf '%s\n' "$SID" > "$INST_DIR/$SID.session" 2>/dev/null || true
+        chmod 0644 "$INST_DIR/$SID.session" 2>/dev/null || true
+        ;;
+    000)
+        log_warn "daemon unreachable at $DAEMON_URL (session=$SID) — doc routing offline"
+        ;;
+    *)
+        log_warn "daemon returned HTTP $HTTP_OUT for session=$SID"
+        ;;
+esac
+
+exit 0

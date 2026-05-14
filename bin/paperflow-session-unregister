@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# paperflow-session-unregister — SessionEnd hook (B3 of paperflow-s2e).
+#
+# Mirror of paperflow-session-register. POSTs {session_id} to the daemon's
+# /sessions/unregister endpoint so the consolidated daemon can drop the
+# session and cascade-unregister its docs.
+#
+# Failure mode: never block Claude shutdown. Log + exit 0.
+
+set -e
+
+LOG_DIR="$HOME/.paperflow/logs"
+INST_DIR="$HOME/.paperflow/instances"
+LOG_FILE="$LOG_DIR/session-unregister.log"
+DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://localhost:8767}"
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+log_warn() {
+    local ts
+    ts="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+    printf '[%s] %s\n' "$ts" "$1" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+trap 'exit 0' ERR
+trap 'exit 0' EXIT
+
+STDIN_JSON=""
+if [ ! -t 0 ]; then
+    STDIN_JSON="$(cat 2>/dev/null || true)"
+fi
+
+SID="${CLAUDE_SESSION_ID:-}"
+if [ -z "$SID" ] && [ -n "$STDIN_JSON" ]; then
+    SID="$(printf '%s' "$STDIN_JSON" | /usr/bin/env jq -r '.session_id // empty' 2>/dev/null || true)"
+fi
+if [ -z "$SID" ]; then
+    log_warn "no session_id available — cannot unregister"
+    exit 0
+fi
+
+BODY="$(/usr/bin/env jq -nc --arg sid "$SID" '{session_id: $sid}' 2>/dev/null || true)"
+if [ -z "$BODY" ]; then
+    log_warn "failed to compose JSON body (jq missing?) for session=$SID"
+    exit 0
+fi
+
+# curl with -w '%{http_code}' writes "000" on connection failure AND
+# returns non-zero; rely on the curl stdout, not the `||` fallback.
+HTTP_OUT="$(curl --max-time 2 -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    --data "$BODY" \
+    "$DAEMON_URL/sessions/unregister" 2>>"$LOG_FILE" || true)"
+[ -z "$HTTP_OUT" ] && HTTP_OUT="000"
+
+case "$HTTP_OUT" in
+    200|201|204|404)
+        # 404 = already gone (idempotent from our POV).
+        ;;
+    000)
+        log_warn "daemon unreachable at $DAEMON_URL (session=$SID)"
+        ;;
+    *)
+        log_warn "daemon returned HTTP $HTTP_OUT for session=$SID"
+        ;;
+esac
+
+# Always remove the sidecar instance file, regardless of HTTP result.
+rm -f "$INST_DIR/$SID.session" 2>/dev/null || true
+
+exit 0
