@@ -73,12 +73,12 @@ Write them as standalone HTML files in `~/docs/paperflow/{specs,plans,grills}/`,
 
     <link rel="stylesheet" href="/paperflow/_lib/doc.css">
 
-Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `<pre class="mermaid">` + `<figcaption><b>Figure N.</b> …</figcaption>`. Per-doc colour overrides set `:root` CSS variables before the link. Distribute diagrams throughout — each section that explains a flow / comparison / decision gets a Mermaid figure. Aim for at least one visual every ~300 words. Always open via the live-reload URL, never `file://`:
+Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `<pre class="mermaid">` + `<figcaption><b>Figure N.</b> …</figcaption>`. Per-doc colour overrides set `:root` CSS variables before the link. Distribute diagrams throughout — each section that explains a flow / comparison / decision gets a Mermaid figure. Aim for at least one visual every ~300 words. Always open via the daemon URL, never `file://`:
 
-    open http://localhost:8765/paperflow/specs/<filename>.html
-    open http://localhost:8765/paperflow/plans/<filename>.html
+    open http://localhost:8767/paperflow/specs/<filename>.html
+    open http://localhost:8767/paperflow/plans/<filename>.html
 
-`__LR_LABEL__` LaunchAgent serves `~/docs/` on port 8765 with WebSocket hot reload (~200 ms refresh).
+`paperflow-daemon` LaunchAgent serves `~/docs/paperflow/` on port 8767 — single host-scoped daemon that owns sessions/docs/build/marker/discover endpoints plus the static-file fallback.
 
 ## Action buttons (every spec & plan)
 
@@ -90,7 +90,7 @@ End every spec / plan / grill HTML with a one-line `<script src="/paperflow/_lib
 | `/plans/*.html`  | Build this plan             | Grill the plan |
 | `/grills/*.html` | Submit (handled by `_lib/grill.js`) | — |
 
-Buttons POST to `__BR_LABEL__` (LaunchAgent on `localhost:8766`), which routes the message into the originating terminal tab via AppleScript / tmux / iTerm so I see the prompt land where I'm working.
+Buttons POST to `paperflow-daemon` on `localhost:8767`, which resolves the doc nonce to the originating session and routes the message into that terminal tab via cmux send / tmux send-keys / iTerm or Terminal AppleScript so I see the prompt land where I'm working.
 
 Before the doc.js include, set:
 
