@@ -1,0 +1,1071 @@
+#!/usr/bin/env node
+// paperflow-daemon — single host-scoped HTTP daemon for paperflow.
+//
+// One process per host. Listens on 127.0.0.1:8767 (overridable via $PORT).
+// Replaces both the per-instance bridge (bin/claude-bridge.js, dynamic port)
+// and the auxiliary daemon (bin/paperflow-aux-daemon, :8767). The two
+// previously-separate concerns now live behind one router:
+//
+//   1. Session + doc registry — sessions/docs maps in memory, append-only
+//      JSONL at ~/.paperflow/registry.jsonl as the source of truth on
+//      restart. Owner-pid sweep (3s) drives liveness; sessions whose pid
+//      is gone are removed and their docs cascade-unregistered.
+//   2. Dispatch — POST /build and POST /marker resolve doc_nonce →
+//      session_id → recorded tty/cmux_surface and route via cmux send,
+//      tmux send-keys, iTerm AppleScript, or Apple Terminal AppleScript.
+//   3. Static-file fallback — anything GET that didn't match a handler is
+//      served from ~/docs/paperflow/ (same path-walk + 404 fallback as
+//      the legacy aux-daemon).
+//
+// CLI flags: none. Honours $PORT (default 8767), $HOST (default 127.0.0.1),
+// and $PAPERFLOW_DOCS_ROOT (default ~/docs/paperflow).
+//
+// Implements the contract at:
+//   ~/docs/paperflow/specs/2026-05-14-paperflow-daemon-http-contract.html
+//
+// Persistence schema (registry.jsonl event types):
+//   session-register   {ts, session_id, cmux_workspace, cmux_surface, tty, pid}
+//   session-unregister {ts, session_id, reason}
+//   doc-register       {ts, doc_path, doc_nonce, session_id}
+//   doc-unregister     {ts, doc_nonce, reason}
+//   heartbeat          RESERVED — not emitted in v1 (DECISION-6)
+
+'use strict';
+
+const http = require('http');
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
+const { spawn, execFile } = require('child_process');
+
+// ── config ──────────────────────────────────────────────────────────
+const VERSION             = '0.1.0';
+const PORT                = parseInt(process.env.PORT || '8767', 10);
+const HOST                = process.env.HOST || '127.0.0.1';
+const PAPERFLOW_DIR       = path.join(os.homedir(), '.paperflow');
+const REGISTRY_FILE       = path.join(PAPERFLOW_DIR, 'registry.jsonl');
+const REGISTRY_TMP        = REGISTRY_FILE + '.tmp';
+const LOGS_DIR            = path.join(PAPERFLOW_DIR, 'logs');
+const LOG_FILE            = path.join(LOGS_DIR, 'paperflow-daemon.log');
+const DOCS_ROOT           = process.env.PAPERFLOW_DOCS_ROOT
+  || path.join(os.homedir(), 'docs', 'paperflow');
+const OWNER_PID_SWEEP_MS  = 3000;       // DECISION-6: owner-pid liveness cadence
+const COMPACT_LINE_RATIO  = 10;         // compact when file > 10× live-state lines
+const COMPACT_SIZE_BYTES  = 10 * 1024 * 1024; // or > 10 MB
+const CONTINUE_BIN        = path.join(__dirname, 'paperflow-continue');
+
+// ── in-memory state ────────────────────────────────────────────────
+// sessions: session_id → { session_id, cmux_workspace, cmux_surface, tty,
+//                          pid, started_at, registered_at }
+// docs:     doc_nonce  → { doc_nonce, doc_path, session_id, registered_at }
+const sessions = new Map();
+const docs     = new Map();
+
+const STARTED_AT = new Date().toISOString();
+let WRITE_REFUSED = false;       // set true on ENOSPC/EIO/EROFS; cleared on next OK append
+let REPLAY_COUNT  = 0;           // count of lines processed at boot
+
+// ── tiny helpers ────────────────────────────────────────────────────
+function ensureDir(d) {
+  try { fs.mkdirSync(d, { recursive: true }); } catch (_) { /* */ }
+}
+
+function logLine(msg) {
+  ensureDir(LOGS_DIR);
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch (_) { /* */ }
+}
+
+function nonceSafe(n) {
+  return typeof n === 'string' && /^[a-zA-Z0-9_-]+$/.test(n) && n.length <= 128;
+}
+
+function pidAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (_) { return false; }
+}
+
+function collectBody(req, cb) {
+  let body = '';
+  req.on('data', c => (body += c));
+  req.on('end', () => {
+    if (!body) return cb(null, {});
+    try { cb(null, JSON.parse(body)); }
+    catch (e) { cb(e); }
+  });
+  req.on('error', e => cb(e));
+}
+
+function jsonRes(res, code, body) {
+  res.writeHead(code, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+function errEnv(error, message, details) {
+  const out = { ok: false, error, message };
+  if (details) out.details = details;
+  return out;
+}
+
+// Classify a dispatch error as "the receiving surface is gone" vs. an
+// unexpected internal bug. Returns true if the error should surface to the
+// browser as 410 {error:"session-gone"} rather than 502 dispatch-failed.
+function isSurfaceGoneError(err) {
+  if (!err) return false;
+  const code = err.code || '';
+  if (code === 'EPIPE' || code === 'ENOTCONN' || code === 'ECONNRESET' ||
+      code === 'EBADF' || code === 'ESRCH') {
+    return true;
+  }
+  const stderr = String(err.stderr || err.message || '');
+  if (/Broken pipe/i.test(stderr)) return true;
+  if (/Failed to write to socket/i.test(stderr)) return true;
+  if (/no such process/i.test(stderr)) return true;
+  if (/session .* (not found|gone)/i.test(stderr)) return true;
+  return false;
+}
+
+// ── persistence layer ──────────────────────────────────────────────
+//
+// Append-only JSONL. The file is opened lazily on first append; replay
+// reads it synchronously at boot. POSIX guarantees O_APPEND writes of a
+// single line are atomic with respect to other appenders, so concurrent
+// appends from the daemon's own handlers cannot interleave bytes.
+
+function readRegistry() {
+  ensureDir(PAPERFLOW_DIR);
+  let raw;
+  try { raw = fs.readFileSync(REGISTRY_FILE, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ENOENT') return; // empty registry — fresh boot
+    throw e;
+  }
+  const lines = raw.split('\n');
+  // POSIX appendFileSync writes "{...}\n"; split on \n gives a trailing ''
+  // entry for a properly-terminated file. If the last line is non-empty,
+  // it's a truncated final line (kill -9 mid-write) — discard it.
+  let truncated = false;
+  if (lines.length && lines[lines.length - 1] === '') {
+    lines.pop();
+  } else if (lines.length) {
+    truncated = true;
+    lines.pop();
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); }
+    catch (e) {
+      // Strict: malformed lines mid-stream are skipped with a warning.
+      // The spec's "discard truncated final line" semantics only covers
+      // the tail; we extend that defensively to all malformed bodies.
+      logLine(`replay: skipped malformed line ${i + 1}: ${e.message}`);
+      continue;
+    }
+    applyEvent(obj);
+    REPLAY_COUNT++;
+  }
+  if (truncated) {
+    logLine(`replay: discarded one truncated final line (kill -9 race)`);
+  }
+}
+
+// applyEvent mutates the in-memory maps the same way both replay AND the
+// live HTTP path do. Replay is just "apply every event in order".
+function applyEvent(obj) {
+  if (!obj || typeof obj.type !== 'string') return;
+  switch (obj.type) {
+    case 'session-register': {
+      if (!obj.session_id) return;
+      sessions.set(obj.session_id, {
+        session_id:     obj.session_id,
+        cmux_workspace: obj.cmux_workspace || null,
+        cmux_surface:   obj.cmux_surface   || null,
+        tty:            obj.tty            || null,
+        pid:            Number.isFinite(obj.pid) ? obj.pid : parseInt(obj.pid, 10),
+        started_at:     obj.ts || new Date().toISOString(),
+        registered_at:  obj.ts || new Date().toISOString()
+      });
+      return;
+    }
+    case 'session-unregister': {
+      if (!obj.session_id) return;
+      sessions.delete(obj.session_id);
+      // Cascade: drop every doc bound to this session.
+      for (const [nonce, rec] of docs) {
+        if (rec.session_id === obj.session_id) docs.delete(nonce);
+      }
+      return;
+    }
+    case 'doc-register': {
+      if (!obj.doc_nonce || !obj.session_id) return;
+      // Dangling-doc rule: ignore if session_id isn't currently registered.
+      if (!sessions.has(obj.session_id)) return;
+      docs.set(obj.doc_nonce, {
+        doc_nonce:     obj.doc_nonce,
+        doc_path:      obj.doc_path || null,
+        session_id:    obj.session_id,
+        registered_at: obj.ts || new Date().toISOString()
+      });
+      return;
+    }
+    case 'doc-unregister': {
+      if (!obj.doc_nonce) return;
+      docs.delete(obj.doc_nonce);
+      return;
+    }
+    case 'heartbeat':
+      // RESERVED (DECISION-6) — no state change in v1.
+      return;
+    default:
+      return;
+  }
+}
+
+// appendEvent writes one JSON object to disk + applies it to memory.
+// Returns true on success, false on persistence failure (sets WRITE_REFUSED).
+function appendEvent(obj) {
+  // Stamp ts when not already set so replayed lines round-trip identically.
+  if (!obj.ts) obj.ts = new Date().toISOString();
+  try {
+    fs.appendFileSync(REGISTRY_FILE, JSON.stringify(obj) + '\n', 'utf8');
+    WRITE_REFUSED = false;
+    applyEvent(obj);
+    return true;
+  } catch (e) {
+    if (e.code === 'ENOSPC' || e.code === 'EIO' || e.code === 'EROFS') {
+      WRITE_REFUSED = true;
+      logLine(`persistence: write refused (${e.code}): ${e.message}`);
+      return false;
+    }
+    // Unexpected — log and propagate the failure to the caller.
+    logLine(`persistence: append failed: ${e.message}`);
+    return false;
+  }
+}
+
+// Boot-time compaction. Rewrites the registry as a snapshot (one
+// session-register per live session, one doc-register per live doc)
+// when the file is wildly larger than the live state warrants.
+function compactIfNeeded() {
+  let st;
+  try { st = fs.statSync(REGISTRY_FILE); }
+  catch (_) { return; }
+  const liveCount = sessions.size + docs.size;
+  const lineCount = REPLAY_COUNT;
+  const overBySize  = st.size > COMPACT_SIZE_BYTES;
+  const overByRatio = liveCount > 0
+    ? lineCount > COMPACT_LINE_RATIO * liveCount
+    : false; // when live state is empty, only size trips compaction
+  if (!overBySize && !overByRatio) return;
+
+  const ts = new Date().toISOString();
+  const out = [];
+  for (const [, s] of sessions) {
+    out.push(JSON.stringify({
+      type:           'session-register',
+      ts,
+      session_id:     s.session_id,
+      cmux_workspace: s.cmux_workspace,
+      cmux_surface:   s.cmux_surface,
+      tty:            s.tty,
+      pid:            s.pid
+    }));
+  }
+  for (const [, d] of docs) {
+    out.push(JSON.stringify({
+      type:       'doc-register',
+      ts,
+      doc_path:   d.doc_path,
+      doc_nonce:  d.doc_nonce,
+      session_id: d.session_id
+    }));
+  }
+  try {
+    fs.writeFileSync(REGISTRY_TMP, out.length ? out.join('\n') + '\n' : '', 'utf8');
+    // Best-effort fsync via opening + fsync + close.
+    try {
+      const fd = fs.openSync(REGISTRY_TMP, 'r');
+      try { fs.fsyncSync(fd); } catch (_) { /* */ }
+      fs.closeSync(fd);
+    } catch (_) { /* */ }
+    fs.renameSync(REGISTRY_TMP, REGISTRY_FILE);
+    logLine(`compaction: rewrote registry (was ${lineCount} lines / ${st.size}B → ${out.length} lines)`);
+    REPLAY_COUNT = out.length;
+  } catch (e) {
+    logLine(`compaction: failed (${e.message}); keeping original`);
+    try { fs.unlinkSync(REGISTRY_TMP); } catch (_) { /* */ }
+  }
+}
+
+// ── owner-pid sweep ────────────────────────────────────────────────
+// Every OWNER_PID_SWEEP_MS the daemon checks each session's pid. If the
+// pid is gone, append a session-unregister with reason:"pid-died" — the
+// applyEvent path will cascade to drop the session's docs as well.
+function ownerPidSweep() {
+  for (const [sid, rec] of sessions) {
+    if (pidAlive(rec.pid)) continue;
+    // Cascade doc-unregister events FIRST so the audit log carries them
+    // independently of the session row, then the session-unregister.
+    for (const [nonce, doc] of docs) {
+      if (doc.session_id === sid) {
+        appendEvent({
+          type:      'doc-unregister',
+          doc_nonce: nonce,
+          reason:    'session-cascade'
+        });
+      }
+    }
+    appendEvent({
+      type:       'session-unregister',
+      session_id: sid,
+      reason:     'pid-died'
+    });
+    logLine(`sweep: session ${sid} pid ${rec.pid} gone — unregistered`);
+  }
+}
+
+// ── dispatch (AppleScript escape + per-target fan-out) ─────────────
+const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+function viaTmux(pane, message, withEnter, cb) {
+  const args = ['send-keys', '-t', pane, message];
+  if (withEnter) args.push('Enter');
+  execFile('tmux', args, err => cb(err, err ? null : 'tmux:' + pane));
+}
+
+function viaITerm(sessionId, message, withEnter, cb) {
+  // Apple Terminal's `do script` always implies a return; for iTerm we
+  // emulate the "marker without enter" case by switching to `write text
+  // ... newline NO`. iTerm supports the option as `newline NO`.
+  const writeLine = withEnter
+    ? `write text "${esc(message)}"`
+    : `write text "${esc(message)}" newline NO`;
+  const script = `
+    tell application "iTerm"
+      tell session id "${esc(sessionId)}"
+        ${writeLine}
+        select
+      end tell
+      activate
+    end tell`;
+  execFile('osascript', ['-e', script],
+    (err, stdout) => cb(err, err ? null : 'iterm:' + (stdout || '').trim()));
+}
+
+function viaAppleTerminal(tty, message, withEnter, cb) {
+  // `do script` always submits — for marker (no Enter) we fall back to
+  // keystroke-without-return via System Events targeting the front window.
+  if (!withEnter) {
+    const script = `
+      tell application "Terminal" to activate
+      tell application "System Events"
+        keystroke "${esc(message)}"
+      end tell`;
+    return execFile('osascript', ['-e', script],
+      (err) => cb(err, err ? null : 'apple-keystroke:' + tty));
+  }
+  const script = `
+    tell application "Terminal"
+      repeat with w in windows
+        repeat with t in tabs of w
+          try
+            if tty of t is "${esc(tty)}" then
+              do script "${esc(message)}" in t
+              set selected of t to true
+              set frontmost of w to true
+              activate
+              return "ok:" & (id of w as text) & "/" & (tty of t)
+            end if
+          end try
+        end repeat
+      end repeat
+      return "not_found:" & "${esc(tty)}"
+    end tell`;
+  execFile('osascript', ['-e', script],
+    (err, stdout) => cb(err, err ? null : 'apple:' + (stdout || '').trim()));
+}
+
+function viaCmux(target, message, withEnter, cb) {
+  const cli = target.cmux_cli || '/Applications/cmux.app/Contents/Resources/bin/cmux';
+  const sendArgs = ['send'];
+  if (target.cmux_workspace) sendArgs.push('--workspace', target.cmux_workspace);
+  if (target.cmux_surface)   sendArgs.push('--surface',   target.cmux_surface);
+  sendArgs.push(message);
+  execFile(cli, sendArgs, err1 => {
+    if (err1) return cb(err1);
+    if (!withEnter) {
+      return cb(null, 'cmux:' + (target.cmux_surface || target.cmux_workspace));
+    }
+    const keyArgs = ['send-key'];
+    if (target.cmux_workspace) keyArgs.push('--workspace', target.cmux_workspace);
+    if (target.cmux_surface)   keyArgs.push('--surface',   target.cmux_surface);
+    keyArgs.push('Return');
+    execFile(cli, keyArgs, err2 =>
+      cb(err2, err2 ? null : 'cmux:' + (target.cmux_surface || target.cmux_workspace)));
+  });
+}
+
+// resolveTarget walks a session record + the request's optional `target`
+// hint and returns the dispatch-target object the via* functions consume.
+// Falls back to the caller-supplied target only when the session has no
+// resolvable tty / cmux_surface (subagent context — DECISION-2A).
+function resolveTarget(session, fallbackTarget) {
+  if (session) {
+    if (session.cmux_workspace || session.cmux_surface) {
+      return {
+        term_program:   'cmux',
+        cmux_workspace: session.cmux_workspace,
+        cmux_surface:   session.cmux_surface
+      };
+    }
+    if (session.tty && session.tty.startsWith('/dev/ttys')) {
+      // Apple Terminal style tty — Terminal.app cascade handles it.
+      return { term_program: 'Apple_Terminal', tty: session.tty };
+    }
+    if (session.tty) {
+      return { tty: session.tty };
+    }
+  }
+  if (fallbackTarget && typeof fallbackTarget === 'object') {
+    return fallbackTarget;
+  }
+  return null;
+}
+
+function dispatch(target, message, withEnter, cb) {
+  if (!target || typeof target !== 'object') {
+    return cb(new Error('no resolvable target (missing tty + cmux_surface)'));
+  }
+  if (target.term_program === 'cmux' || target.cmux_workspace || target.cmux_surface) {
+    return viaCmux(target, message, withEnter, cb);
+  }
+  if (target.tmux_pane) {
+    return viaTmux(target.tmux_pane, message, withEnter, cb);
+  }
+  if (target.term_program === 'iTerm.app' && target.term_session_id) {
+    return viaITerm(target.term_session_id, message, withEnter, cb);
+  }
+  if (target.term_program === 'Apple_Terminal' && target.tty) {
+    return viaAppleTerminal(target.tty, message, withEnter, cb);
+  }
+  if (target.tty) {
+    return viaAppleTerminal(target.tty, message, withEnter, cb);
+  }
+  cb(new Error('unsupported target: ' + JSON.stringify(target)));
+}
+
+// ── static file serving (fallback) ──────────────────────────────────
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm':  'text/html; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.ico':  'image/x-icon',
+  '.txt':  'text/plain; charset=utf-8',
+  '.md':   'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
+  '.ttf':  'font/ttf'
+};
+
+function serveStatic(req, res, urlPath) {
+  let rel = decodeURIComponent(urlPath.replace(/^\/+/, ''));
+  if (!rel || rel.endsWith('/')) rel += 'index.html';
+
+  const full = path.resolve(DOCS_ROOT, rel);
+  if (!full.startsWith(DOCS_ROOT + path.sep) && full !== DOCS_ROOT) {
+    res.writeHead(403); return res.end();
+  }
+
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) {
+      res.writeHead(404); return res.end();
+    }
+    const ext = path.extname(full).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Length': st.size,
+      'Cache-Control': 'no-cache'
+    });
+    fs.createReadStream(full).pipe(res);
+  });
+}
+
+// ── /paperflow/spawn-continuation ───────────────────────────────────
+// Carried over wholesale from bin/paperflow-aux-daemon. Behaviour
+// unchanged except that the workspace lookup now reads from the
+// in-memory docs map (faster — no JSONL re-scan).
+function handleSpawnContinuation(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { doc_path, doc_nonce, goal_id, cmux_workspace, from_session_id } = payload || {};
+    if (!doc_path || typeof doc_path !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {doc_path}'));
+    }
+    if (doc_nonce !== undefined && doc_nonce !== null && typeof doc_nonce !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'doc_nonce must be a string if provided'));
+    }
+    if (!fs.existsSync(CONTINUE_BIN)) {
+      logLine(`spawn-continuation: paperflow-continue missing at ${CONTINUE_BIN}`);
+      return jsonRes(res, 500, errEnv('spawn-failed',
+        `paperflow-continue not found at ${CONTINUE_BIN}`));
+    }
+
+    // Resolve cmux_workspace: explicit param → doc_nonce → from_session_id.
+    let workspace = (typeof cmux_workspace === 'string' && cmux_workspace) || null;
+    if (!workspace && doc_nonce) {
+      const doc = docs.get(doc_nonce);
+      if (doc) {
+        const s = sessions.get(doc.session_id);
+        if (s && s.cmux_workspace) workspace = s.cmux_workspace;
+      }
+    }
+    if (!workspace && from_session_id) {
+      const s = sessions.get(from_session_id);
+      if (s && s.cmux_workspace) workspace = s.cmux_workspace;
+    }
+
+    const args = ['--bind-doc', doc_path];
+    if (typeof goal_id === 'string' && goal_id) args.push('--goal-id', goal_id);
+    if (workspace) args.push('--workspace', workspace);
+
+    let child;
+    try {
+      child = spawn(CONTINUE_BIN, args, {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env
+      });
+      child.unref();
+    } catch (e) {
+      logLine(`spawn-continuation: spawn() threw: ${e.message}`);
+      return jsonRes(res, 424, errEnv('spawn-failed', e.message));
+    }
+    child.on('error', err => {
+      logLine(`spawn-continuation: child error: ${err.message}`);
+    });
+
+    logLine(`spawn-continuation: doc_path=${doc_path} workspace=${workspace || ''} pid=${child.pid}`);
+    return jsonRes(res, 200, { ok: true, spawned: true, workspace: workspace || null });
+  });
+}
+
+// ── 410-Gone shape for the deferred-followup endpoints ─────────────
+const DEFERRED_410 = {
+  '/paperflow/goal-path':         'goal-path-rail-followup',
+  '/paperflow/event':             'event-log-followup',
+  '/paperflow/event/active':      'event-log-followup',
+  '/paperflow/diff':              'diff-modal-followup',
+  '/paperflow/simplify':          'simplify-followup',
+  '/paperflow/simplify/status':   'simplify-followup',
+  '/paperflow/simplify/accept':   'simplify-followup',
+  '/paperflow/simplify/reject':   'simplify-followup',
+  '/paperflow/navigate':          'navigate-followup'
+};
+
+function isDeferred(pathname) {
+  if (DEFERRED_410[pathname] !== undefined) return DEFERRED_410[pathname];
+  if (pathname.startsWith('/paperflow/event/')) return 'event-log-followup';
+  return null;
+}
+
+// ── HTTP server ─────────────────────────────────────────────────────
+const server = http.createServer((req, res) => {
+  // CORS — buttons POST from arbitrary localhost origins; same shape as
+  // the legacy bridges so doc.js keeps working without changes.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('X-Paperflow-Daemon', VERSION);
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+  let url;
+  try { url = new URL(req.url, `http://${HOST}:${PORT}`); }
+  catch (_) { res.writeHead(400); return res.end(); }
+  const pathname = url.pathname;
+
+  // ── liveness ─────────────────────────────────────────────────────
+  if (req.method === 'GET' && pathname === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('paperflow-daemon ok\n');
+  }
+  if (req.method === 'HEAD' && pathname === '/health') {
+    res.writeHead(200, { 'X-Paperflow-Daemon': VERSION });
+    return res.end();
+  }
+  if (req.method === 'GET' && pathname === '/health') {
+    return jsonRes(res, 200, {
+      ok:               true,
+      version:          VERSION,
+      started_at:       STARTED_AT,
+      sessions_live:    sessions.size,
+      docs_registered:  docs.size,
+      uptime_s:         Math.floor((Date.now() - Date.parse(STARTED_AT)) / 1000)
+    });
+  }
+
+  // ── sessions ─────────────────────────────────────────────────────
+  if (req.method === 'POST' && pathname === '/sessions/register') {
+    return handleSessionRegister(req, res);
+  }
+  if (req.method === 'POST' && pathname === '/sessions/unregister') {
+    return handleSessionUnregister(req, res);
+  }
+  if (req.method === 'GET' && pathname === '/sessions/discover') {
+    return handleSessionsDiscover(req, res, url);
+  }
+  if (req.method === 'POST' && pathname === '/sessions/heartbeat') {
+    // DECISION-6: liveness comes from the owner-pid sweep, not client
+    // heartbeats. We accept and ack so clients written against the
+    // contract don't break; no JSONL event is emitted.
+    return jsonRes(res, 200, { ok: true });
+  }
+
+  // ── docs ─────────────────────────────────────────────────────────
+  if (req.method === 'POST' && pathname === '/docs/register') {
+    return handleDocRegister(req, res);
+  }
+  const statusMatch = /^\/docs\/([a-zA-Z0-9_-]+)\/status$/.exec(pathname);
+  if (req.method === 'GET' && statusMatch) {
+    return handleDocStatus(req, res, statusMatch[1]);
+  }
+  if (req.method === 'POST' && pathname === '/docs/unregister') {
+    return handleDocUnregister(req, res);
+  }
+
+  // ── dispatch ─────────────────────────────────────────────────────
+  if (req.method === 'POST' && pathname === '/build') {
+    return handleBuild(req, res);
+  }
+  if (req.method === 'POST' && pathname === '/marker') {
+    return handleMarker(req, res);
+  }
+
+  // ── discovery / continuation back-compat aliases ─────────────────
+  if (req.method === 'GET' && pathname === '/paperflow/discover') {
+    return handleSessionsDiscover(req, res, url);
+  }
+  if (req.method === 'POST' && pathname === '/paperflow/spawn-continuation') {
+    return handleSpawnContinuation(req, res);
+  }
+
+  // ── deferred-followup 410-Gone rows ──────────────────────────────
+  const deferred = isDeferred(pathname);
+  if (deferred) {
+    return jsonRes(res, 410, {
+      ok:           false,
+      error:        'moved-out-of-paperflow-daemon',
+      deferred_to:  deferred
+    });
+  }
+
+  // ── static fallback ──────────────────────────────────────────────
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405); return res.end();
+  }
+  // Reserve /paperflow/* for the API namespace — unknown /paperflow/*
+  // is a 404, not a static-file lookup.
+  if (pathname.startsWith('/paperflow/')) {
+    return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: pathname }));
+  }
+  serveStatic(req, res, pathname);
+});
+
+// ── endpoint handlers ──────────────────────────────────────────────
+
+function handleSessionRegister(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { session_id, cmux_workspace, cmux_surface, tty, pid } = payload || {};
+    if (!session_id || typeof session_id !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {session_id}'));
+    }
+    const npid = parseInt(pid, 10);
+    if (!Number.isFinite(npid) || npid <= 0) {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {pid:positive-int}'));
+    }
+    // DECISION-2A: plan says idempotent last-write-wins keyed by session_id.
+    // Grill recommended 409-on-different-pid. We ship last-write-wins per
+    // the plan's position; build discovered the trade-off.
+    const ok = appendEvent({
+      type:           'session-register',
+      session_id,
+      cmux_workspace: cmux_workspace || null,
+      cmux_surface:   cmux_surface   || null,
+      tty:            tty            || null,
+      pid:            npid
+    });
+    if (!ok) {
+      return jsonRes(res, 503, errEnv('disk-full',
+        'registry append failed (ENOSPC/EIO); reads still served from memory'));
+    }
+    logLine(`session-register ${session_id} pid=${npid} workspace=${cmux_workspace || ''} surface=${cmux_surface || ''}`);
+    return jsonRes(res, 200, { ok: true });
+  });
+}
+
+function handleSessionUnregister(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { session_id, reason } = payload || {};
+    if (!session_id || typeof session_id !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {session_id}'));
+    }
+    if (!sessions.has(session_id)) {
+      return jsonRes(res, 404, errEnv('unknown-session',
+        `session ${session_id} not registered`));
+    }
+    // Count cascaded docs first (the applyEvent step deletes them).
+    let cascaded = 0;
+    for (const [, d] of docs) if (d.session_id === session_id) cascaded++;
+    // Emit explicit doc-unregister events for audit-log clarity, THEN
+    // the session-unregister whose applyEvent also drops cascades from
+    // memory (idempotent).
+    for (const [nonce, doc] of docs) {
+      if (doc.session_id === session_id) {
+        appendEvent({
+          type:      'doc-unregister',
+          doc_nonce: nonce,
+          reason:    'session-cascade'
+        });
+      }
+    }
+    const ok = appendEvent({
+      type:       'session-unregister',
+      session_id,
+      reason:     reason || 'clean'
+    });
+    if (!ok) {
+      return jsonRes(res, 503, errEnv('disk-full',
+        'registry append failed (ENOSPC/EIO)'));
+    }
+    logLine(`session-unregister ${session_id} reason=${reason || 'clean'} cascaded=${cascaded}`);
+    return jsonRes(res, 200, { ok: true, cascaded_docs: cascaded });
+  });
+}
+
+function handleSessionsDiscover(req, res, url) {
+  const workspace = url.searchParams.get('workspace');
+  const out = [];
+  const now = Date.now();
+  for (const [, s] of sessions) {
+    if (workspace && s.cmux_workspace !== workspace) continue;
+    if (!pidAlive(s.pid)) continue; // belt-and-braces; sweep should have dropped it
+    const started = Date.parse(s.registered_at);
+    out.push({
+      session_id:        s.session_id,
+      cmux_workspace:    s.cmux_workspace,
+      cmux_surface:      s.cmux_surface,
+      tty:               s.tty,
+      started_at:        s.registered_at,
+      heartbeat_age_ms:  Number.isFinite(started) ? (now - started) : null,
+      alive:             true
+    });
+  }
+  out.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
+  return jsonRes(res, 200, { sessions: out });
+}
+
+function handleDocRegister(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { doc_path, doc_nonce, session_id } = payload || {};
+    if (!doc_path || typeof doc_path !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {doc_path}'));
+    }
+    if (!nonceSafe(doc_nonce)) {
+      return jsonRes(res, 400, errEnv('bad-request',
+        'doc_nonce must match [a-zA-Z0-9_-]{1,128}'));
+    }
+    if (!session_id || typeof session_id !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {session_id}'));
+    }
+    if (!sessions.has(session_id)) {
+      return jsonRes(res, 404, errEnv('unknown-session',
+        `session ${session_id} not registered`));
+    }
+    const existing = docs.get(doc_nonce);
+    if (existing) {
+      if (existing.session_id === session_id) {
+        // Idempotent re-register — 200 no-op, no new JSONL line.
+        return jsonRes(res, 200, { ok: true, already_registered: true });
+      }
+      return jsonRes(res, 409, errEnv('conflict',
+        `nonce ${doc_nonce} already bound to a different live session`,
+        { existing_session_id: existing.session_id }));
+    }
+    const ok = appendEvent({
+      type:       'doc-register',
+      doc_path,
+      doc_nonce,
+      session_id
+    });
+    if (!ok) {
+      return jsonRes(res, 503, errEnv('disk-full',
+        'registry append failed (ENOSPC/EIO)'));
+    }
+    logLine(`doc-register ${doc_nonce} → ${doc_path} (session=${session_id})`);
+    return jsonRes(res, 200, { ok: true });
+  });
+}
+
+function handleDocStatus(req, res, nonce) {
+  const doc = docs.get(nonce);
+  const now = Date.now();
+  if (!doc) {
+    return jsonRes(res, 200, {
+      state:   'unknown',
+      age_ms:  0,
+      banner:  { buttons: [] }
+    });
+  }
+  const session = sessions.get(doc.session_id);
+  const age_ms = now - Date.parse(doc.registered_at);
+  if (!session) {
+    // The doc rec survived in memory but its session is gone — surfaces
+    // as stale-binding so the pill UI shows "rebind needed" rather than
+    // a fatal error. In practice the cascade in session-unregister wipes
+    // the doc too; this branch is the post-replay edge.
+    return jsonRes(res, 200, {
+      state:      'stale-binding',
+      session_id: doc.session_id,
+      age_ms,
+      banner:     { buttons: ['spawn'] }
+    });
+  }
+  if (!pidAlive(session.pid)) {
+    return jsonRes(res, 200, {
+      state:      'session-gone',
+      session_id: doc.session_id,
+      age_ms,
+      banner:     { buttons: ['spawn'] }
+    });
+  }
+  return jsonRes(res, 200, {
+    state:      'live',
+    session_id: doc.session_id,
+    age_ms,
+    banner:     { buttons: [] }
+  });
+}
+
+function handleDocUnregister(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { doc_nonce, reason } = payload || {};
+    if (!nonceSafe(doc_nonce)) {
+      return jsonRes(res, 400, errEnv('bad-request',
+        'doc_nonce must match [a-zA-Z0-9_-]{1,128}'));
+    }
+    if (!docs.has(doc_nonce)) {
+      return jsonRes(res, 200, { ok: true, already_absent: true });
+    }
+    const ok = appendEvent({
+      type:      'doc-unregister',
+      doc_nonce,
+      reason:    reason || 'explicit'
+    });
+    if (!ok) {
+      return jsonRes(res, 503, errEnv('disk-full',
+        'registry append failed (ENOSPC/EIO)'));
+    }
+    logLine(`doc-unregister ${doc_nonce} reason=${reason || 'explicit'}`);
+    return jsonRes(res, 200, { ok: true });
+  });
+}
+
+function handleBuild(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { doc_nonce, message, target } = payload || {};
+    if (!nonceSafe(doc_nonce)) {
+      return jsonRes(res, 400, errEnv('bad-request', 'doc_nonce required'));
+    }
+    if (!message || typeof message !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {message}'));
+    }
+    const doc = docs.get(doc_nonce);
+    if (!doc) {
+      return jsonRes(res, 410, errEnv('unknown-nonce',
+        'doc_nonce not registered — rebind first'));
+    }
+    const session = sessions.get(doc.session_id);
+    if (!session || !pidAlive(session.pid)) {
+      return jsonRes(res, 410, errEnv('session-gone',
+        'owning session is dead — spawn fresh agent'));
+    }
+    const resolved = resolveTarget(session, target);
+    if (!resolved) {
+      return jsonRes(res, 502, errEnv('dispatch-failed',
+        'session has no resolvable tty/cmux_surface and no fallback target'));
+    }
+    dispatch(resolved, message, /*withEnter*/ true, (err, result) => {
+      if (err) {
+        logLine(`build dispatch error: ${err.message} | target: ${JSON.stringify(resolved)}`);
+        if (isSurfaceGoneError(err)) {
+          return jsonRes(res, 410, errEnv('session-gone',
+            'surface died mid-send', { errno: err.code || null }));
+        }
+        return jsonRes(res, 502, errEnv('dispatch-failed',
+          err.message, { errno: err.code || null }));
+      }
+      logLine(`build → ${result} | msg: ${JSON.stringify(message).slice(0, 80)}`);
+      return jsonRes(res, 200, {
+        ok:           true,
+        result,
+        delivered_to: {
+          session_id:    doc.session_id,
+          tty:           session.tty,
+          cmux_surface:  session.cmux_surface
+        }
+      });
+    });
+  });
+}
+
+function handleMarker(req, res) {
+  collectBody(req, (pErr, payload) => {
+    if (pErr) return jsonRes(res, 400, errEnv('bad-request', 'invalid JSON'));
+    const { doc_nonce, kind, plan, submitted_at } = payload || {};
+    if (!nonceSafe(doc_nonce)) {
+      return jsonRes(res, 400, errEnv('bad-request', 'doc_nonce required'));
+    }
+    if (!plan || typeof plan !== 'string') {
+      return jsonRes(res, 400, errEnv('bad-request', 'need {plan}'));
+    }
+    if (plan.includes('..') || plan.startsWith('/')) {
+      return jsonRes(res, 400, errEnv('bad-request',
+        'plan must be a relative path under ~/docs/paperflow/'));
+    }
+    const doc = docs.get(doc_nonce);
+    if (!doc) {
+      return jsonRes(res, 410, errEnv('unknown-nonce',
+        'doc_nonce not registered'));
+    }
+    const session = sessions.get(doc.session_id);
+    if (!session || !pidAlive(session.pid)) {
+      return jsonRes(res, 410, errEnv('session-gone',
+        'owning session is dead'));
+    }
+
+    // Resolve marker path: questionnaires/<stem>-answered.json OR
+    // grills/<stem>-answered.json, whichever directory exists.
+    const docsRoot = DOCS_ROOT;
+    const stem = plan.replace(/\.html$/, '');
+    const candidates = [
+      path.join(docsRoot, 'questionnaires', `${stem}-answered.json`),
+      path.join(docsRoot, 'grills',         `${stem}-answered.json`)
+    ];
+    const targetPath = candidates.find(p => {
+      try { return fs.statSync(path.dirname(p)).isDirectory(); }
+      catch { return false; }
+    });
+    if (!targetPath) {
+      return jsonRes(res, 400, errEnv('bad-request',
+        'no suitable docs/paperflow/{questionnaires,grills}/ dir'));
+    }
+    // Sandbox: the resolved path must stay inside docsRoot.
+    if (!path.resolve(targetPath).startsWith(path.resolve(docsRoot) + path.sep)) {
+      return jsonRes(res, 400, errEnv('bad-request', 'plan escapes docs root'));
+    }
+
+    const ts = new Date().toISOString();
+    const marker = JSON.stringify({
+      kind:         kind || 'unknown',
+      submitted_at: submitted_at || ts
+    });
+    fs.writeFile(targetPath, marker, err => {
+      if (err) {
+        logLine(`marker write error: ${err.message}`);
+        if (err.code === 'ENOSPC' || err.code === 'EIO' || err.code === 'EROFS') {
+          return jsonRes(res, 500, errEnv('disk-full', err.message,
+            { errno: err.code }));
+        }
+        return jsonRes(res, 500, errEnv('dispatch-failed', err.message));
+      }
+      logLine(`marker → ${targetPath}`);
+      return jsonRes(res, 200, { ok: true, path: targetPath });
+    });
+  });
+}
+
+// ── startup sequence (DECISION-2B: bind-after-replay) ──────────────
+// 1. parse registry → in-memory state
+// 2. optional compaction
+// 3. post-replay pid sweep (drop dead sessions before binding)
+// 4. start owner-pid sweep timer
+// 5. bind HTTP listener
+ensureDir(PAPERFLOW_DIR);
+ensureDir(LOGS_DIR);
+
+try { readRegistry(); }
+catch (e) {
+  console.error(`paperflow-daemon: registry replay failed: ${e.message}`);
+  logLine(`fatal: registry replay failed: ${e.message}`);
+  process.exit(6);
+}
+
+// Post-replay pid sweep — anything dead before we even open the port.
+ownerPidSweep();
+
+// Boot-time compaction (only place this ever runs).
+compactIfNeeded();
+
+// Start the recurring sweep.
+const sweepTimer = setInterval(ownerPidSweep, OWNER_PID_SWEEP_MS);
+sweepTimer.unref && sweepTimer.unref(); // don't keep the event loop alive solely for this
+
+server.on('error', err => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`paperflow-daemon: port ${PORT} already in use`);
+    logLine(`fatal: port ${PORT} already in use`);
+    process.exit(4);
+  }
+  console.error(`paperflow-daemon: server error: ${err && err.message}`);
+  logLine(`fatal: server error: ${err && err.message}`);
+  process.exit(5);
+});
+
+server.listen(PORT, HOST, () => {
+  const banner = `listening on http://${HOST}:${PORT} (replayed ${REPLAY_COUNT} events, ${sessions.size} sessions live, ${docs.size} docs registered)`;
+  logLine(banner);
+  console.log(`paperflow-daemon ${banner}`);
+  console.log(`  docs_root     : ${DOCS_ROOT}`);
+  console.log(`  registry_file : ${REGISTRY_FILE}`);
+});
+
+// ── signal handlers + crash safety ─────────────────────────────────
+let shuttingDown = false;
+function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logLine(`shutdown reason=${reason}`);
+  clearInterval(sweepTimer);
+  try { server.close(() => process.exit(0)); } catch (_) { process.exit(0); }
+  // Hard exit fallback if server.close drags (open sockets, etc).
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+process.on('SIGTERM', () => shutdown('sigterm'));
+process.on('SIGINT',  () => shutdown('sigint'));
+
+process.on('uncaughtException', err => {
+  logLine(`uncaughtException: ${err && err.stack || err}`);
+  console.error(`paperflow-daemon: uncaughtException: ${err && err.message}`);
+  // Exit non-zero so launchd respawns.
+  process.exit(7);
+});
+process.on('unhandledRejection', err => {
+  logLine(`unhandledRejection: ${err && err.stack || err}`);
+  console.error(`paperflow-daemon: unhandledRejection: ${err && err.message || err}`);
+  process.exit(8);
+});
