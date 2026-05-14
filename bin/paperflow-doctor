@@ -351,6 +351,36 @@ if [ -x "$HOME/.local/bin/paperflow-preflight" ]; then
     pass
 fi
 
+# ── 0b. paperflow-daemon /health probe ─────────────────────────────
+# Three legs (Goal paperflow-du4 contract):
+#   1. HEAD /health → 200 (cheap existence probe)
+#   2. GET  /health → 200 + body parses as JSON
+#   3. body.ok === true; surface body.version as informational
+# Each leg counts as one check; collective failure is critical because
+# downstream skills depend on the daemon for doc-button routing.
+DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://127.0.0.1:8767}"
+DAEMON_HEALTH_HEAD_CODE="$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+    -I "$DAEMON_URL/health" 2>/dev/null || echo 000)"
+if [ "$DAEMON_HEALTH_HEAD_CODE" = "200" ]; then
+    pass
+else
+    fail; add_issue "daemon:health_head_failed" "critical" \
+                    "HEAD $DAEMON_URL/health returned $DAEMON_HEALTH_HEAD_CODE (expected 200)" \
+                    "launchctl kickstart -k gui/$(id -u)/${LABEL_PREFIX:-dev.$USER}.paperflow-daemon" false
+fi
+
+DAEMON_HEALTH_BODY="$(curl -sS --max-time 2 "$DAEMON_URL/health" 2>/dev/null || true)"
+if [ -n "$DAEMON_HEALTH_BODY" ] && printf '%s' "$DAEMON_HEALTH_BODY" | jq -e '.ok == true' >/dev/null 2>&1; then
+    pass
+    DAEMON_VERSION="$(printf '%s' "$DAEMON_HEALTH_BODY" | jq -r '.version // empty' 2>/dev/null)"
+    # Informational only — surface version as a non-failing autofix-style note.
+    [ -n "$DAEMON_VERSION" ] && add_autofixed "daemon:version" "paperflow-daemon version $DAEMON_VERSION"
+else
+    fail; add_issue "daemon:health_body_bad" "critical" \
+                    "GET $DAEMON_URL/health did not return a JSON body with ok:true" \
+                    "launchctl kickstart -k gui/$(id -u)/${LABEL_PREFIX:-dev.$USER}.paperflow-daemon" false
+fi
+
 # ── 1. dependency presence ─────────────────────────────────────────
 # dep:title:repair triplets (curl repair has no `brew` because it ships with macOS).
 for triple in \
@@ -393,11 +423,17 @@ done
 
 # ── 4. helper binaries (auto-fix safe) ─────────────────────────────
 # bin-name|source-basename pairs (paperflow-target uses get-terminal-target.sh).
+# paperflow-daemon is the real binary that consolidated aux + bridge (Goal
+# paperflow-du4); paperflow-aux-daemon + claude-bridge.js are kept as
+# backwards-compat shims for one release.
 for pair in \
     paperflow-validate:paperflow-validate \
     paperflow-target:get-terminal-target.sh \
     paperflow-continue:paperflow-continue \
     paperflow-preflight:paperflow-preflight \
+    paperflow-daemon:paperflow-daemon \
+    paperflow-aux-daemon:paperflow-aux-daemon \
+    claude-bridge.js:claude-bridge.js \
     paperflow-migrate-legacy-goals:paperflow-migrate-legacy-goals
 do
     bin="${pair%%:*}"; src_name="${pair#*:}"
@@ -441,108 +477,109 @@ for asset in doc.css doc.js grill.css grill.js mermaid-zoom.css mermaid-zoom.js 
                     "bash $REPO/install.sh" true
 done
 
-# ── 6. instance-check: per-instance bridge state files (Q11 + Q12) ─
-# Triple-check each ~/.paperflow/instances/<sid>.jsonl. The spec triple is:
-#   PID alive  AND  (cmux-surface-alive OR cmux-unavailable)  AND
-#   heartbeat ≤ HEARTBEAT_FRESH_S. Port-listening is kept as an additional
-#   structural sanity check (it precedes the heartbeat leg).
-# Categorise into:
-#   live           → all gates pass; pass
-#   orphan         → owner PID dead → reap silently under --repair when the
-#                    JSONL is older than REAP_AGE_S (5 min stale-window);
-#                    otherwise flag with auto_fix_safe:false
-#   surface-dead   → PID alive but the recorded cmux surface no longer
-#                    exists in its workspace (cmux-only; skipped if cmux is
-#                    not on PATH or the JSONL has no cmux refs)
-#   daemon-stuck   → PID alive but port closed → repair hint = SIGTERM
-#   heartbeat-late → other gates green but heartbeat > HEARTBEAT_FRESH_S
-#                    (warning only — daemon may be mid-tool-call)
+# ── 6. session sidecars — staleness sweep ──────────────────────────
+# The per-instance bridge JSONLs are gone (Goal paperflow-du4). The daemon
+# now lives at :8767 and persists state in registry.jsonl; what remains
+# under ~/.paperflow/instances/ are tiny *.session sidecars written by
+# paperflow-session-register (one line, the session_id). These are
+# pragmatic discovery files for helpers that don't have CLAUDE_SESSION_ID
+# in their env.
+#
+# Doctor's job here: any sidecar older than SIDECAR_STALE_S is stale (the
+# Claude Code session it described almost certainly ended without firing
+# SessionEnd → unregister). Offer to remove under --repair.
+SIDECAR_STALE_S=86400   # 24 h — task spec
 INSTANCES_LIVE=0
 INSTANCES_ORPHAN=0
 INSTANCES_STUCK=0
 INSTANCES_LATE=0
 INSTANCES_TOTAL=0
 INSTANCES_SURFACE_DEAD=0
+SIDECAR_STALE_COUNT=0
 if [ -d "$INSTANCES_DIR" ]; then
-    for f in "$INSTANCES_DIR"/*.jsonl; do
+    for f in "$INSTANCES_DIR"/*.session; do
         [ -f "$f" ] || continue
         INSTANCES_TOTAL=$((INSTANCES_TOTAL+1))
-        SID="$(basename "$f" .jsonl)"
-        FIRST="$(head -1 "$f" 2>/dev/null)"
-        OWNER_PID="$(printf '%s' "$FIRST" | jq -r '.owner_pid // empty'      2>/dev/null)"
-        BR_PORT="$(printf   '%s' "$FIRST" | jq -r '.port // empty'           2>/dev/null)"
-        CMUX_WS="$(printf   '%s' "$FIRST" | jq -r '.cmux_workspace // empty' 2>/dev/null)"
-        CMUX_SF="$(printf   '%s' "$FIRST" | jq -r '.cmux_surface // empty'   2>/dev/null)"
-        if [ -z "$OWNER_PID" ] || [ -z "$BR_PORT" ]; then
-            # Malformed state file — treat as orphan (it's not actionable).
-            # Reap-eligible under --repair when age ≥ REAP_AGE_S.
-            F_AGE="$(file_age_seconds "$f" 2>/dev/null || echo 0)"
-            if [ "$REAP_ENABLED" = "1" ] && [ "${F_AGE:-0}" -ge "$REAP_AGE_S" ] 2>/dev/null; then
+        SID="$(basename "$f" .session)"
+        F_AGE="$(file_age_seconds "$f" 2>/dev/null || echo 0)"
+        if [ "${F_AGE:-0}" -ge "$SIDECAR_STALE_S" ] 2>/dev/null; then
+            if [ "$REAP_ENABLED" = "1" ]; then
                 rm -f "$f" 2>/dev/null && add_reaped "$f"
                 continue
             fi
-            INSTANCES_ORPHAN=$((INSTANCES_ORPHAN+1))
-            add_issue "instance:malformed:$SID" "warning" \
-                      "Instance state file $f is missing session/port/owner_pid" \
-                      "rm $f   # safe to remove; daemon (if any) cannot be matched" false
-            continue
-        fi
-        if ! pid_alive "$OWNER_PID"; then
-            # Reap-on-repair: silently delete when PID is dead AND mtime
-            # is older than the REAP_AGE_S stale-window. Short window =
-            # don't litter the filesystem; long enough = brief race grace.
-            F_AGE="$(file_age_seconds "$f" 2>/dev/null || echo 0)"
-            if [ "$REAP_ENABLED" = "1" ] && [ "${F_AGE:-0}" -ge "$REAP_AGE_S" ] 2>/dev/null; then
-                rm -f "$f" 2>/dev/null && add_reaped "$f"
-                continue
-            fi
-            INSTANCES_ORPHAN=$((INSTANCES_ORPHAN+1))
-            add_issue "instance:orphan:$SID" "warning" \
-                      "Bridge instance $SID is orphaned (owner_pid $OWNER_PID is dead)" \
-                      "rm $f" false
-            continue
-        fi
-        # cmux surface query (Q11 second leg of the spec triple). Skipped
-        # when cmux is unavailable or the JSONL has no surface refs —
-        # gracefully degrades to PID+port+heartbeat in those environments.
-        if [ "$CMUX_AVAILABLE" = "1" ] && [ -n "$CMUX_WS" ] && [ -n "$CMUX_SF" ]; then
-            if ! cmux_surface_alive "$CMUX_WS" "$CMUX_SF"; then
-                INSTANCES_SURFACE_DEAD=$((INSTANCES_SURFACE_DEAD+1))
-                add_issue "instance:surface-dead:$SID" "warning" \
-                          "Bridge instance $SID owner alive but cmux surface $CMUX_SF in $CMUX_WS no longer exists" \
-                          "kill -TERM $OWNER_PID   # surface gone; let the daemon respawn cleanly" false
-                continue
-            fi
-        fi
-        if ! tcp_listening "$BR_PORT"; then
-            INSTANCES_STUCK=$((INSTANCES_STUCK+1))
-            add_issue "instance:daemon-stuck:$SID" "warning" \
-                      "Bridge instance $SID owner is alive (pid $OWNER_PID) but port $BR_PORT is not listening" \
-                      "kill -TERM $OWNER_PID   # let the daemon-watcher respawn cleanly" false
-            continue
-        fi
-        # All structural signals green; check heartbeat freshness (Q11 third leg).
-        LAST_TS="$(instance_last_signal_ts "$f")"
-        AGE="$(iso_age_seconds "$LAST_TS" 2>/dev/null || echo "")"
-        if [ -n "$AGE" ] && [ "$AGE" -gt "$HEARTBEAT_FRESH_S" ] 2>/dev/null; then
-            INSTANCES_LATE=$((INSTANCES_LATE+1))
-            add_issue "instance:heartbeat-late:$SID" "warning" \
-                      "Bridge instance $SID has stale heartbeat (${AGE}s > ${HEARTBEAT_FRESH_S}s)" \
-                      "# investigate — daemon may be mid-tool-call or hung" false
+            SIDECAR_STALE_COUNT=$((SIDECAR_STALE_COUNT+1))
+            add_issue "sidecar:stale:$SID" "warning" \
+                      "Session sidecar $f is older than ${SIDECAR_STALE_S}s (likely no SessionEnd fired)" \
+                      "rm $f   # safe to remove; daemon registry is authoritative" true
             continue
         fi
         INSTANCES_LIVE=$((INSTANCES_LIVE+1))
     done
 fi
-# Instance-check counts as ONE logical check regardless of instance count.
-# Passes when every instance file is in the `live` state (or none exist);
-# fails (still recorded in CHECKS_RUN) when any orphan/stuck/late/surface-dead
-# was found. Reaped files don't count toward failure — they're gone.
-if [ "$((INSTANCES_ORPHAN + INSTANCES_STUCK + INSTANCES_LATE + INSTANCES_SURFACE_DEAD))" = "0" ]; then
+# Sidecar check counts as ONE logical check regardless of file count.
+if [ "$SIDECAR_STALE_COUNT" = "0" ]; then
     pass
 else
     fail
 fi
+
+# ── 6b. registry.jsonl integrity ───────────────────────────────────
+# The consolidated daemon's source of truth on restart. Verify it exists
+# (when the daemon has ever started), is readable, parses as line-delimited
+# JSON, and is ≤ 10 MB. Compaction is the daemon's job at boot; doctor
+# just flags when it hasn't happened.
+REGISTRY_FILE="$HOME/.paperflow/registry.jsonl"
+REGISTRY_MAX_BYTES=$((10 * 1024 * 1024))   # 10 MB
+if [ -f "$REGISTRY_FILE" ]; then
+    if [ ! -r "$REGISTRY_FILE" ]; then
+        fail; add_issue "registry:unreadable" "warning" \
+                        "$REGISTRY_FILE exists but is not readable" \
+                        "chmod 644 $REGISTRY_FILE" false
+    else
+        REG_SIZE="$(stat -f %z "$REGISTRY_FILE" 2>/dev/null || echo 0)"
+        # Parse check: every non-empty line must be valid JSON. jq -e
+        # on a stream returns 0 only when every line parsed.
+        if ! jq -e '.' "$REGISTRY_FILE" >/dev/null 2>&1; then
+            fail; add_issue "registry:malformed" "warning" \
+                            "$REGISTRY_FILE contains lines that are not valid JSON" \
+                            "# inspect with: tail $REGISTRY_FILE | jq ." false
+        elif [ "${REG_SIZE:-0}" -gt "$REGISTRY_MAX_BYTES" ] 2>/dev/null; then
+            fail; add_issue "registry:oversize" "warning" \
+                            "$REGISTRY_FILE is ${REG_SIZE} bytes (> ${REGISTRY_MAX_BYTES}) — daemon should compact at boot" \
+                            "launchctl kickstart -k gui/$(id -u)/${LABEL_PREFIX:-dev.$USER}.paperflow-daemon" false
+        else
+            pass
+        fi
+    fi
+else
+    # File missing is benign — daemon writes it lazily. Pass.
+    pass
+fi
+
+# ── 6c. plist alignment: paperflow-daemon loaded; old labels not ───
+# Replaces the F4-era check that looked for aux + claude-bridge agents.
+# The single host-scoped daemon (paperflow-du4) should be loaded; the
+# legacy labels (.paperflow-aux, .claude-bridge) should be gone.
+LP="${LABEL_PREFIX:-dev.$USER}"
+DAEMON_LBL="${LP}.paperflow-daemon"
+if launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "$DAEMON_LBL"; then
+    pass
+else
+    fail; add_issue "launchagent:paperflow-daemon_missing" "critical" \
+                    "paperflow-daemon LaunchAgent ($DAEMON_LBL) is not loaded" \
+                    "launchctl kickstart -k gui/$(id -u)/$DAEMON_LBL   # or: bash $REPO/install.sh" false
+fi
+
+# Legacy labels — bootout if still loaded.
+for legacy in "${LP}.paperflow-aux" "${LP}.claude-bridge"; do
+    if launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "$legacy"; then
+        fail; add_issue "launchagent:legacy_loaded:$legacy" "warning" \
+                        "Legacy LaunchAgent $legacy is still loaded — superseded by paperflow-daemon" \
+                        "launchctl bootout gui/$(id -u)/$legacy" false
+    else
+        pass
+    fi
+done
 
 # ── 7. fast-mode gate: merge cache or re-exec ──────────────────────
 if [ "$MODE" = "--fast" ]; then

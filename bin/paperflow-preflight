@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# paperflow-preflight — runtime preflight for the two HTTP services skills depend on.
-# Probes 8765 (docs-livereload, always LaunchAgent) and 8766 (claude-bridge, cmux-first).
-# On failure, attempts ONE auto-repair, re-probes, then emits one-line JSON to stdout
-# and exits 2. On success, exits 0 silently. Exit 1 reserved for script-internal errors.
-# Output contract: stdout is empty on success, single-line JSON on failure.
+# paperflow-preflight — runtime preflight for the HTTP services skills depend on.
+# Probes 8765 (docs-livereload, always LaunchAgent) and 8767 (paperflow-daemon,
+# the single host-scoped daemon that subsumed the old per-instance bridge +
+# aux daemon per Goal paperflow-du4). On failure, attempts ONE auto-repair
+# via launchctl kickstart, re-probes, then emits one-line JSON to stdout and
+# exits 2. On success, exits 0 silently. Exit 1 reserved for script-internal
+# errors. Output contract: stdout is empty on success, single-line JSON on
+# failure.
 
 set -u
 
 ID="$(id -u)"
+LABEL_PREFIX="${LABEL_PREFIX:-dev.${USER}}"
+DAEMON_LABEL="${LABEL_PREFIX}.paperflow-daemon"
 
 # ── tolerant HTTP probe (matches install.sh self-test) ─────────────
 probe_port() {
@@ -85,47 +90,28 @@ if ! probe_port 8765; then
     fi
 fi
 
-# ── 2. 8766 — claude-bridge (cmux-first) ───────────────────────────
-if ! probe_port 8766; then
-    if [ -n "${CMUX_SOCKET:-}" ] && [ -n "${CMUX_BUNDLED_CLI_PATH:-}" ] && [ -x "${CMUX_BUNDLED_CLI_PATH:-/nonexistent}" ]; then
-        # cmux branch: defensive bootout of any leftover LaunchAgent
-        LEGACY_LABEL="$(discover_label '\.claude-bridge$')"
-        if [ -n "$LEGACY_LABEL" ]; then
-            launchctl bootout "gui/$ID/$LEGACY_LABEL" >/dev/null 2>&1 || true
-        fi
-        if pgrep -f "node.*claude-bridge\.js" >/dev/null 2>&1; then
-            # Process up but port not responding — stuck bridge
-            emit_failure "claude-bridge" 8766 "cmux" "process_up_port_down" \
-                         "kill the stuck process and re-run paperflow-preflight, or rerun bash install.sh" \
-                         ""
-        fi
-        # Process down → spawn via cmux
-        "$CMUX_BUNDLED_CLI_PATH" new-workspace \
-            --name paperflow-bridge \
-            --command "__NODE_BIN__ __BRIDGE_JS__" \
-            >/dev/null 2>&1 || true
-        if ! wait_for_port 8766 20; then
-            emit_failure "claude-bridge" 8766 "cmux" "spawn_failed" \
-                         "$CMUX_BUNDLED_CLI_PATH new-workspace --name paperflow-bridge --command \"__NODE_BIN__ __BRIDGE_JS__\"" \
-                         ""
-        fi
-    else
-        # LaunchAgent fallback branch
-        BR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/claude-bridge.err.log")"
-        BR_LABEL="$(discover_label '\.claude-bridge$')"
-        if [ -z "$BR_LABEL" ]; then
-            emit_failure "claude-bridge" 8766 "launchagent" "label_missing" \
-                         "bash install.sh   # LaunchAgent not loaded; rerun installer" \
-                         "$BR_LOG_TAIL"
-        fi
-        launchctl kickstart -k "gui/$ID/$BR_LABEL" >/dev/null 2>&1 || true
-        sleep 1
-        if ! probe_port 8766; then
-            BR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/claude-bridge.err.log")"
-            emit_failure "claude-bridge" 8766 "launchagent" "down" \
-                         "launchctl kickstart -k gui/$ID/$BR_LABEL" \
-                         "$BR_LOG_TAIL"
-        fi
+# ── 2. 8767 — paperflow-daemon (single host-scoped daemon) ─────────
+# Replaces the old aux-daemon + per-instance claude-bridge probes (paperflow-du4).
+# Always a LaunchAgent now — the cmux-first branch was retired with the
+# per-instance bridge.
+if ! probe_port 8767; then
+    DM_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/paperflow-daemon.err.log")"
+    DM_LABEL="$(discover_label '\.paperflow-daemon$')"
+    [ -n "$DM_LABEL" ] || DM_LABEL="$DAEMON_LABEL"
+    # If we never found a label via launchctl list, the LaunchAgent isn't
+    # loaded — repair = rerun installer. Otherwise kickstart it.
+    if ! launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "$DM_LABEL"; then
+        emit_failure "paperflow-daemon" 8767 "launchagent" "label_missing" \
+                     "bash install.sh   # paperflow-daemon LaunchAgent not loaded; rerun installer" \
+                     "$DM_LOG_TAIL"
+    fi
+    launchctl kickstart -k "gui/$ID/$DM_LABEL" >/dev/null 2>&1 || true
+    # Daemon boot includes a registry.jsonl replay; allow a few seconds.
+    if ! wait_for_port 8767 5; then
+        DM_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/paperflow-daemon.err.log")"
+        emit_failure "paperflow-daemon" 8767 "launchagent" "down" \
+                     "launchctl kickstart -k gui/$ID/$DM_LABEL" \
+                     "$DM_LOG_TAIL"
     fi
 fi
 

@@ -1,0 +1,222 @@
+#!/usr/bin/env node
+// paperflow-migrate-bridge-urls (paperflow-va6, B8): rewrite obsolete daemon
+// URLs inside `window.CLAUDE_TARGET = { ... bridge_url: "http://localhost:NNNN"
+// ... };` blocks across in-flight paperflow docs.
+//
+// Background. Three URL varieties exist on disk:
+//   - http://localhost:<random>  → per-instance bridge (claude-bridge.js listen(0))
+//   - http://localhost:8765      → legacy aux daemon (pre-collision-fix)
+//   - http://localhost:8766      → pre-migration legacy bridge
+// All three are dead post-consolidation. The new single host-scoped daemon
+// lives on http://localhost:8767. This shim rewrites the obsolete URLs in
+// place; the spec lives at:
+//   ~/docs/paperflow/specs/2026-05-14-paperflow-daemon-http-contract.html
+//
+// Modes:
+//   paperflow-migrate-bridge-urls           # dry-run (default)
+//   paperflow-migrate-bridge-urls --json    # dry-run, JSON to stdout
+//   paperflow-migrate-bridge-urls --apply   # rewrite in place
+//
+// Env:
+//   PAPERFLOW_DOCS_ROOT  override scan root (default ~/docs/paperflow)
+//
+// Idempotency: a second --apply on the same tree finds 0 candidates because
+// the regex skips localhost:8767 by construction.
+
+'use strict';
+
+const fs   = require('fs');
+const os   = require('os');
+const path = require('path');
+
+// ── CLI ─────────────────────────────────────────────────────────────
+const ARGV    = process.argv.slice(2);
+const APPLY   = ARGV.includes('--apply');
+const ASJSON  = ARGV.includes('--json');
+
+const NEW_PORT = 8767;
+const DOCS_ROOT = process.env.PAPERFLOW_DOCS_ROOT
+  || path.join(os.homedir(), 'docs', 'paperflow');
+const SUBDIRS  = ['plans', 'specs', 'grills', 'goals', 'notes', 'questionnaires', 'changelog'];
+const LOG_PATH = path.join(os.homedir(), '.paperflow', 'migration-2026-05-14.log');
+
+// ── Recursive *.html walker ─────────────────────────────────────────
+function* walkHtml(root) {
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (_) { return; }
+  for (const e of entries) {
+    const p = path.join(root, e.name);
+    if (e.isDirectory()) {
+      yield* walkHtml(p);
+    } else if (e.isFile() && e.name.endsWith('.html')) {
+      yield p;
+    }
+  }
+}
+
+// ── Matchers ────────────────────────────────────────────────────────
+// Find the CLAUDE_TARGET assignment. Object literal is permissive enough to
+// cover the single-line `= { ... };` form (every observed doc uses one line,
+// but a non-greedy [\s\S] handles multi-line too).
+const TARGET_BLOCK_RE = /window\.CLAUDE_TARGET\s*=\s*\{[\s\S]*?\}\s*;/;
+
+// Inside the assignment, find `bridge_url: "http://localhost:NNNN"`. The
+// key may be bare (`bridge_url:`) or quoted (`"bridge_url":`); the host
+// accepts `localhost` and `127.0.0.1`; quote style accepts `"` and `'`.
+// We capture the port and reject 8767 in JS — expressing "port != 8767"
+// inside the regex is awkward and a JS check keeps the intent clear.
+const BRIDGE_URL_RE = /(["']?bridge_url["']?\s*:\s*["'])(http:\/\/(?:localhost|127\.0\.0\.1):(\d{2,5}))(["'])/g;
+
+// "no-daemon" envelope shape paperflow-target emits from subagent contexts.
+// If present, the CLAUDE_TARGET is the error object — skip entirely.
+const NODAEMON_RE = /"ok"\s*:\s*false[\s\S]*?"error"\s*:\s*"no-daemon"/;
+
+function classifyPort(port) {
+  if (port === '8765') return 'aux';
+  if (port === '8766') return 'legacy-bridge';
+  return 'per-instance';
+}
+
+// Scan one file. Returns { skipped: 'no-target'|'no-daemon'|'no-obsolete', matches: [{oldPort, kind}], rewritten?: string }
+function scanFile(absPath) {
+  let src;
+  try { src = fs.readFileSync(absPath, 'utf8'); }
+  catch (e) { return { error: e.message }; }
+
+  const block = TARGET_BLOCK_RE.exec(src);
+  if (!block) return { skipped: 'no-target' };
+
+  if (NODAEMON_RE.test(block[0])) return { skipped: 'no-daemon' };
+
+  const matches = [];
+  // Reset the global regex by re-instantiating for each call.
+  const re = new RegExp(BRIDGE_URL_RE.source, 'g');
+  let m;
+  while ((m = re.exec(block[0])) !== null) {
+    const port = m[3];
+    if (port === String(NEW_PORT)) continue; // skip current
+    matches.push({ oldPort: port, kind: classifyPort(port) });
+  }
+  if (!matches.length) return { skipped: 'no-obsolete' };
+
+  // Build rewritten source. Replace only inside the target block.
+  const re2 = new RegExp(BRIDGE_URL_RE.source, 'g');
+  const newBlock = block[0].replace(re2, (full, pre, _url, port, post) => {
+    if (port === String(NEW_PORT)) return full;
+    return `${pre}http://localhost:${NEW_PORT}${post}`;
+  });
+  const rewritten = src.slice(0, block.index) + newBlock + src.slice(block.index + block[0].length);
+
+  return { matches, rewritten };
+}
+
+// ── Main ────────────────────────────────────────────────────────────
+function relHome(p) {
+  const h = os.homedir();
+  return p.startsWith(h) ? '~' + p.slice(h.length) : p;
+}
+
+function appendLog(line) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+    fs.appendFileSync(LOG_PATH, line + '\n', 'utf8');
+  } catch (_) { /* logging is best-effort */ }
+}
+
+(function main() {
+  if (!fs.existsSync(DOCS_ROOT)) {
+    if (ASJSON) console.log(JSON.stringify({ candidates: 0, by_kind: {}, root: DOCS_ROOT, note: 'docs root missing' }));
+    else console.log(`docs root not found: ${DOCS_ROOT}; nothing to migrate.`);
+    process.exit(0);
+  }
+
+  const candidates = [];      // { file, oldPort, kind }
+  const byKind     = { aux: 0, 'legacy-bridge': 0, 'per-instance': 0 };
+  const scanErrors = [];
+
+  for (const sub of SUBDIRS) {
+    const subRoot = path.join(DOCS_ROOT, sub);
+    if (!fs.existsSync(subRoot)) continue;
+    for (const file of walkHtml(subRoot)) {
+      const r = scanFile(file);
+      if (r.error) { scanErrors.push({ file, error: r.error }); continue; }
+      if (r.skipped) continue;
+      for (const m of r.matches) {
+        candidates.push({ file, oldPort: m.oldPort, kind: m.kind });
+        byKind[m.kind] = (byKind[m.kind] || 0) + 1;
+      }
+    }
+  }
+
+  // ── Dry-run path ─────────────────────────────────────────────────
+  if (!APPLY) {
+    if (ASJSON) {
+      console.log(JSON.stringify({
+        candidates: candidates.length,
+        by_kind: byKind,
+        root: DOCS_ROOT,
+        files: candidates.map(c => ({ path: relHome(c.file), old_port: c.oldPort, kind: c.kind })),
+        scan_errors: scanErrors,
+      }, null, 2));
+    } else {
+      for (const c of candidates) {
+        console.log(`${relHome(c.file)}: localhost:${c.oldPort} → localhost:${NEW_PORT} (${c.kind})`);
+      }
+      console.log(`${candidates.length} candidates total. Re-run with --apply to rewrite.`);
+      if (scanErrors.length) {
+        console.log(`(${scanErrors.length} files unreadable; see --json for detail)`);
+      }
+    }
+    process.exit(0);
+  }
+
+  // ── Apply path ───────────────────────────────────────────────────
+  if (candidates.length === 0) {
+    console.log('nothing to migrate');
+    process.exit(0);
+  }
+
+  // Group candidates by file so each file is read+written once.
+  const byFile = new Map();
+  for (const c of candidates) {
+    if (!byFile.has(c.file)) byFile.set(c.file, []);
+    byFile.get(c.file).push(c);
+  }
+
+  const stamp = new Date().toISOString();
+  appendLog(`=== ${stamp} apply run started; ${byFile.size} files, ${candidates.length} matches ===`);
+
+  let rewritten = 0, failed = 0;
+  for (const [file, cands] of byFile) {
+    try {
+      const r = scanFile(file);
+      if (r.error)   throw new Error(r.error);
+      if (r.skipped) { appendLog(`${file}\tSKIP\t${r.skipped}`); continue; }
+      if (!r.rewritten) throw new Error('no rewritten content (matcher regression?)');
+
+      const tmp = file + '.tmp';
+      fs.writeFileSync(tmp, r.rewritten, 'utf8');
+      // Best-effort fsync of the tmp file so the rename(2) lands durably.
+      try {
+        const fd = fs.openSync(tmp, 'r');
+        try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      } catch (_) { /* fsync optional */ }
+      fs.renameSync(tmp, file);
+      rewritten++;
+      for (const c of cands) {
+        appendLog(`${file}\tOK\t${c.oldPort}→${NEW_PORT}\t${c.kind}`);
+      }
+    } catch (e) {
+      failed++;
+      appendLog(`${file}\tFAIL\t${e.message}`);
+      console.error(`fail: ${relHome(file)}: ${e.message}`);
+      // Best-effort cleanup of any leftover .tmp.
+      try { fs.unlinkSync(file + '.tmp'); } catch (_) {}
+    }
+  }
+
+  appendLog(`=== ${stamp} apply run finished; ${rewritten} rewritten, ${failed} failed ===`);
+  console.log(`${rewritten} rewritten, ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+})();

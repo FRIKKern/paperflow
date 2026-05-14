@@ -1026,6 +1026,7 @@ deploy_helper paperflow-active-scope
 deploy_helper paperflow-audit-orchestrator-budget
 deploy_helper paperflow-backfill-goal-id
 deploy_helper paperflow-migrate-docs
+deploy_helper paperflow-migrate-bridge-urls
 deploy_helper paperflow-migration-audit
 deploy_helper paperflow-bridge-smoke-test
 
@@ -1072,6 +1073,27 @@ if "$HOME/.local/bin/paperflow-migrate-legacy-goals"; then
     ok "migration complete"
 else
     err "migration failed — check stderr above; legacy files preserved untouched"
+fi
+
+# ─── 10h. Migration: in-flight doc bridge URLs (paperflow-va6, B8) ──
+# Rewrite obsolete CLAUDE_TARGET.bridge_url ports (random per-instance,
+# :8765 aux, :8766 legacy) to the consolidated daemon on :8767. Dry-run
+# first; apply only with consent (default-on under --yes; opt out with
+# PAPERFLOW_MIGRATE_URLS=0). Per-file failures continue; details in
+# ~/.paperflow/migration-2026-05-14.log.
+log "Migration: in-flight doc bridge URLs"
+DRYRUN_OUTPUT="$($HOME/.local/bin/paperflow-migrate-bridge-urls --json 2>&1 || true)"
+N=$(printf '%s' "$DRYRUN_OUTPUT" | jq -r '.candidates // 0' 2>/dev/null || echo 0)
+if [ "$N" -gt 0 ]; then
+    if [ "${PAPERFLOW_YES:-0}" = "1" ] || [ "${PAPERFLOW_MIGRATE_URLS:-1}" = "1" ]; then
+        log "Rewriting $N docs to point at the new daemon (:8767)…"
+        "$HOME/.local/bin/paperflow-migrate-bridge-urls" --apply
+        ok "migrated"
+    else
+        skip "$N docs have obsolete bridge_url. To migrate: paperflow-migrate-bridge-urls --apply"
+    fi
+else
+    ok "no obsolete bridge URLs found"
 fi
 
 # ─── 11. CLAUDE.md (preamble refresh + optional --with-* fragments) ─
