@@ -7,22 +7,24 @@
     <key>ProgramArguments</key>
     <array>
         <string>__NODE_BIN__</string>
-        <string>__BRIDGE_JS__</string>
+        <string>__HOME__/.local/bin/paperflow-daemon</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>__BRIDGE_DIR__</string>
+    <string>__HOME__</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>__HOME__/.local/log/claude-bridge.out.log</string>
+    <string>__HOME__/.local/log/paperflow-daemon.out.log</string>
     <key>StandardErrorPath</key>
-    <string>__HOME__/.local/log/claude-bridge.err.log</string>
+    <string>__HOME__/.local/log/paperflow-daemon.err.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PORT</key>
+        <string>8767</string>
     </dict>
 </dict>
 </plist>

@@ -3,9 +3,9 @@
 #
 # Installs the full doc-workflow stack:
 #   - live-server LaunchAgent (~/docs hot reload, port 8765)
-#   - paperflow-aux LaunchAgent (auxiliary daemon, future host service)
-#   - claude-bridge: per-instance, spawned by the SessionStart hook
-#     (no LaunchAgent; one bridge per Claude Code session on port 8766)
+#   - paperflow-daemon LaunchAgent (single host-scoped daemon, port 8767;
+#     supersedes the legacy split between paperflow-aux + per-instance
+#     claude-bridge — paperflow-du4)
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
 #   - six lifecycle skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
@@ -539,21 +539,43 @@ else
     skip "cmux not installed — no workspace cleanup needed"
 fi
 
-# ─── 5b. paperflow-aux daemon (LaunchAgent) ────────────────────────
-# One-per-host auxiliary daemon. Takes over the live-server role on 8765
-# (replacement is staged in a separate task; this step ships the plist).
-AUX_LABEL="${LABEL_PREFIX}.paperflow-aux"
-log "LaunchAgent: $AUX_LABEL"
-AUX_PLIST="$HOME/Library/LaunchAgents/$AUX_LABEL.plist"
-render "$REPO/launchagents/paperflow-aux.plist.tmpl" "$AUX_PLIST" "$AUX_LABEL"
+# ─── 5b. paperflow-daemon (LaunchAgent, single host-scoped daemon) ──
+# As of the daemon-consolidation Goal (paperflow-du4) the aux daemon and
+# per-instance bridge were merged into one host-scoped daemon on 8767.
+# First retire any old split-daemon plists on upgrade, then install the new.
+OLD_AUX_LABEL="${LABEL_PREFIX}.paperflow-aux"
+OLD_AUX_PLIST="$HOME/Library/LaunchAgents/${OLD_AUX_LABEL}.plist"
+if [ -f "$OLD_AUX_PLIST" ]; then
+    launchctl bootout "gui/$(id -u)/$OLD_AUX_LABEL" >/dev/null 2>&1 || true
+    launchctl unload "$OLD_AUX_PLIST" 2>/dev/null || true
+    trash "$OLD_AUX_PLIST" 2>/dev/null || rm -f "$OLD_AUX_PLIST"
+    ok "retired old aux plist $OLD_AUX_PLIST"
+fi
+# Same for any stray per-instance claude-bridge plist (pre-22c installs).
+OLD_BRIDGE_PLIST="$HOME/Library/LaunchAgents/${BR_LABEL}.plist"
+if [ -f "$OLD_BRIDGE_PLIST" ]; then
+    launchctl bootout "gui/$(id -u)/$BR_LABEL" >/dev/null 2>&1 || true
+    launchctl unload "$OLD_BRIDGE_PLIST" 2>/dev/null || true
+    trash "$OLD_BRIDGE_PLIST" 2>/dev/null || rm -f "$OLD_BRIDGE_PLIST"
+    ok "retired old bridge plist $OLD_BRIDGE_PLIST"
+fi
+
+DAEMON_LABEL="${LABEL_PREFIX}.paperflow-daemon"
+log "LaunchAgent: $DAEMON_LABEL"
+DAEMON_PLIST="$HOME/Library/LaunchAgents/${DAEMON_LABEL}.plist"
+render "$REPO/launchagents/paperflow-daemon.plist.tmpl" "$DAEMON_PLIST" "$DAEMON_LABEL"
 # Bootout first if already loaded so the freshly-rendered plist takes effect
 # (kickstart -k re-execs the old plist; bootstrap of an already-loaded label
 # is a no-op). Idempotent.
-if launchctl print "gui/$(id -u)/$AUX_LABEL" >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$AUX_LABEL" >/dev/null 2>&1 || true
+if launchctl print "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1 || true
 fi
-launchctl bootstrap "gui/$(id -u)" "$AUX_PLIST" >/dev/null 2>&1 || true
-ok "loaded $AUX_LABEL"
+launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" >/dev/null 2>&1 || true
+if ensure_agent_up "$DAEMON_LABEL" 8767; then
+    ok "loaded $DAEMON_LABEL (http://localhost:8767)"
+else
+    err "not reachable on 8767 — check $HOME/.local/log/paperflow-daemon.err.log"
+fi
 
 # ─── 6. Shared renderers in ~/docs/paperflow/_lib/ ──────────────────
 log "Renderers"
@@ -978,6 +1000,10 @@ merge_statusline_settings
 # migration step in 10g, which it precedes.
 
 deploy_helper paperflow-target          get-terminal-target.sh
+# paperflow-daemon: the single host-scoped daemon (8767) — replaces both
+# the legacy aux daemon and per-instance bridge. paperflow-aux-daemon
+# stays as a one-release exec-shim for backwards compatibility.
+deploy_helper paperflow-daemon
 deploy_helper paperflow-aux-daemon
 deploy_helper paperflow-continue
 deploy_helper paperflow-validate
@@ -1190,18 +1216,13 @@ log "Status"
     else
         err "live-server   : DOWN"
     fi
-    # Per-instance bridges (paperflow-22c) are owned by individual Claude
-    # Code sessions, not the installer. The port may be free at install time
-    # if no session is active — treat absence as informational, not a failure.
-    if wait_for_port 8766 2; then
-        ok "claude-bridge : up    (http://localhost:8766, per-instance)"
-    else
-        skip "claude-bridge : not up at install time (spawned per session)"
-    fi
+    # Single host-scoped daemon on 8767 (paperflow-du4) — replaces the
+    # legacy aux daemon and per-instance bridges. Failure here is real;
+    # the LaunchAgent runs KeepAlive, so a down state means a crash loop.
     if wait_for_port 8767 2; then
-        ok "paperflow-aux : up    (http://localhost:8767)"
+        ok "paperflow-daemon : up    (http://localhost:8767)"
     else
-        skip "paperflow-aux : not yet responding on 8767"
+        err "paperflow-daemon : DOWN — check $HOME/.local/log/paperflow-daemon.err.log"
     fi
     status_f "$CLAUDE_MD"                                "CLAUDE.md    "
     status_x "$HOME/.claude/hooks/inject-principles.sh"  "inject hook  "
@@ -1227,7 +1248,8 @@ log "Status"
     status_f "$HOME/docs/paperflow/_lib/goal-path-rail.js"    "rail renderer"
     status_f "$HOME/docs/paperflow/_lib/text-diff.js"         "text-diff lib"
     status_x "$HOME/.local/bin/paperflow-target"              "target helper"
-    status_x "$HOME/.local/bin/paperflow-aux-daemon"          "aux daemon   "
+    status_x "$HOME/.local/bin/paperflow-daemon"              "paperflow-d. "
+    status_x "$HOME/.local/bin/paperflow-aux-daemon"          "aux shim     "
     status_x "$HOME/.local/bin/paperflow-continue"            "continue laun."
     status_x "$HOME/.local/bin/paperflow-validate"            "validator    "
     status_x "$HOME/.local/bin/paperflow-audit-site"          "audit wrapper"
@@ -1284,15 +1306,16 @@ else
                   "Inspect: $HOME/.local/bin/paperflow-active-scope --resolve"
 fi
 
-# 2. Per-instance bridge (paperflow-22c) — owned by Claude Code sessions,
-# not the installer. Probe 8766 informationally only; a fresh install with no
-# active session has no bridge to probe and must not fail here.
-if curl -fsS --max-time 2 -o /dev/null http://localhost:8766/ 2>/dev/null \
-   || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' http://localhost:8766/ 2>/dev/null \
+# 2. paperflow-daemon (paperflow-du4) — single host-scoped daemon on 8767.
+# LaunchAgent KeepAlive means a down state here is a crash loop, not a
+# missing-session — hard fail.
+if curl -fsS --max-time 2 -o /dev/null http://localhost:8767/ 2>/dev/null \
+   || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' http://localhost:8767/ 2>/dev/null \
         | grep -qE '^[2345]'; then
-    ok "bridge port 8766 (a session is up)"
+    ok "paperflow-daemon port 8767"
 else
-    ok "bridge port 8766: no active session (per-instance bridges spawn on SessionStart)"
+    selftest_fail "paperflow-daemon not responding on port 8767" \
+                  "Inspect: launchctl list | grep paperflow-daemon    (and: lsof -i :8767, tail $HOME/.local/log/paperflow-daemon.err.log)"
 fi
 
 # 3. Live-server on 8765 — same tolerant check.

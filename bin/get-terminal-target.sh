@@ -1,34 +1,36 @@
 #!/usr/bin/env bash
-# Emits JSON describing the current Claude Code session's per-instance
-# bridge target. Performs a SYNCHRONOUS registration handshake against
-# the bridge daemon at doc-write time (spec G1 —
-# /Users/frikk.jarl/docs/paperflow/specs/2026-05-11-bridge-binding-contract.html).
+# Emits JSON describing the current Claude Code session's paperflow
+# daemon target. Performs a SYNCHRONOUS registration handshake against
+# the consolidated daemon (single :8767 process — replaces the per-
+# instance claude-bridge.js spawn). Spec G1, B4 rewrite (paperflow-8ea).
 #
 # Output shape (success):
 #   {
-#     "bridge_url": "http://localhost:<dynamic-port>",
+#     "daemon_url": "http://localhost:8767",
+#     "bridge_url": "http://localhost:8767",   # back-compat alias
 #     "doc_nonce":  "<uuid>",
 #     "session_id": "<id>",
 #     "cmux_workspace": "<id-or-null>"
 #   }
 #
 # Output shape (failure): structured JSON to stdout, non-zero exit:
-#   exit 2 → {"ok":false,"error":"no-daemon",...}
+#   exit 2 → {"ok":false,"error":"no-session-id" | "no-daemon",...}
 #   exit 3 → {"ok":false,"error":"register-failed",...}
 #
 # Usage:
 #   get-terminal-target.sh [<doc_path>]
 #
 # Env knobs:
+#   PAPERFLOW_DAEMON_URL        override the daemon URL (default
+#                               http://localhost:8767). Used by smoke
+#                               tests; in production the port is fixed.
 #   PAPERFLOW_TARGET_LEGACY=1   also emit legacy fields (term_program,
 #                               cmux_cli, cmux_workspace, cmux_surface, tty,
 #                               term_session_id, tmux_pane, pid) — kept for
 #                               docs predating the per-instance migration.
 #   PAPERFLOW_SKIP_REGISTER=1   skip the POST /docs/register handshake. Used
 #                               by the doctor to inspect a live daemon without
-#                               side-effects on the nonce registry. Does NOT
-#                               bypass the no-daemon checks at steps 1–2 —
-#                               those still require a healthy jsonl.
+#                               side-effects on the nonce registry.
 
 set -e
 
@@ -36,75 +38,89 @@ DOC_PATH="${1:-}"
 
 # ── 1. resolve session_id ───────────────────────────────────────────
 # Source of truth (in order):
-#   1. $CLAUDE_SESSION_ID env var (most explicit)
-#   2. $CMUX_WORKSPACE_ID + $CMUX_SURFACE_REF combo
-#   3. process-tree walk for parent `claude` PID, then look up the
-#      daemon's recorded session_id by matching owner_pid in the
-#      instance jsonl registry (the daemon may have been spawned
-#      with a UUID — paperflow-bridge-spawn falls back to uuidgen
-#      when CLAUDE_SESSION_ID isn't set in the spawning env)
-#   4. last-resort: return the claude PID itself (legacy code path)
+#   1. $CLAUDE_SESSION_ID env var (most explicit, highest priority).
+#   2. Sidecar file ~/.paperflow/instances/<sid>.session — written by
+#      the paperflow-session-register SessionStart hook (B3). Single-
+#      line file containing just the session_id. Pick the most-
+#      recently-modified one (unambiguous on the common case of one
+#      Claude session per machine).
+#   3. Daemon GET /sessions/discover — when multiple sidecars exist,
+#      filter by $CMUX_WORKSPACE_ID (if set) and prefer the session
+#      whose record matches our environment. Last write wins on tie.
+#
+# NO process-tree walk fallback. The proctree walk was removed in B4
+# (paperflow-8ea) because from a deep subagent context the parent-pid
+# chain leads to the subagent's launcher — not the Claude UI process —
+# so the resolver matched random PIDs and routed doc-button clicks
+# into the void. If steps 1-3 all fail we exit 2 with "no-session-id".
 resolve_session_id() {
   if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
     printf '%s\n' "$CLAUDE_SESSION_ID"
     return 0
   fi
-  if [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ -n "${CMUX_SURFACE_REF:-}" ]; then
-    local combined="${CMUX_WORKSPACE_ID}-${CMUX_SURFACE_REF}"
-    printf '%s\n' "${combined//[\/.]/_}"
-    return 0
-  fi
 
-  # Walk up process tree looking for a `claude` ancestor.
-  local claude_pid=""
-  local pid="$$"
-  local tries=0
-  while [ "$pid" -gt 1 ] && [ "$tries" -lt 20 ]; do
-    local comm ppid
-    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
-    if [ "$(basename "$comm" 2>/dev/null)" = "claude" ]; then
-      claude_pid="$pid"
-      break
-    fi
-    ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-    [ -n "$ppid" ] || break
-    pid="$ppid"
-    tries=$((tries + 1))
-  done
-
-  if [ -z "$claude_pid" ]; then
+  local instances_dir="${HOME}/.paperflow/instances"
+  if [ ! -d "$instances_dir" ]; then
     return 1
   fi
 
-  # Try to find a daemon jsonl whose first line's owner_pid matches
-  # the claude ancestor PID. This is the robust lookup — the daemon
-  # may have written under a UUID-shaped session_id we cannot derive
-  # from the environment.
-  local instances_dir="${HOME}/.paperflow/instances"
-  if [ -d "$instances_dir" ]; then
-    local f first_line owner sid
-    for f in "$instances_dir"/*.jsonl; do
-      [ -e "$f" ] || continue
-      first_line="$(head -n 1 "$f" 2>/dev/null || true)"
-      [ -n "$first_line" ] || continue
-      owner="$(printf '%s' "$first_line" \
-        | /usr/bin/env jq -r 'select(.type=="session") | .owner_pid // empty' 2>/dev/null || true)"
-      if [ "$owner" = "$claude_pid" ]; then
-        sid="$(printf '%s' "$first_line" \
-          | /usr/bin/env jq -r 'select(.type=="session") | .session_id // empty' 2>/dev/null || true)"
-        if [ -n "$sid" ]; then
-          printf '%s\n' "$sid"
-          return 0
-        fi
-      fi
-    done
+  # Collect *.session files (bash 3.2 — no mapfile, no globstar).
+  # `ls -t` orders newest-first by mtime; we read line-by-line so
+  # filenames with spaces still work even though our sids are
+  # uuid-shaped in practice.
+  local newest_file=""
+  local count=0
+  local f
+  # shellcheck disable=SC2012
+  for f in $(ls -t "$instances_dir"/*.session 2>/dev/null); do
+    [ -e "$f" ] || continue
+    count=$((count + 1))
+    if [ -z "$newest_file" ]; then
+      newest_file="$f"
+    fi
+  done
+
+  if [ "$count" -eq 0 ]; then
+    return 1
   fi
 
-  # Last-resort fallback: return the claude PID as the session_id.
-  # This preserves legacy behaviour when no daemon jsonl exists yet
-  # (e.g. during install bootstrap).
-  printf '%s\n' "$claude_pid"
-  return 0
+  # If there's exactly one sidecar, trust it. With one active Claude
+  # session per machine (the common case) this is unambiguous.
+  if [ "$count" -eq 1 ]; then
+    local sid_one
+    sid_one="$(head -n 1 "$newest_file" 2>/dev/null | tr -d ' \n\r' || true)"
+    if [ -n "$sid_one" ]; then
+      printf '%s\n' "$sid_one"
+      return 0
+    fi
+    return 1
+  fi
+
+  # Multiple sidecars — disambiguate via the daemon's discovery
+  # endpoint. Filter by $CMUX_WORKSPACE_ID when set so cmux surfaces
+  # route to their own session. Fall back to newest sidecar otherwise.
+  local daemon_url="${PAPERFLOW_DAEMON_URL:-http://localhost:8767}"
+  local ws_arg=""
+  if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    ws_arg="?workspace=${CMUX_WORKSPACE_ID}"
+  fi
+  local discover_sid
+  discover_sid="$(curl -sS --max-time 2 \
+    "${daemon_url}/sessions/discover${ws_arg}" 2>/dev/null \
+    | /usr/bin/env jq -r '.sessions[0].session_id // empty' 2>/dev/null || true)"
+  if [ -n "$discover_sid" ]; then
+    printf '%s\n' "$discover_sid"
+    return 0
+  fi
+
+  # Fallback to newest sidecar's content.
+  local sid_newest
+  sid_newest="$(head -n 1 "$newest_file" 2>/dev/null | tr -d ' \n\r' || true)"
+  if [ -n "$sid_newest" ]; then
+    printf '%s\n' "$sid_newest"
+    return 0
+  fi
+  return 1
 }
 
 SESSION_ID="$(resolve_session_id || true)"
@@ -128,37 +144,22 @@ emit_error() {
 }
 
 if [ -z "$SESSION_ID" ]; then
-  emit_error 2 "no-daemon" "Could not resolve a session_id (no \$CLAUDE_SESSION_ID, no cmux env, no claude ancestor process). Run install.sh or start a fresh Claude Code session to spawn a paperflow bridge daemon."
+  emit_error 2 "no-session-id" "Could not resolve session_id. Make sure paperflow-session-register fired on SessionStart. The fallback proctree walk was removed in B4 (paperflow-8ea) because it returned wrong PIDs from subagent contexts."
 fi
 
-# ── 2. read port from instance state file ───────────────────────────
-STATE_FILE="${HOME}/.paperflow/instances/${SESSION_ID}.jsonl"
+# ── 2. consolidated daemon URL (fixed port) ─────────────────────────
+# The per-instance bridge daemon is gone (B1/B2 of paperflow-s2e). A
+# single paperflow-daemon process listens on :8767. The dynamic port
+# read from ~/.paperflow/instances/<sid>.jsonl is no longer needed —
+# that file format also went away with the per-instance migration.
+# PAPERFLOW_DAEMON_URL lets the smoke test point at an ad-hoc port.
+DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://localhost:8767}"
+BRIDGE_URL="$DAEMON_URL"
 
-if [ ! -f "$STATE_FILE" ]; then
-  emit_error 2 "no-daemon" "No instance state file at ~/.paperflow/instances/${SESSION_ID}.jsonl — bridge daemon for this session has not been spawned. Run install.sh or start a fresh Claude Code session to spawn a paperflow bridge daemon."
-fi
-
-# First line is the {type:"session", port, ...} record written atomically
-# at daemon startup. Heartbeat/registration lines follow.
-FIRST_LINE="$(head -n 1 "$STATE_FILE" 2>/dev/null || true)"
-
-if [ -z "$FIRST_LINE" ]; then
-  emit_error 2 "no-daemon" "Instance state file is empty for session ${SESSION_ID}. Run install.sh or start a fresh Claude Code session."
-fi
-
-# Validate JSON + extract port. jq returns null/empty on missing fields;
-# we want a hard failure in that case.
-PORT="$(printf '%s' "$FIRST_LINE" | /usr/bin/env jq -r 'select(.type=="session") | .port // empty' 2>/dev/null || true)"
-
-if [ -z "$PORT" ] || ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-  emit_error 2 "no-daemon" "Cannot parse port from first line of ${STATE_FILE}. Run install.sh or start a fresh Claude Code session."
-fi
-
-# cmux_workspace is preserved for the discovery flow (live-server's
-# /paperflow/discover filters by workspace for sibling-session rebind UX).
-CMUX_WORKSPACE="$(printf '%s' "$FIRST_LINE" | /usr/bin/env jq -r 'select(.type=="session") | .cmux_workspace // empty' 2>/dev/null || true)"
-
-BRIDGE_URL="http://localhost:${PORT}"
+# cmux_workspace is preserved for the discovery flow (the daemon's
+# /sessions/discover filters by workspace for sibling-session rebind UX).
+# Source it from the live env — the sidecar file no longer carries it.
+CMUX_WORKSPACE="${CMUX_WORKSPACE_ID:-${CMUX_WORKSPACE:-}}"
 
 # ── 3. generate doc_nonce ───────────────────────────────────────────
 gen_nonce() {
@@ -200,25 +201,26 @@ if [ -z "$DOC_PATH" ] && [ "${PAPERFLOW_SKIP_REGISTER:-}" != "1" ]; then
 fi
 
 if [ "${PAPERFLOW_SKIP_REGISTER:-}" != "1" ] && [ -n "$DOC_PATH" ]; then
+  # Consolidated daemon requires session_id in the body (per-instance
+  # daemon inferred it from its own context; the shared daemon can't).
   REGISTER_BODY="$(/usr/bin/env jq -n \
-    --arg dp "${DOC_PATH:-}" \
-    --arg dn "$DOC_NONCE" \
-    '{doc_path:$dp, doc_nonce:$dn}')"
+    --arg dp  "${DOC_PATH:-}" \
+    --arg dn  "$DOC_NONCE" \
+    --arg sid "$SESSION_ID" \
+    '{doc_path:$dp, doc_nonce:$dn, session_id:$sid}')"
 
   REGISTER_RESPONSE="$(curl -sS --max-time 3 --fail \
     -X POST \
     -H 'Content-Type: application/json' \
     --data "$REGISTER_BODY" \
     "${BRIDGE_URL}/docs/register" 2>&1)" || {
-    emit_error 3 "register-failed" "POST ${BRIDGE_URL}/docs/register failed: ${REGISTER_RESPONSE}" \
-      "$(/usr/bin/env jq -n --arg port "$PORT" '{port:($port|tonumber)}')"
+    emit_error 3 "register-failed" "POST ${BRIDGE_URL}/docs/register failed: ${REGISTER_RESPONSE}"
   }
 
   # Validate the response — daemon returns {ok:true} on success.
   REGISTER_OK="$(printf '%s' "$REGISTER_RESPONSE" | /usr/bin/env jq -r '.ok // false' 2>/dev/null || echo "false")"
   if [ "$REGISTER_OK" != "true" ]; then
-    emit_error 3 "register-failed" "daemon responded but ok!=true: ${REGISTER_RESPONSE}" \
-      "$(/usr/bin/env jq -n --arg port "$PORT" '{port:($port|tonumber)}')"
+    emit_error 3 "register-failed" "daemon responded but ok!=true: ${REGISTER_RESPONSE}"
   fi
 fi
 
@@ -226,26 +228,12 @@ fi
 if [ "${PAPERFLOW_TARGET_LEGACY:-}" = "1" ]; then
   # Legacy shim — best-effort fill from env. New docs do NOT use these
   # fields; they exist so docs predating the migration keep parsing.
+  # B4 (paperflow-8ea) removed the proctree walk that used to populate
+  # CLAUDE_PID / CLAUDE_TTY — it was unreliable from subagent contexts
+  # and the values are advisory in this shim. The fields stay in the
+  # JSON output (as null) so the schema doesn't break.
   CLAUDE_PID=""
   CLAUDE_TTY=""
-  if [ -z "${CMUX_SURFACE_REF:-}" ]; then
-    # tty-based fallback path (Apple_Terminal / iTerm.app)
-    pid="$$"
-    tries=0
-    while [ "$pid" -gt 1 ] && [ "$tries" -lt 20 ]; do
-      comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
-      tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')"
-      if [ "$comm" = "claude" ] && [ -n "$tty" ] && [ "$tty" != "??" ]; then
-        CLAUDE_PID="$pid"
-        CLAUDE_TTY="/dev/$tty"
-        break
-      fi
-      ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-      [ -n "$ppid" ] || break
-      pid="$ppid"
-      tries=$((tries + 1))
-    done
-  fi
 
   /usr/bin/env jq -n \
     --arg url   "$BRIDGE_URL" \
@@ -260,6 +248,7 @@ if [ "${PAPERFLOW_TARGET_LEGACY:-}" = "1" ]; then
     --arg tmux  "${TMUX:-}" \
     --arg pid   "$CLAUDE_PID" \
     '{
+      daemon_url: $url,
       bridge_url: $url,
       doc_nonce:  $dn,
       session_id: $sid,
@@ -279,6 +268,7 @@ else
     --arg sid "$SESSION_ID" \
     --arg ws  "$CMUX_WORKSPACE" \
     '{
+      daemon_url: $url,
       bridge_url: $url,
       doc_nonce:  $dn,
       session_id: $sid,
