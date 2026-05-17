@@ -124,19 +124,19 @@ WORKSPACE="$(printf '%s' "$DETECT_JSON" | "$JQ" -r '.workspace // empty' 2>/dev/
 SIDECAR="$HOME/.paperflow/cmux-docs-surface.${WORKSPACE}.handle"
 
 if [ -z "$WORKSPACE" ] || [ ! -f "$SIDECAR" ]; then
-    emit_result SKIP '["skipped: surface not bound — run auto-open-doc first"]' '[]' null "$URL" "$KIND"
+    emit_result SKIP '["skipped: workspace or sidecar missing"]' '[]' null "$URL" "$KIND"
 fi
 
 HANDLE="$("$JQ" -r '.handle // empty' "$SIDECAR" 2>/dev/null || true)"
 SIDE_WS="$("$JQ" -r '.workspace // empty' "$SIDECAR" 2>/dev/null || true)"
 
 if [ -z "$HANDLE" ] || [ "$SIDE_WS" != "$WORKSPACE" ]; then
-    emit_result SKIP '["skipped: surface not bound — run auto-open-doc first"]' '[]' null "$URL" "$KIND"
+    emit_result SKIP '["skipped: handle empty or workspace mismatch"]' '[]' null "$URL" "$KIND"
 fi
 
 # Liveness probe — DO NOT respawn (§ 5.2.a).
 if ! cmux browser "$HANDLE" url >/dev/null 2>&1; then
-    emit_result SKIP '["skipped: surface not bound — run auto-open-doc first"]' '[]' null "$URL" "$KIND"
+    emit_result SKIP '["skipped: liveness probe failed"]' '[]' null "$URL" "$KIND"
 fi
 
 # ---- Step (b): goto. ----
