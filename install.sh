@@ -490,6 +490,19 @@ deploy_helper_sed() {
     ok "installed at ~/.local/bin/$name"
 }
 
+# Copy a paperflow named subagent definition from the repo into
+# ~/.claude/agents/<name>.md. Mirrors deploy_helper but for markdown
+# agent definitions — no chmod (agents aren't executables). Skills
+# dispatch via the Agent tool by `name:` value from YAML frontmatter,
+# so the file must land in ~/.claude/agents/ for the runtime to find it.
+# Usage: deploy_agent <name>
+deploy_agent() {
+    local name="$1"
+    log "Agent: $name"
+    cp "$REPO/agents/$name.md" "$HOME/.claude/agents/$name.md"
+    ok "installed at ~/.claude/agents/$name.md"
+}
+
 # Status-table executable check. Both branches share the prefix; the
 # trailing word ("executable" / "missing") is swapped so error rows read
 # correctly. Pass the prefix via $2 (e.g. "open hook   ").
@@ -1114,6 +1127,24 @@ deploy_helper claude-bridge.js
 deploy_helper paperflow-cmux-detect
 deploy_helper paperflow-doc-verify
 
+# ─── 10z. Named subagents → ~/.claude/agents/ ───────────────────────
+# Skills (/paperflow:plan, /paperflow:build, /paperflow:review, /paperflow:goal,
+# /paperflow:autopilot) dispatch via the Agent tool by name (paperflow-doc-writer,
+# paperflow-code-editor, paperflow-researcher, paperflow-bd-keeper,
+# paperflow-cmux-verifier). The runtime resolves names against ~/.claude/agents/
+# — without these copies, every dispatch falls back to general-purpose.
+# Loop is generic on purpose: any new agents/<name>.md gets picked up,
+# no maintenance burden.
+log "Agents"
+mkdir -p "$HOME/.claude/agents"
+PAPERFLOW_AGENTS_DEPLOYED=0
+for agent_md in "$REPO"/agents/*.md; do
+    [ -f "$agent_md" ] || continue
+    agent_name=$(basename "$agent_md" .md)
+    deploy_agent "$agent_name"
+    PAPERFLOW_AGENTS_DEPLOYED=$((PAPERFLOW_AGENTS_DEPLOYED + 1))
+done
+
 # ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
 # Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
 # two alias blocks to ~/.beads/aliases.toml so `bd list` and `bd ready` filter
@@ -1364,6 +1395,15 @@ log "Status"
     status_x "$HOME/.local/bin/paperflow-audit-orchestrator-budget" "audit helper "
     status_x "$HOME/.local/bin/paperflow-dock-daemon"         "dock daemon  "
     status_x "$HOME/.local/bin/paperflow-dock-feed"           "dock feed    "
+    # Named subagent count (paperflow-wvb) — install.sh loops over
+    # agents/*.md so this reports whatever just got deployed, not a
+    # hard-coded number that could drift from the repo.
+    agent_count=$(ls -1 "$HOME/.claude/agents"/paperflow-*.md 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$agent_count" -gt 0 ]; then
+        ok "agents        : $agent_count installed"
+    else
+        err "agents        : 0 installed (skills will fall back to general-purpose)"
+    fi
     [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json" ]  && ok "dock config   : present"    || skip "dock config   : missing"
     if [ -S "$HOME/.paperflow/dock.sock" ] \
        && printf 'active-context\n' | /usr/bin/nc -U -w 1 "$HOME/.paperflow/dock.sock" >/dev/null 2>&1; then
