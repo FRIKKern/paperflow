@@ -417,8 +417,13 @@ fi
 ok "entry: $LIVE_SERVER_JS"
 
 # ─── helper: render template with __VAR__ substitution ──────────────
+# __RUN_AT_LOAD__ / __KEEP_ALIVE__ default to "<true/>" so plists that
+# don't use them get a harmless no-op sub; the paperflow-daemon plist
+# template overrides them via the env-var shim below (cmux-aware).
 render() {
     local src="$1" dst="$2"
+    local run_at_load="${RUN_AT_LOAD:-<true/>}"
+    local keep_alive="${KEEP_ALIVE:-<true/>}"
     sed -e "s|__HOME__|$HOME|g" \
         -e "s|__USER__|$USER_NAME|g" \
         -e "s|__LABEL__|$3|g" \
@@ -429,6 +434,8 @@ render() {
         -e "s|__BRIDGE_DIR__|$REPO/bin|g" \
         -e "s|__LR_LABEL__|$LR_LABEL|g" \
         -e "s|__BR_LABEL__|$BR_LABEL|g" \
+        -e "s|__RUN_AT_LOAD__|$run_at_load|g" \
+        -e "s|__KEEP_ALIVE__|$keep_alive|g" \
         "$src" > "$dst"
 }
 
@@ -565,18 +572,65 @@ fi
 DAEMON_LABEL="${LABEL_PREFIX}.paperflow-daemon"
 log "LaunchAgent: $DAEMON_LABEL"
 DAEMON_PLIST="$HOME/Library/LaunchAgents/${DAEMON_LABEL}.plist"
-render "$REPO/launchagents/paperflow-daemon.plist.tmpl" "$DAEMON_PLIST" "$DAEMON_LABEL"
-# Bootout first if already loaded so the freshly-rendered plist takes effect
-# (kickstart -k re-execs the old plist; bootstrap of an already-loaded label
-# is a no-op). Idempotent.
-if launchctl print "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1 || true
+
+# Pick supervisor per the cmux-browser default Goal (paperflow-o8n). On cmux
+# hosts the daemon runs inside a cmux workspace; the LaunchAgent stays
+# rendered-but-dormant (RunAtLoad/KeepAlive=false) as a safety-net plist so
+# nothing crash-loops on port 8767.
+CMUX_ON=false
+if [ -x "$HOME/.local/bin/paperflow-cmux-detect" ]; then
+    CMUX_ON="$("$HOME/.local/bin/paperflow-cmux-detect" 2>/dev/null \
+                | jq -r '.cmux // false' 2>/dev/null || echo false)"
 fi
-launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" >/dev/null 2>&1 || true
-if ensure_agent_up "$DAEMON_LABEL" 8767; then
-    ok "loaded $DAEMON_LABEL (http://localhost:8767)"
+
+if [ "$CMUX_ON" = "true" ]; then
+    RUN_AT_LOAD='<false/>'
+    KEEP_ALIVE='<false/>'
+    log "paperflow-daemon supervisor: cmux (plist rendered dormant as safety net)"
 else
-    err "not reachable on 8767 — check $HOME/.local/log/paperflow-daemon.err.log"
+    RUN_AT_LOAD='<true/>'
+    KEEP_ALIVE='<true/>'
+    log "paperflow-daemon supervisor: launchd"
+fi
+render "$REPO/launchagents/paperflow-daemon.plist.tmpl" "$DAEMON_PLIST" "$DAEMON_LABEL"
+unset RUN_AT_LOAD KEEP_ALIVE  # avoid leaking to other render calls
+
+if [ "$CMUX_ON" = "true" ]; then
+    # Spawn the cmux-side daemon FIRST, then load the dormant plist. Reverse
+    # order would let launchd's old KeepAlive=true plist (if still loaded
+    # from a previous install) crash-loop trying to bind 8767 before cmux
+    # can claim it. paperflow-daemon-spawn is idempotent.
+    if [ -x "$HOME/.local/bin/paperflow-daemon-spawn" ]; then
+        if "$HOME/.local/bin/paperflow-daemon-spawn" >/dev/null 2>&1; then
+            ok "paperflow-daemon spawned via cmux workspace"
+        else
+            err "paperflow-daemon-spawn failed — check cmux + ~/.local/log/paperflow-daemon.err.log"
+        fi
+    else
+        err "paperflow-daemon-spawn helper missing at ~/.local/bin/"
+    fi
+    # Refresh the dormant launchd registration (safety-net plist).
+    if launchctl print "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1 || true
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" >/dev/null 2>&1 || true
+    if wait_for_port 8767 10; then
+        ok "paperflow-daemon up on 8767 (cmux supervisor)"
+    else
+        err "paperflow-daemon not reachable on 8767 — check $HOME/.local/log/paperflow-daemon.err.log"
+    fi
+else
+    # launchd path: render active, bootout-then-bootstrap so the freshly-
+    # rendered plist takes effect (kickstart -k re-execs the old plist).
+    if launchctl print "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1 || true
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" >/dev/null 2>&1 || true
+    if ensure_agent_up "$DAEMON_LABEL" 8767; then
+        ok "loaded $DAEMON_LABEL (http://localhost:8767)"
+    else
+        err "not reachable on 8767 — check $HOME/.local/log/paperflow-daemon.err.log"
+    fi
 fi
 
 # ─── 6. Shared renderers in ~/docs/paperflow/_lib/ ──────────────────
@@ -1039,6 +1093,7 @@ deploy_helper paperflow-bridge-smoke-test
 deploy_helper paperflow-session-register
 deploy_helper paperflow-session-unregister
 deploy_helper paperflow-bridge-spawn
+deploy_helper paperflow-daemon-spawn
 deploy_helper claude-bridge.js
 
 # cmux-browser-default (paperflow-8hz). cmux-detect probes the host for a
@@ -1248,11 +1303,15 @@ log "Status"
     else
         err "live-server   : DOWN"
     fi
-    # Single host-scoped daemon on 8767 (paperflow-du4) — replaces the
-    # legacy aux daemon and per-instance bridges. Failure here is real;
-    # the LaunchAgent runs KeepAlive, so a down state means a crash loop.
+    # Single host-scoped daemon on 8767 (paperflow-du4). Supervisor is
+    # either launchd (KeepAlive plist) or a cmux workspace (paperflow-o8n);
+    # the status row reflects whichever path the install.sh block took.
     if wait_for_port 8767 2; then
-        ok "paperflow-daemon : up    (http://localhost:8767)"
+        if [ "$CMUX_ON" = "true" ]; then
+            ok "paperflow-daemon : up    (cmux workspace)"
+        else
+            ok "paperflow-daemon : up    (launchd)"
+        fi
     else
         err "paperflow-daemon : DOWN — check $HOME/.local/log/paperflow-daemon.err.log"
     fi
