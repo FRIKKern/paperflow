@@ -706,16 +706,7 @@ if [ -d "$REPO/.git" ] && git -C "$REPO" rev-parse '@{u}' >/dev/null 2>&1; then
     fi
 fi
 
-# F4. LaunchAgent plist health (bridge skipped — under cmux it's a workspace, not an agent)
-LR_LABEL="$(launchctl list 2>/dev/null | awk '/\.docs-livereload$/ {print $3; exit}')"
-if [ -n "$LR_LABEL" ]; then
-    UID_NUM="$(id -u)"
-    if launchctl print "gui/$UID_NUM/$LR_LABEL" >/dev/null 2>&1; then pass
-    else fail; add_issue "launchagent:docs-livereload_unhealthy" "warning" \
-                         "docs-livereload LaunchAgent ($LR_LABEL) reports unhealthy" \
-                         "launchctl kickstart -k gui/$UID_NUM/$LR_LABEL" false
-    fi
-fi
+# (F4 retired with :8765 live-server, Goal paperflow-hnl)
 
 # F5. dock socket
 if [ -S "$HOME/.paperflow/dock.sock" ]; then pass

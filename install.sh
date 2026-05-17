@@ -2,10 +2,10 @@
 # paperflow installer — idempotent. Safe to re-run.
 #
 # Installs the full doc-workflow stack:
-#   - live-server LaunchAgent (~/docs hot reload, port 8765)
 #   - paperflow-daemon LaunchAgent (single host-scoped daemon, port 8767;
-#     supersedes the legacy split between paperflow-aux + per-instance
-#     claude-bridge — paperflow-du4)
+#     serves docs + live-reload WS + bridge endpoints; supersedes the
+#     legacy split between paperflow-aux + per-instance claude-bridge
+#     + the standalone live-server on :8765 — paperflow-du4, paperflow-hnl)
 #   - shared web renderers in ~/docs/paperflow/_lib/
 #   - Claude Code hooks (inject-principles, auto-open-doc)
 #   - six lifecycle skills at ~/.claude/skills/{goal,plan,build,review,install,resume}/
@@ -137,7 +137,6 @@ fi
 # Configurable — defaults are reasonable. Override before running:
 #   LABEL_PREFIX=dev.youralias bash install.sh
 LABEL_PREFIX="${LABEL_PREFIX:-dev.${USER_NAME}}"
-LR_LABEL="${LABEL_PREFIX}.docs-livereload"
 BR_LABEL="${LABEL_PREFIX}.claude-bridge"
 
 # ─── 0. Pre-flight ─────────────────────────────────────────────────
@@ -186,7 +185,7 @@ elif command -v npm >/dev/null 2>&1; then
     NPM_GLOBAL_DIR="$NPM_PREFIX/lib/node_modules"
     if [ -n "$NPM_PREFIX" ] && [ ! -w "$NPM_PREFIX/lib" ] 2>/dev/null && [ ! -w "$NPM_GLOBAL_DIR" ] 2>/dev/null; then
         err "npm cannot write to: $NPM_GLOBAL_DIR"
-        printf '\n    paperflow installs live-server + mermaid as global npm packages.\n'
+        printf '\n    paperflow installs mermaid as a global npm package.\n'
         printf '    Pick one fix and re-run:\n\n'
         printf '    A)  Reclaim ownership of the npm global dirs (one-time):\n'
         printf '        sudo chown -R $(whoami) %s/lib/node_modules %s/bin %s/share\n\n' "$NPM_PREFIX" "$NPM_PREFIX" "$NPM_PREFIX"
@@ -373,27 +372,9 @@ fi
 NODE_BIN_DIR="$(dirname "$NODE_BIN")"
 ok "$NODE_BIN ($("$NODE_BIN" --version))"
 
-# ─── 3. live-server (npm global) ────────────────────────────────────
-# Pinned to 1.2.2 — the last release before the 2024 maintainer change;
-# newer pre-release builds have a known WebSocket-init regression that
-# breaks our live-render WS-intercept.
-log "live-server"
-LIVE_SERVER_PIN="1.2.2"
-LIVE_SERVER="$NODE_BIN_DIR/live-server"
-if [ -x "$LIVE_SERVER" ]; then
-    LS_VER="$("$LIVE_SERVER" --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
-    if [ -n "$LS_VER" ] && [ "$LS_VER" != "$LIVE_SERVER_PIN" ]; then
-        skip "already installed (v$LS_VER) — note: paperflow targets v$LIVE_SERVER_PIN; if you hit live-reload issues, run: npm uninstall -g live-server && bash install.sh"
-    else
-        skip "already installed (v${LS_VER:-unknown})"
-    fi
-else
-    "$NODE_BIN_DIR/npm" install -g live-server@1.2.2 >/dev/null
-    ok "installed (v$LIVE_SERVER_PIN)"
-fi
-
-# mermaid (npm global) — used by paperflow-validate to statically check
-# Mermaid blocks in doc HTMLs before the user opens them in browser.
+# ─── 3. mermaid (npm global) ────────────────────────────────────────
+# Used by paperflow-validate to statically check Mermaid blocks in doc
+# HTMLs before the user opens them in browser.
 log "mermaid"
 MERMAID_DIR="$NODE_BIN_DIR/../lib/node_modules/mermaid"
 if [ -d "$MERMAID_DIR" ]; then
@@ -403,18 +384,6 @@ else
     "$NODE_BIN_DIR/npm" install -g mermaid >/dev/null
     ok "installed"
 fi
-
-LIVE_SERVER_JS="$(readlink "$LIVE_SERVER" 2>/dev/null || echo "")"
-if [ -n "$LIVE_SERVER_JS" ]; then
-    case "$LIVE_SERVER_JS" in
-        /*) ;;
-        *)  LIVE_SERVER_JS="$NODE_BIN_DIR/$LIVE_SERVER_JS" ;;
-    esac
-    LIVE_SERVER_JS="$(cd "$(dirname "$LIVE_SERVER_JS")" && pwd)/$(basename "$LIVE_SERVER_JS")"
-else
-    LIVE_SERVER_JS="$LIVE_SERVER"
-fi
-ok "entry: $LIVE_SERVER_JS"
 
 # ─── helper: render template with __VAR__ substitution ──────────────
 # __RUN_AT_LOAD__ / __KEEP_ALIVE__ default to "<true/>" so plists that
@@ -429,10 +398,8 @@ render() {
         -e "s|__LABEL__|$3|g" \
         -e "s|__NODE_BIN__|$NODE_BIN|g" \
         -e "s|__NODE_BIN_DIR__|$NODE_BIN_DIR|g" \
-        -e "s|__LIVE_SERVER_JS__|$LIVE_SERVER_JS|g" \
         -e "s|__BRIDGE_JS__|$REPO/bin/claude-bridge.js|g" \
         -e "s|__BRIDGE_DIR__|$REPO/bin|g" \
-        -e "s|__LR_LABEL__|$LR_LABEL|g" \
         -e "s|__BR_LABEL__|$BR_LABEL|g" \
         -e "s|__RUN_AT_LOAD__|$run_at_load|g" \
         -e "s|__KEEP_ALIVE__|$keep_alive|g" \
@@ -516,15 +483,25 @@ status_f() {
     if [ -f "$path" ]; then ok "$prefix : present"; else err "$prefix : missing"; fi
 }
 
-# ─── 4. live-server LaunchAgent ─────────────────────────────────────
-log "LaunchAgent: $LR_LABEL"
-LR_PLIST="$HOME/Library/LaunchAgents/$LR_LABEL.plist"
-render "$REPO/launchagents/docs-livereload.plist.tmpl" "$LR_PLIST" "$LR_LABEL"
-reload_agent "$LR_LABEL" "$LR_PLIST"
-if ensure_agent_up "$LR_LABEL" 8765; then
-    ok "up at http://localhost:8765"
+# ─── 4. docs-livereload: legacy cleanup (paperflow-daemon takes over) ─
+# As of paperflow-hnl the standalone live-server LaunchAgent on :8765 is
+# retired — paperflow-daemon on :8767 owns docs serving + live-reload WS.
+# Idempotent cleanup: bootout + remove the old plist if present. Safe on
+# re-run.
+LR_LABEL_LEGACY="${LABEL_PREFIX}.docs-livereload"
+LR_PLIST_LEGACY="$HOME/Library/LaunchAgents/${LR_LABEL_LEGACY}.plist"
+log "docs-livereload: legacy cleanup"
+if launchctl print "gui/$(id -u)/$LR_LABEL_LEGACY" >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$LR_LABEL_LEGACY" >/dev/null 2>&1 || true
+    ok "booted out legacy LaunchAgent $LR_LABEL_LEGACY"
 else
-    err "not reachable — check $HOME/.local/log/docs-livereload.err.log"
+    skip "legacy LaunchAgent $LR_LABEL_LEGACY not loaded"
+fi
+if [ -f "$LR_PLIST_LEGACY" ]; then
+    rm -f "$LR_PLIST_LEGACY"
+    ok "removed legacy plist $LR_PLIST_LEGACY"
+else
+    skip "legacy plist $LR_PLIST_LEGACY not present"
 fi
 
 # ─── 5. claude-bridge: legacy cleanup (per-instance bridge takes over) ─
@@ -1339,11 +1316,6 @@ fi
 echo
 log "Status"
 {
-    if ensure_agent_up "$LR_LABEL" 8765; then
-        ok "live-server   : up    (http://localhost:8765)"
-    else
-        err "live-server   : DOWN"
-    fi
     # Single host-scoped daemon on 8767 (paperflow-du4). Supervisor is
     # either launchd (KeepAlive plist) or a cmux workspace (paperflow-o8n);
     # the status row reflects whichever path the install.sh block took.
@@ -1467,24 +1439,14 @@ else
                   "Inspect: launchctl list | grep paperflow-daemon    (and: lsof -i :8767, tail $HOME/.local/log/paperflow-daemon.err.log)"
 fi
 
-# 3. Live-server on 8765 — same tolerant check.
-if curl -fsS --max-time 2 -o /dev/null http://localhost:8765/ 2>/dev/null \
-   || curl -sS  --max-time 2 -o /dev/null -w '%{http_code}' http://localhost:8765/ 2>/dev/null \
-        | grep -qE '^[2345]'; then
-    ok "live-server port 8765"
-else
-    selftest_fail "live-server not responding on port 8765" \
-                  "Inspect: launchctl list | grep docs-livereload    (and: lsof -i :8765)"
-fi
-
-# 4. Preflight helper — verifies it's installed and reports ok end-to-end.
+# 3. Preflight helper — verifies it's installed and reports ok end-to-end.
 if "$HOME/.local/bin/paperflow-preflight" >/dev/null 2>&1; then
     ok "preflight        : ok"
 else
     err "preflight        : reported failure (rerun manually to see JSON)"
 fi
 
-# 5. Doctor helper — fast health probe (warnings → exit 1, critical → exit 2).
+# 4. Doctor helper — fast health probe (warnings → exit 1, critical → exit 2).
 if "$HOME/.local/bin/paperflow-doctor" --fast >/dev/null 2>&1; then
     ok "doctor           : ok"
 else
@@ -1496,7 +1458,7 @@ else
     fi
 fi
 
-# 6. Doc-meta helper — --no-auto-goal so a fresh install doesn't spawn a
+# 5. Doc-meta helper — --no-auto-goal so a fresh install doesn't spawn a
 # session Goal during the smoke check (the helper would otherwise auto-bd-init
 # this repo if it has no .beads/ yet).
 if "$HOME/.local/bin/paperflow-doc-meta" --no-auto-goal >/dev/null 2>&1; then
@@ -1505,7 +1467,7 @@ else
     err "doc-meta         : reported failure (rerun manually for JSON)"
 fi
 
-# 7. pf wrapper — `pf version` is the cheapest sanity probe; it touches the
+# 6. pf wrapper — `pf version` is the cheapest sanity probe; it touches the
 # dispatch table, color helpers, and plugin-cache lookup without spawning cmux.
 if "$HOME/.local/bin/pf" version >/dev/null 2>&1; then
     ok "pf version       : ok"

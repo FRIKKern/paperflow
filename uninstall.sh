@@ -71,4 +71,3 @@ ok "removed"
 
 echo
 log "Done. Your CLAUDE.md and any specs/plans/grills you wrote are untouched."
-echo "  To remove npm-global live-server too:  npm uninstall -g live-server"

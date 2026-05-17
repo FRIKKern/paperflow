@@ -32,10 +32,11 @@
 
 'use strict';
 
-const http = require('http');
-const fs   = require('fs');
-const path = require('path');
-const os   = require('os');
+const http   = require('http');
+const fs     = require('fs');
+const path   = require('path');
+const os     = require('os');
+const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 
 // ── config ──────────────────────────────────────────────────────────
@@ -47,8 +48,17 @@ const REGISTRY_FILE       = path.join(PAPERFLOW_DIR, 'registry.jsonl');
 const REGISTRY_TMP        = REGISTRY_FILE + '.tmp';
 const LOGS_DIR            = path.join(PAPERFLOW_DIR, 'logs');
 const LOG_FILE            = path.join(LOGS_DIR, 'paperflow-daemon.log');
+const LIVERELOAD_LOG      = path.join(PAPERFLOW_DIR, 'livereload.log');
+const LIVERELOAD_DEBOUNCE_MS = 200;
+const LIVERELOAD_GUID     = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const LIVERELOAD_MAX_INJECT_BYTES = 1024 * 1024; // 1 MB cap for HTML injection
 const DOCS_ROOT           = process.env.PAPERFLOW_DOCS_ROOT
   || path.join(os.homedir(), 'docs', 'paperflow');
+// DOCS_BASE is the parent of DOCS_ROOT (default ~/docs) — used by the
+// generic static fallback so /superpowers/* and other ~/docs/<dir>/*
+// trees are served by this daemon (retires the old live-server on :8765).
+const DOCS_BASE           = process.env.PAPERFLOW_DOCS_BASE
+  || path.join(os.homedir(), 'docs');
 const OWNER_PID_SWEEP_MS  = 3000;       // DECISION-6: owner-pid liveness cadence
 const STALE_HEARTBEAT_MS  = 30 * 60 * 1000; // 30 min — sessions with no fresh heartbeat are reaped
 const COMPACT_LINE_RATIO  = 10;         // compact when file > 10× live-state lines
@@ -489,8 +499,13 @@ const MIME = {
   '.ttf':  'font/ttf'
 };
 
-// Daemon owns docs now per CLAUDE.md (paperflow-du4 consolidation) — :8767 serves both API and ~/docs/paperflow/, retiring the old live-server on :8765.
-function serveStatic(req, res, urlPath) {
+// Daemon owns docs now per CLAUDE.md (paperflow-du4 consolidation, broadened
+// by paperflow-j5b) — :8767 serves API + ~/docs/paperflow/ AND every other
+// ~/docs/<dir>/* tree (e.g. ~/docs/superpowers/), retiring the old live-server
+// on :8765 entirely. baseDir defaults to ~/docs/paperflow for backward compat;
+// the generic fallback below passes ~/docs.
+function serveStatic(req, res, urlPath, baseDir) {
+  const base = baseDir || DOCS_ROOT;
   let rel;
   try { rel = decodeURIComponent(urlPath.replace(/^\/+/, '')); }
   catch (_) {
@@ -498,8 +513,8 @@ function serveStatic(req, res, urlPath) {
   }
   if (!rel || rel.endsWith('/')) rel += 'index.html';
 
-  const full = path.resolve(DOCS_ROOT, rel);
-  if (!full.startsWith(DOCS_ROOT + path.sep) && full !== DOCS_ROOT) {
+  const full = path.resolve(base, rel);
+  if (!full.startsWith(base + path.sep) && full !== base) {
     // Path-traversal: 404 JSON (not 403) — consistent error surface.
     return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: urlPath }));
   }
@@ -526,10 +541,35 @@ function serveStatic(req, res, urlPath) {
 
 function sendFile(res, full, st) {
   const ext = path.extname(full).toLowerCase();
+  const contentType = MIME[ext] || 'application/octet-stream';
+
+  // HTML: buffer + inject the livereload <script> tag right before </body>.
+  // Gated on Accept header so curl --head and asset fetches are unaffected,
+  // and on file size so 1+ MB HTML monsters fall through to streaming.
+  if ((ext === '.html' || ext === '.htm') && st.size <= LIVERELOAD_MAX_INJECT_BYTES) {
+    const accept = (res.req && res.req.headers && res.req.headers.accept) || '';
+    const wantsHtml = accept.includes('text/html') || accept.includes('*/*') || accept === '';
+    if (wantsHtml) {
+      return fs.readFile(full, (err, buf) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          return res.end('read failed');
+        }
+        const out = maybeInjectLivereload(buf);
+        res.writeHead(200, {
+          'Content-Type':   contentType,
+          'Content-Length': out.length,
+          'Cache-Control':  'no-cache'
+        });
+        res.end(out);
+      });
+    }
+  }
+
   res.writeHead(200, {
-    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Content-Type':   contentType,
     'Content-Length': st.size,
-    'Cache-Control': 'no-cache'
+    'Cache-Control':  'no-cache'
   });
   fs.createReadStream(full).pipe(res);
 }
@@ -612,6 +652,220 @@ function isDeferred(pathname) {
   return null;
 }
 
+// ── livereload (WebSocket + fs.watch + /livereload.js) ─────────────
+//
+// Replaces what live-server@1.2.2 on :8765 used to provide. Three pieces:
+//
+//   1. A minimal WebSocket server that accepts upgrades on any path
+//      starting with '/' (covers both '/livereload' used by the live-server
+//      protocol and '/' used by lib/goal-path-rail.js).
+//   2. fs.watch(DOCS_ROOT, {recursive:true}) → debounced broadcast of
+//      {command:"reload",path:"<rel>"} to every open socket.
+//   3. GET /livereload.js → a tiny client that opens a WS to the same
+//      host and re-emits messages so lib/live-render.js's WebSocket
+//      wrapper sees the JSON frames it expects.
+//
+// No external deps. Handshake = SHA1(key + GUID), text frames only.
+
+const liveSockets = new Set();
+
+function lrLog(entry) {
+  try {
+    fs.appendFileSync(LIVERELOAD_LOG, JSON.stringify(entry) + '\n', 'utf8');
+  } catch (_) { /* best-effort */ }
+}
+
+// Encode a short text payload as a single un-masked WebSocket frame.
+// Server→client frames are never masked (RFC 6455 §5.1). Supports payload
+// length up to 2^16-1 bytes; reload frames are well under that.
+function encodeTextFrame(payload) {
+  const data = Buffer.from(payload, 'utf8');
+  const len  = data.length;
+  if (len <= 125) {
+    const buf = Buffer.alloc(2 + len);
+    buf[0] = 0x81;          // FIN | text
+    buf[1] = len;
+    data.copy(buf, 2);
+    return buf;
+  }
+  if (len <= 65535) {
+    const buf = Buffer.alloc(4 + len);
+    buf[0] = 0x81;
+    buf[1] = 126;
+    buf.writeUInt16BE(len, 2);
+    data.copy(buf, 4);
+    return buf;
+  }
+  // 64-bit length — paperflow reload frames never reach this in practice
+  // but encode defensively rather than throw.
+  const buf = Buffer.alloc(10 + len);
+  buf[0] = 0x81;
+  buf[1] = 127;
+  buf.writeUInt32BE(0, 2);
+  buf.writeUInt32BE(len, 6);
+  data.copy(buf, 10);
+  return buf;
+}
+
+function broadcastReload(relPath) {
+  const frame = encodeTextFrame(JSON.stringify({
+    command: 'reload',
+    path:    relPath
+  }));
+  let notified = 0;
+  for (const sock of liveSockets) {
+    try {
+      if (sock.writable) {
+        sock.write(frame);
+        notified++;
+      }
+    } catch (_) { /* socket will close-error and drop itself */ }
+  }
+  lrLog({
+    ts:                new Date().toISOString(),
+    path:              relPath,
+    sockets_notified:  notified
+  });
+}
+
+// Coalesce rapid-fire fs events. Map<relPath, lastEventTime> isn't needed
+// because broadcast is idempotent — we just hold a single timer and flush
+// the most recent path when it fires.
+let lrPending = null;
+let lrTimer   = null;
+function scheduleBroadcast(relPath) {
+  lrPending = relPath; // last-write wins
+  if (lrTimer) return;
+  lrTimer = setTimeout(() => {
+    const p = lrPending;
+    lrPending = null;
+    lrTimer   = null;
+    if (p !== null) broadcastReload(p);
+  }, LIVERELOAD_DEBOUNCE_MS);
+  if (lrTimer.unref) lrTimer.unref();
+}
+
+function startDocsWatcher() {
+  let st;
+  try { st = fs.statSync(DOCS_ROOT); }
+  catch (e) {
+    logLine(`livereload: DOCS_ROOT not found at ${DOCS_ROOT} (${e.code || e.message}); watcher disabled`);
+    return;
+  }
+  if (!st.isDirectory()) {
+    logLine(`livereload: DOCS_ROOT ${DOCS_ROOT} is not a directory; watcher disabled`);
+    return;
+  }
+  let watcher;
+  try {
+    watcher = fs.watch(DOCS_ROOT, { recursive: true }, (eventType, filename) => {
+      if (!filename) return;
+      // fs.watch yields the path relative to the watched root. Normalise
+      // separators for the broadcast payload (live-server uses forward
+      // slashes on every platform).
+      const rel = String(filename).split(path.sep).join('/');
+      scheduleBroadcast(rel);
+    });
+  } catch (e) {
+    logLine(`livereload: fs.watch failed (${e.message}); watcher disabled`);
+    return;
+  }
+  watcher.on('error', err => {
+    logLine(`livereload: watcher error ${err && err.message}`);
+  });
+  logLine(`livereload: watching ${DOCS_ROOT}`);
+}
+
+// The /livereload.js client. Kept tight; live-render.js does the framing
+// interpretation, so this only has to open a WS and forward every message
+// to the page (via dispatching a synthetic event the wrapper sees first).
+// Note: lib/live-render.js wraps `window.WebSocket`, so simply *opening* a
+// WebSocket here is what triggers the wrapper — we don't need to dispatch
+// anything ourselves. The wrapper attaches its own onmessage handler.
+const LIVERELOAD_CLIENT_JS = `// paperflow-daemon livereload client
+(function () {
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var url   = proto + '//' + location.host + '/livereload';
+  var delay = 500;
+  function connect() {
+    try {
+      var ws = new WebSocket(url);
+      ws.onopen = function () { delay = 500; };
+      ws.onclose = function () {
+        setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 15000);
+      };
+      ws.onerror = function () { try { ws.close(); } catch (_) {} };
+    } catch (_) {
+      setTimeout(connect, delay);
+      delay = Math.min(delay * 2, 15000);
+    }
+  }
+  connect();
+})();
+`;
+
+function serveLivereloadJs(res) {
+  const body = Buffer.from(LIVERELOAD_CLIENT_JS, 'utf8');
+  res.writeHead(200, {
+    'Content-Type':   'application/javascript; charset=utf-8',
+    'Content-Length': body.length,
+    'Cache-Control':  'no-cache'
+  });
+  res.end(body);
+}
+
+// WebSocket handshake. Returns true if handled (success or close); caller
+// must not write to the socket again on a return-true.
+function handleWsUpgrade(req, socket) {
+  socket.on('error', () => { /* swallow — handled by removal-on-close */ });
+  try {
+    const key = req.headers['sec-websocket-key'];
+    if (!key || typeof key !== 'string') {
+      socket.destroy();
+      return;
+    }
+    const accept = crypto.createHash('sha1')
+      .update(key + LIVERELOAD_GUID)
+      .digest('base64');
+    const headers = [
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      'Sec-WebSocket-Accept: ' + accept,
+      '',
+      ''
+    ].join('\r\n');
+    socket.write(headers);
+  } catch (e) {
+    try { socket.destroy(); } catch (_) {}
+    logLine(`livereload: handshake failed (${e.message})`);
+    return;
+  }
+
+  liveSockets.add(socket);
+  // Consume incoming frames just enough to detect close. We never receive
+  // anything we care about — clients are write-only consumers — so the
+  // cheapest correct thing is to drain and ignore. A close frame from the
+  // peer manifests as 'end' or 'close'.
+  socket.on('data', () => { /* drain */ });
+  const drop = () => { liveSockets.delete(socket); };
+  socket.on('close', drop);
+  socket.on('end',   drop);
+  socket.on('error', drop);
+}
+
+// HTML injection — used by serveStatic when the file is .html and small
+// enough to buffer. Returns the modified buffer (or original if no
+// </body> is present).
+function maybeInjectLivereload(buf) {
+  if (!buf || buf.length === 0 || buf.length > LIVERELOAD_MAX_INJECT_BYTES) return buf;
+  const idx = buf.lastIndexOf('</body>');
+  if (idx < 0) return buf;
+  const tag = Buffer.from('<script src="/livereload.js"></script>\n', 'utf8');
+  return Buffer.concat([buf.slice(0, idx), tag, buf.slice(idx)]);
+}
+
 // ── HTTP server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   // CORS — buttons POST from arbitrary localhost origins; same shape as
@@ -631,6 +885,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     return res.end('paperflow-daemon ok\n');
+  }
+  if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/livereload.js') {
+    return serveLivereloadJs(res);
   }
   if (req.method === 'HEAD' && pathname === '/health') {
     res.writeHead(200, { 'X-Paperflow-Daemon': VERSION });
@@ -706,12 +963,16 @@ const server = http.createServer((req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405); return res.end();
   }
-  // /paperflow/<rel> → ~/docs/paperflow/<rel> (last-resort fallback;
-  // all real /paperflow/* API endpoints handled above).
+  // /paperflow/<rel> → ~/docs/paperflow/<rel> (preserve original behavior
+  // from paperflow-du4 — paperflow docs always served at this path; all
+  // real /paperflow/* API endpoints have been handled above).
   if (pathname.startsWith('/paperflow/')) {
     return serveStatic(req, res, pathname.slice('/paperflow'.length));
   }
-  serveStatic(req, res, pathname);
+  // Generic: /<dir>/<rest> → ~/docs/<dir>/<rest> (paperflow-j5b — retires
+  // the standalone ~/docs/ live-server on :8765). Traversal-safe via the
+  // base-dir containment check inside serveStatic.
+  serveStatic(req, res, pathname, DOCS_BASE);
 });
 
 // ── endpoint handlers ──────────────────────────────────────────────
@@ -1060,6 +1321,26 @@ compactIfNeeded();
 // Start the recurring sweep.
 const sweepTimer = setInterval(ownerPidSweep, OWNER_PID_SWEEP_MS);
 sweepTimer.unref && sweepTimer.unref(); // don't keep the event loop alive solely for this
+
+// WebSocket upgrade — accept any path so live-server clients (/livereload)
+// and goal-path-rail.js (/) both connect. Guarded so a malformed handshake
+// can't bring down the daemon.
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const upgradeHdr = String(req.headers.upgrade || '').toLowerCase();
+    if (upgradeHdr !== 'websocket') {
+      try { socket.destroy(); } catch (_) {}
+      return;
+    }
+    handleWsUpgrade(req, socket, head);
+  } catch (e) {
+    logLine(`livereload: upgrade error (${e && e.message})`);
+    try { socket.destroy(); } catch (_) {}
+  }
+});
+
+// fs.watch(DOCS_ROOT) — broadcast to all connected sockets on any change.
+startDocsWatcher();
 
 server.on('error', err => {
   if (err && err.code === 'EADDRINUSE') {

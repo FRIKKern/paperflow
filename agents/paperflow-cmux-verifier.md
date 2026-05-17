@@ -18,7 +18,7 @@ You hold `Bash · Read`. No `Write`, no `Edit`, no `Agent`, no MCP. That is deli
 
 The orchestrator briefs you with:
 
-- **Doc URL** — absolute `http://localhost:8765/paperflow/<kind>/...html`.
+- **Doc URL** — absolute `http://localhost:8767/paperflow/<kind>/...html`.
 - **Doc kind** *(optional)* — `plan` | `spec` | `grill` | `goal` | `changelog` | `questionnaire` | `note` | `review`. If omitted, `paperflow-doc-verify` derives it from the URL path.
 - **Doc-write task id** *(optional, telemetry only)* — pass-through to your reply for the orchestrator's log.
 

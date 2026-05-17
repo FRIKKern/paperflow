@@ -212,7 +212,7 @@ This skill issues no other Beads writes — it's the meta layer.
 ## Verify
 
 ```bash
-curl -s http://127.0.0.1:8765/                 # live-server
+curl -s http://127.0.0.1:8767/                 # paperflow-daemon
 curl -s http://127.0.0.1:8766/                 # claude-bridge
 find skills -name '*.md' -type f | wc -l       # must return 8
 bash scripts/check-skill-count.sh              # CI gate, must return ✓

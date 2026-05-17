@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/FRIKKern/paperflow/main/scripts/qui
 2. **Restart Claude Code** (or run `/hooks` in any already-open session) so the new hooks, skills, and `CLAUDE.md` get picked up.
 3. In any project, type `/paperflow:goal "rewrite the onboarding flow"`. paperflow opens a Goal HTML in your browser, sets up Beads in the repo, drops you back at the prompt.
 4. From there, `/paperflow:plan` to draft and grill a plan, or `/paperflow:autopilot` if you want it to chain plan → grill → build → review in one push (it pauses at the grill so you stay in the loop).
-5. Every artifact opens automatically at `http://localhost:8765/paperflow/...`. Click "Build this plan" inside the doc — the prompt lands in the terminal where Claude is running.
+5. Every artifact opens automatically at `http://localhost:8767/paperflow/...`. Click "Build this plan" inside the doc — the prompt lands in the terminal where Claude is running.
 
 There's also a `pf` CLI for kicking flows off without opening Claude Code first: `pf goal "ship auth"`, `pf autopilot "fix typecheck"`, `pf doctor`, `pf status`. `pf goal` spawns a fresh Claude in the current directory via cmux and sends the slash command for you.
 
@@ -32,7 +32,7 @@ Everything else — questionnaires when shape is unclear, simplify passes, chang
 
 <!-- TODO: insert ~10s loop GIF + 2 screenshots (rail, dock) -->
 
-Specs, plans, and grills open as HTML articles in your browser at `localhost:8765` — serif body, captioned figures, Mermaid diagrams throughout. A 240 px sticky right rail shows the active Goal's lifecycle as a clickable git-graph; click an older event to walk back, shift-click two nodes for a line-level diff. Under cmux, four live feeds stream into the right-side Dock: active Goal/Phase/Task, ready tasks, recent events, the auto-open log. Action buttons inside each doc — Build this plan, Grill the spec, Submit, Simplify — POST back to the bridge, which routes the message into the terminal where Claude is running.
+Specs, plans, and grills open as HTML articles in your browser at `localhost:8767` — serif body, captioned figures, Mermaid diagrams throughout. A 240 px sticky right rail shows the active Goal's lifecycle as a clickable git-graph; click an older event to walk back, shift-click two nodes for a line-level diff. Under cmux, four live feeds stream into the right-side Dock: active Goal/Phase/Task, ready tasks, recent events, the auto-open log. Action buttons inside each doc — Build this plan, Grill the spec, Submit, Simplify — POST back to the bridge, which routes the message into the terminal where Claude is running.
 
 The statusline shows the active Goal and Phase at a glance:
 
@@ -134,7 +134,7 @@ Eight skills, total. The cap is enforced by `scripts/check-skill-count.sh` — a
 /paperflow:setup
 ```
 
-The first two are stock Claude Code commands. The third runs the bundled `install.sh` after explaining what it touches and asking for consent — LaunchAgents on ports 8765 + 8766, the cmux dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims, optional brew installs.
+The first two are stock Claude Code commands. The third runs the bundled `install.sh` after explaining what it touches and asking for consent — single host-scoped daemon on :8767, the cmux dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims, optional brew installs.
 
 **Read first, then run:**
 
@@ -153,7 +153,7 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 
 **Bridge port 8766 unreachable** — `lsof -i :8766` for a stale process; kill it and re-run install. Only one paperflow bridge can listen on 8766 at a time.
 
-**Live-server port 8765 unreachable** — same idea: `lsof -i :8765`. Most often a dev server is squatting on the port. Kill it or override the live-server port in the LaunchAgent plist.
+**Daemon port 8767 unreachable** — same idea: `lsof -i :8767`. Most often a dev server is squatting on the port. Kill it or override the daemon port in the LaunchAgent plist.
 
 **npm EACCES on global install** — the installer is nvm-aware. If your `node` is from nvm you'll skip the EACCES branch. If it's a system install: `sudo chown -R $(whoami) /usr/local/{lib/node_modules,bin,share}`.
 

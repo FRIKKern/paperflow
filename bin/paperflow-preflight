@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # paperflow-preflight — runtime preflight for the HTTP services skills depend on.
-# Probes 8765 (docs-livereload, always LaunchAgent) and 8767 (paperflow-daemon,
-# the single host-scoped daemon that subsumed the old per-instance bridge +
-# aux daemon per Goal paperflow-du4). On failure, attempts ONE auto-repair
-# via launchctl kickstart, re-probes, then emits one-line JSON to stdout and
-# exits 2. On success, exits 0 silently. Exit 1 reserved for script-internal
-# errors. Output contract: stdout is empty on success, single-line JSON on
-# failure.
+# Probes 8767 (paperflow-daemon, the single host-scoped daemon that subsumed
+# the old per-instance bridge + aux daemon per Goal paperflow-du4). On failure,
+# attempts ONE auto-repair via launchctl kickstart, re-probes, then emits
+# one-line JSON to stdout and exits 2. On success, exits 0 silently. Exit 1
+# reserved for script-internal errors. Output contract: stdout is empty on
+# success, single-line JSON on failure.
+# (Legacy doc-server leg retired with Goal paperflow-hnl.)
 
 set -u
 
@@ -62,8 +62,7 @@ log_tail_escaped() {
 }
 
 # ── emit failure JSON and exit 2 ───────────────────────────────────
-# $7 (supervisor) is optional; defaults to "none" when omitted (e.g. for the
-# docs-livereload leg, which is always a LaunchAgent).
+# $7 (supervisor) is optional; defaults to "none" when omitted.
 emit_failure() {
     local service="$1" port="$2" mode="$3" reason="$4" repair="$5" log_tail="$6"
     local supervisor="${7:-none}"
@@ -74,26 +73,7 @@ emit_failure() {
     exit 2
 }
 
-# ── 1. 8765 — docs-livereload (always LaunchAgent) ─────────────────
-if ! probe_port 8765; then
-    LR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/docs-livereload.err.log")"
-    LR_LABEL="$(discover_label '\.docs-livereload$')"
-    if [ -z "$LR_LABEL" ]; then
-        emit_failure "docs-livereload" 8765 "launchagent" "label_missing" \
-                     "bash install.sh   # LaunchAgent not loaded; rerun installer" \
-                     "$LR_LOG_TAIL" "launchd"
-    fi
-    launchctl kickstart -k "gui/$ID/$LR_LABEL" >/dev/null 2>&1 || true
-    sleep 1
-    if ! probe_port 8765; then
-        LR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/docs-livereload.err.log")"
-        emit_failure "docs-livereload" 8765 "launchagent" "down" \
-                     "launchctl kickstart -k gui/$ID/$LR_LABEL" \
-                     "$LR_LOG_TAIL" "launchd"
-    fi
-fi
-
-# ── 2. 8767 — paperflow-daemon (single host-scoped daemon) ─────────
+# ── 8767 — paperflow-daemon (single host-scoped daemon) ────────────
 # Replaces the old aux-daemon + per-instance claude-bridge probes (paperflow-du4).
 # Supervisor is now dynamic: cmux workspace, launchd LaunchAgent, or none.
 # Detection mirrors paperflow-doctor (spec §3 daemon-supervisor-contract);
@@ -130,6 +110,6 @@ if ! probe_port 8767; then
     fi
 fi
 
-# both up
+# daemon up
 printf 'paperflow-preflight: ok\n' >&2
 exit 0
