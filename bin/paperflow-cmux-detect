@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# paperflow-cmux-detect — probe cmux availability + emit JSON status.
+# B1 of paperflow-8hz (cmux-browser-default). See spec
+# ~/docs/paperflow/specs/2026-05-15-paperflow-cmux-integration-spec.html
+# sections 1 and 3. Exit 0=ready, 1=not present/usable, 2=internal error.
+
+set -e
+trap 'echo "{\"cmux\":false,\"reason\":\"internal-error\"}"; exit 2' ERR
+
+TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+JQ="$(command -v jq || true)"
+[ -z "$JQ" ] && { printf '{"cmux":false,"reason":"jq-missing","ts":"%s"}\n' "$TS"; exit 2; }
+
+emit_off() {
+    # $1=reason, $2=version (may be empty)
+    "$JQ" -nc \
+        --arg reason "$1" \
+        --arg version "${2:-}" \
+        --arg ts "$TS" \
+        '{cmux:false, reason:$reason,
+          version:(if $version=="" then null else $version end),
+          ts:$ts}'
+}
+
+# Forced-off knob for tests.
+if [ "${PAPERFLOW_CMUX_DETECT_FORCE_OFF:-}" = "1" ]; then
+    emit_off "forced-off" ""
+    exit 1
+fi
+
+# 1. CMUX_WORKSPACE_ID env var.
+if [ -z "${CMUX_WORKSPACE_ID:-}" ]; then
+    emit_off "no-env" ""
+    exit 1
+fi
+
+# 2. cmux binary.
+CMUX_BIN="$(command -v cmux || true)"
+if [ -z "$CMUX_BIN" ]; then
+    emit_off "binary-not-found" ""
+    exit 1
+fi
+
+# 3. cmux --version → parse X.Y.Z from "cmux X.Y.Z (NNN) [hash]".
+VER_LINE="$("$CMUX_BIN" --version 2>/dev/null | head -1 || true)"
+VERSION="$(printf '%s\n' "$VER_LINE" | /usr/bin/awk '{
+    for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit }
+}')"
+
+# 4. cmux browser --help exit code.
+if ! "$CMUX_BIN" browser --help >/dev/null 2>&1; then
+    emit_off "browser-cli-failed" "$VERSION"
+    exit 1
+fi
+
+# 5. Current surface — cmux injects CMUX_SURFACE_ID (UUID) in real
+# environments; CMUX_SURFACE_REF was the spec's wishful naming and
+# is never set in practice (B2 paperflow-crs finding 2026-05-17).
+CUR_SURFACE="${CMUX_SURFACE_REF:-${CMUX_SURFACE_ID:-${CMUX_SURFACE:-}}}"
+
+# 6. Workspace identifier — prefer the UUID from $CMUX_WORKSPACE_ID
+# (matches the daemon's /sessions/discover view and the session-register
+# hook). cmux current-workspace returns a short ref like "workspace:1"
+# which would drift from the daemon's UUID-keyed registry.
+WS="$CMUX_WORKSPACE_ID"
+WS_REF="$("$CMUX_BIN" current-workspace 2>/dev/null | head -1 || true)"
+
+# Success.
+"$JQ" -nc \
+    --arg version "$VERSION" \
+    --arg workspace "$WS" \
+    --arg workspace_ref "$WS_REF" \
+    --arg surface "$CUR_SURFACE" \
+    --arg ts "$TS" \
+    '{cmux:true,
+      version:(if $version=="" then null else $version end),
+      workspace:$workspace,
+      workspace_ref:(if $workspace_ref=="" then null else $workspace_ref end),
+      current_surface:(if $surface=="" then null else $surface end),
+      browser_cli:true,
+      ts:$ts}'
+
+exit 0

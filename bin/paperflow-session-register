@@ -53,9 +53,24 @@ if [ -z "$SID" ]; then
 fi
 
 # cmux env — accept either CMUX_WORKSPACE_ID / CMUX_WORKSPACE for workspace,
-# CMUX_SURFACE_REF / CMUX_SURFACE for surface.
+# CMUX_SURFACE_REF / CMUX_SURFACE_ID / CMUX_SURFACE for surface. The actual
+# env var cmux injects is CMUX_SURFACE_ID (a UUID); CMUX_SURFACE_REF was
+# wishful naming in the original spec — keep it for forward-compat.
 CMUX_WS="${CMUX_WORKSPACE_ID:-${CMUX_WORKSPACE:-}}"
-CMUX_SF="${CMUX_SURFACE_REF:-${CMUX_SURFACE:-}}"
+CMUX_SF="${CMUX_SURFACE_REF:-${CMUX_SURFACE_ID:-${CMUX_SURFACE:-}}}"
+
+# Fallback: if no surface env var was injected (e.g. older cmux, or the
+# SessionStart hook fired before cmux bound the surface), ask cmux for the
+# caller surface. `cmux identify` (no flags) returns JSON with a `.caller`
+# block whose `surface_ref` is the short ref of whichever surface invoked us.
+# Defensive: ignore any error, leave CMUX_SF empty on failure so the JSON
+# body sends `cmux_surface: null` (current behaviour). `timeout(1)` is not on
+# stock macOS, so we rely on cmux's local-socket speed (<100ms typical) plus
+# the outer hook-timeout guard.
+if [ -z "$CMUX_SF" ] && command -v cmux >/dev/null 2>&1; then
+    CMUX_SF="$(cmux identify 2>/dev/null \
+        | /usr/bin/env jq -r '.caller.surface_ref // empty' 2>/dev/null || true)"
+fi
 
 # tty — best effort; SessionStart from a hook context typically has no tty.
 TTY_VAL="$(tty 2>/dev/null || true)"
