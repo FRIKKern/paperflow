@@ -62,12 +62,15 @@ log_tail_escaped() {
 }
 
 # ── emit failure JSON and exit 2 ───────────────────────────────────
+# $7 (supervisor) is optional; defaults to "none" when omitted (e.g. for the
+# docs-livereload leg, which is always a LaunchAgent).
 emit_failure() {
     local service="$1" port="$2" mode="$3" reason="$4" repair="$5" log_tail="$6"
+    local supervisor="${7:-none}"
     local repair_esc
     repair_esc="$(printf '%s' "$repair" | json_escape)"
-    printf '{"ok":false,"service":"%s","port":%s,"mode":"%s","reason":"%s","repair_command":"%s","log_tail":"%s"}\n' \
-        "$service" "$port" "$mode" "$reason" "$repair_esc" "$log_tail"
+    printf '{"ok":false,"service":"%s","port":%s,"mode":"%s","supervisor":"%s","reason":"%s","repair_command":"%s","log_tail":"%s"}\n' \
+        "$service" "$port" "$mode" "$supervisor" "$reason" "$repair_esc" "$log_tail"
     exit 2
 }
 
@@ -78,7 +81,7 @@ if ! probe_port 8765; then
     if [ -z "$LR_LABEL" ]; then
         emit_failure "docs-livereload" 8765 "launchagent" "label_missing" \
                      "bash install.sh   # LaunchAgent not loaded; rerun installer" \
-                     "$LR_LOG_TAIL"
+                     "$LR_LOG_TAIL" "launchd"
     fi
     launchctl kickstart -k "gui/$ID/$LR_LABEL" >/dev/null 2>&1 || true
     sleep 1
@@ -86,32 +89,44 @@ if ! probe_port 8765; then
         LR_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/docs-livereload.err.log")"
         emit_failure "docs-livereload" 8765 "launchagent" "down" \
                      "launchctl kickstart -k gui/$ID/$LR_LABEL" \
-                     "$LR_LOG_TAIL"
+                     "$LR_LOG_TAIL" "launchd"
     fi
 fi
 
 # ── 2. 8767 — paperflow-daemon (single host-scoped daemon) ─────────
 # Replaces the old aux-daemon + per-instance claude-bridge probes (paperflow-du4).
-# Always a LaunchAgent now — the cmux-first branch was retired with the
-# per-instance bridge.
+# Supervisor is now dynamic: cmux workspace, launchd LaunchAgent, or none.
+# Detection mirrors paperflow-doctor (spec §3 daemon-supervisor-contract);
+# we keep it inline rather than extracting because preflight must remain
+# self-contained (it's the Step-0 probe every skill calls).
 if ! probe_port 8767; then
     DM_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/paperflow-daemon.err.log")"
-    DM_LABEL="$(discover_label '\.paperflow-daemon$')"
-    [ -n "$DM_LABEL" ] || DM_LABEL="$DAEMON_LABEL"
-    # If we never found a label via launchctl list, the LaunchAgent isn't
-    # loaded — repair = rerun installer. Otherwise kickstart it.
-    if ! launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "$DM_LABEL"; then
-        emit_failure "paperflow-daemon" 8767 "launchagent" "label_missing" \
-                     "bash install.sh   # paperflow-daemon LaunchAgent not loaded; rerun installer" \
-                     "$DM_LOG_TAIL"
+    DAEMON_SUPERVISOR="none"
+    if command -v cmux >/dev/null 2>&1 \
+       && cmux list-workspaces 2>/dev/null \
+            | awk '{ l=$0; sub(/^[* ]+/,"",l); sub(/^[^ \t]+[ \t]+/,"",l);
+                     sub(/[ \t]+\[selected\][ \t]*$/,"",l); sub(/[ \t]+$/,"",l);
+                     print l }' \
+            | grep -qx 'paperflow-daemon'; then
+        DAEMON_SUPERVISOR="cmux"
+    elif launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "$DAEMON_LABEL"; then
+        DAEMON_SUPERVISOR="launchd"
     fi
-    launchctl kickstart -k "gui/$ID/$DM_LABEL" >/dev/null 2>&1 || true
+    case "$DAEMON_SUPERVISOR" in
+        cmux)    DM_REPAIR="$HOME/.local/bin/paperflow-daemon-spawn --force-cmux" ;;
+        launchd) DM_REPAIR="launchctl kickstart -k gui/$ID/$DAEMON_LABEL" ;;
+        *)       DM_REPAIR="$HOME/.local/bin/paperflow-daemon-spawn" ;;
+    esac
+    # Best-effort one-shot repair under launchd; cmux/none paths skip the
+    # kickstart and let the operator run paperflow-daemon-spawn.
+    if [ "$DAEMON_SUPERVISOR" = "launchd" ]; then
+        launchctl kickstart -k "gui/$ID/$DAEMON_LABEL" >/dev/null 2>&1 || true
+    fi
     # Daemon boot includes a registry.jsonl replay; allow a few seconds.
     if ! wait_for_port 8767 5; then
         DM_LOG_TAIL="$(log_tail_escaped "$HOME/.local/log/paperflow-daemon.err.log")"
-        emit_failure "paperflow-daemon" 8767 "launchagent" "down" \
-                     "launchctl kickstart -k gui/$ID/$DM_LABEL" \
-                     "$DM_LOG_TAIL"
+        emit_failure "paperflow-daemon" 8767 "$DAEMON_SUPERVISOR" "down" \
+                     "$DM_REPAIR" "$DM_LOG_TAIL" "$DAEMON_SUPERVISOR"
     fi
 fi
 

@@ -359,6 +359,30 @@ fi
 # Each leg counts as one check; collective failure is critical because
 # downstream skills depend on the daemon for doc-button routing.
 DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://127.0.0.1:8767}"
+LP="${LABEL_PREFIX:-dev.$USER}"
+
+# Supervisor decision — drives repair_command for daemon:health_* issues.
+# Spec: ~/docs/paperflow/specs/2026-05-17-daemon-supervisor-contract.html §3.
+# Order: (1) live cmux workspace named paperflow-daemon, (2) loaded launchd
+# plist, (3) none. The detection is *probe-only* — we don't mutate anything.
+DAEMON_SUPERVISOR="none"
+if command -v cmux >/dev/null 2>&1 \
+   && cmux list-workspaces 2>/dev/null \
+        | awk '{ l=$0; sub(/^[* ]+/,"",l); sub(/^[^ \t]+[ \t]+/,"",l);
+                 sub(/[ \t]+\[selected\][ \t]*$/,"",l); sub(/[ \t]+$/,"",l);
+                 print l }' \
+        | grep -qx 'paperflow-daemon'; then
+    DAEMON_SUPERVISOR="cmux"
+elif launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "${LP}.paperflow-daemon"; then
+    DAEMON_SUPERVISOR="launchd"
+fi
+case "$DAEMON_SUPERVISOR" in
+    cmux)    DAEMON_REPAIR="$HOME/.local/bin/paperflow-daemon-spawn --force-cmux" ;;
+    launchd) DAEMON_REPAIR="launchctl kickstart -k gui/$(id -u)/${LP}.paperflow-daemon" ;;
+    *)       DAEMON_REPAIR="$HOME/.local/bin/paperflow-daemon-spawn   # auto-picks supervisor" ;;
+esac
+add_autofixed "daemon:supervisor" "paperflow-daemon supervisor: $DAEMON_SUPERVISOR"
+
 DAEMON_HEALTH_HEAD_CODE="$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' \
     -I "$DAEMON_URL/health" 2>/dev/null || echo 000)"
 if [ "$DAEMON_HEALTH_HEAD_CODE" = "200" ]; then
@@ -366,7 +390,7 @@ if [ "$DAEMON_HEALTH_HEAD_CODE" = "200" ]; then
 else
     fail; add_issue "daemon:health_head_failed" "critical" \
                     "HEAD $DAEMON_URL/health returned $DAEMON_HEALTH_HEAD_CODE (expected 200)" \
-                    "launchctl kickstart -k gui/$(id -u)/${LABEL_PREFIX:-dev.$USER}.paperflow-daemon" false
+                    "$DAEMON_REPAIR" false
 fi
 
 DAEMON_HEALTH_BODY="$(curl -sS --max-time 2 "$DAEMON_URL/health" 2>/dev/null || true)"
@@ -378,7 +402,7 @@ if [ -n "$DAEMON_HEALTH_BODY" ] && printf '%s' "$DAEMON_HEALTH_BODY" | jq -e '.o
 else
     fail; add_issue "daemon:health_body_bad" "critical" \
                     "GET $DAEMON_URL/health did not return a JSON body with ok:true" \
-                    "launchctl kickstart -k gui/$(id -u)/${LABEL_PREFIX:-dev.$USER}.paperflow-daemon" false
+                    "$DAEMON_REPAIR" false
 fi
 
 # ── 1. dependency presence ─────────────────────────────────────────
@@ -556,18 +580,21 @@ else
     pass
 fi
 
-# ── 6c. plist alignment: paperflow-daemon loaded; old labels not ───
+# ── 6c. plist alignment: paperflow-daemon plist present; old labels not ─
 # Replaces the F4-era check that looked for aux + claude-bridge agents.
-# The single host-scoped daemon (paperflow-du4) should be loaded; the
-# legacy labels (.paperflow-aux, .claude-bridge) should be gone.
-LP="${LABEL_PREFIX:-dev.$USER}"
+# Under the supervisor-contract (2026-05-17), cmux hosts ship the daemon
+# plist in a DORMANT state (RunAtLoad=false, KeepAlive=false) — present on
+# disk as a safety-net, not loaded into launchctl. So the check is "plist
+# file exists on disk"; whether it's the active supervisor or the dormant
+# safety-net is reported via the daemon:supervisor autofixed note above.
 DAEMON_LBL="${LP}.paperflow-daemon"
-if launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "$DAEMON_LBL"; then
+DAEMON_PLIST="$HOME/Library/LaunchAgents/${DAEMON_LBL}.plist"
+if [ -f "$DAEMON_PLIST" ]; then
     pass
 else
     fail; add_issue "launchagent:paperflow-daemon_missing" "critical" \
-                    "paperflow-daemon LaunchAgent ($DAEMON_LBL) is not loaded" \
-                    "launchctl kickstart -k gui/$(id -u)/$DAEMON_LBL   # or: bash $REPO/install.sh" false
+                    "paperflow-daemon LaunchAgent plist ($DAEMON_PLIST) is not on disk" \
+                    "bash $REPO/install.sh" false
 fi
 
 # Legacy labels — bootout if still loaded.
