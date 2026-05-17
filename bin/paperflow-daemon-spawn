@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# paperflow-daemon-spawn — supervisor-decision helper for the single host
+# paperflow-daemon (B1 of paperflow-lky). See spec
+# ~/docs/paperflow/specs/2026-05-17-daemon-supervisor-contract.html.
+#
+# Picks between cmux (cmux new-workspace) and launchd (launchctl bootstrap).
+# Idempotent: a live :8767/health daemon means action:"already-up", no churn.
+# Contract: ALWAYS one JSON line on stdout. Exit 0 success, 1 failure.
+
+set -e
+
+START_S="$(/bin/date +%s 2>/dev/null || echo 0)"
+TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+JQ="$(command -v jq)"  # required; install.sh ensures it
+DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://localhost:8767}"
+DAEMON_BIN="$HOME/.local/bin/paperflow-daemon"
+USER_NAME="$(id -un)"
+PLIST="$HOME/Library/LaunchAgents/dev.${USER_NAME}.paperflow-daemon.plist"
+LABEL="dev.${USER_NAME}.paperflow-daemon"
+WS_NAME="paperflow-daemon"
+
+FORCE_CMUX=0; FORCE_LAUNCHD=0
+for a in "$@"; do
+    case "$a" in
+        --force-cmux)    FORCE_CMUX=1 ;;
+        --force-launchd) FORCE_LAUNCHD=1 ;;
+        -h|--help)
+            cat <<EOF
+paperflow-daemon-spawn — idempotently ensure paperflow-daemon is running.
+
+Usage: paperflow-daemon-spawn [--force-cmux | --force-launchd]
+
+Picks cmux when detected (cmux new-workspace --name paperflow-daemon
+--command ...), otherwise launchd (launchctl bootstrap/kickstart).
+Exits 0 if :8767/health already returns ok. Emits one JSON line on stdout:
+  {ok, supervisor, action, workspace_ref?, error?, elapsed_ms, ts}
+EOF
+            exit 0 ;;
+    esac
+done
+
+elapsed_ms() {
+    local n; n="$(/bin/date +%s 2>/dev/null || echo "$START_S")"
+    printf '%s\n' $(( (n - START_S) * 1000 ))
+}
+
+emit() {
+    # emit <ok 0|1> <supervisor> <action> <workspace_ref> <error>
+    "$JQ" -nc \
+        --argjson ok "$1" \
+        --arg sup "$2" --arg act "$3" \
+        --arg wsref "$4" --arg err "$5" \
+        --argjson el "$(elapsed_ms)" --arg ts "$TS" \
+        '{ok:($ok==1), supervisor:$sup, action:$act,
+          workspace_ref:(if $wsref=="" then null else $wsref end),
+          error:(if $err=="" then null else $err end),
+          elapsed_ms:$el, ts:$ts}'
+}
+
+health_ok() {
+    curl -fsS --max-time 1 "$DAEMON_URL/health" 2>/dev/null \
+        | grep -q '"ok":true'
+}
+
+wait_health() {
+    local i=0
+    while [ $i -lt 10 ]; do
+        health_ok && return 0
+        sleep 0.5; i=$(( i + 1 ))
+    done
+    return 1
+}
+
+# --- cmux path: list-workspaces has no --json in 0.63.x. Plain output is
+# `[* ]workspace:N  <title>  [selected]?`. Match title exactly so
+# `paperflow-dock-daemon` doesn't false-match `paperflow-daemon`.
+try_cmux() {
+    if health_ok; then emit 1 cmux already-up "" ""; return 0; fi
+    local cmux_bin; cmux_bin="$(command -v cmux || true)"
+    [ -z "$cmux_bin" ] && { emit 0 cmux "" "" "cmux-binary-missing"; return 1; }
+
+    local ws_ref
+    ws_ref="$("$cmux_bin" list-workspaces 2>/dev/null | /usr/bin/awk -v want="$WS_NAME" '
+        { l=$0; sub(/^[* ]+/, "", l); ref=l; sub(/[ \t].*$/, "", ref)
+          t=l; sub(/^[^ \t]+[ \t]+/, "", t)
+          sub(/[ \t]+\[selected\][ \t]*$/, "", t); sub(/[ \t]+$/, "", t)
+          if (t == want) { print ref; exit } }' || true)"
+
+    if [ -n "$ws_ref" ]; then
+        # Workspace lives but daemon is dead — keystroke the daemon cmd into
+        # the idle shell rather than churning the workspace.
+        if "$cmux_bin" send --workspace "$ws_ref" -- "$DAEMON_BIN"$'\n' >/dev/null 2>&1; then
+            if wait_health; then emit 1 cmux sent-command "$ws_ref" ""; return 0; fi
+            emit 0 cmux sent-command "$ws_ref" "health-timeout"; return 1
+        fi
+        # send failed — fall through to a duplicate spawn; user closes the dead one.
+    fi
+
+    # Spawn fresh. `--command` keystrokes text+Enter into the new surface's
+    # zsh, so the daemon runs as a shell child. Dead daemon leaves shell live.
+    local out new_ref
+    out="$("$cmux_bin" new-workspace --name "$WS_NAME" --command "$DAEMON_BIN" 2>&1 || true)"
+    new_ref="$(printf '%s\n' "$out" | /usr/bin/awk '
+        { for (i=1;i<=NF;i++) if ($i ~ /^workspace:[0-9]+$/) { print $i; exit } }')"
+    if wait_health; then emit 1 cmux spawned "$new_ref" ""; return 0; fi
+    emit 0 cmux spawned "$new_ref" "health-timeout"; return 1
+}
+
+# --- launchd path: bootstrap if not loaded, kickstart -k if loaded.
+try_launchd() {
+    if health_ok; then emit 1 launchd already-up "" ""; return 0; fi
+    [ -f "$PLIST" ] || { emit 0 launchd "" "" "plist-missing"; return 1; }
+    local uid; uid="$(id -u)"
+    launchctl kickstart -k "gui/$uid/$LABEL" >/dev/null 2>&1 \
+        || launchctl bootstrap "gui/$uid" "$PLIST" >/dev/null 2>&1 || true
+    if wait_health; then emit 1 launchd launchctl-loaded "" ""; return 0; fi
+    emit 0 launchd launchctl-loaded "" "health-timeout"; return 1
+}
+
+# --- dispatch
+if [ "$FORCE_LAUNCHD" = 1 ]; then try_launchd; exit $?; fi
+
+CMUX_ON=0
+if [ "$FORCE_CMUX" = 1 ]; then
+    CMUX_ON=1
+elif [ -x "$(dirname "$0")/paperflow-cmux-detect" ]; then
+    CMUX_JSON="$("$(dirname "$0")/paperflow-cmux-detect" 2>/dev/null || true)"
+    [ -n "$CMUX_JSON" ] && \
+        [ "$(printf '%s' "$CMUX_JSON" | "$JQ" -r '.cmux // false' 2>/dev/null)" = "true" ] \
+        && CMUX_ON=1
+fi
+
+if [ "$CMUX_ON" = 1 ]; then try_cmux; exit $?; fi
+try_launchd; exit $?
