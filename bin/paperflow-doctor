@@ -363,15 +363,17 @@ LP="${LABEL_PREFIX:-dev.$USER}"
 
 # Supervisor decision — drives repair_command for daemon:health_* issues.
 # Spec: ~/docs/paperflow/specs/2026-05-17-daemon-supervisor-contract.html §3.
-# Order: (1) live cmux workspace named paperflow-daemon, (2) loaded launchd
-# plist, (3) none. The detection is *probe-only* — we don't mutate anything.
+# Detection order matters for recovery: when the cmux workspace has been
+# closed (daemon-down recovery scenario), the dormant plist is still loaded
+# in launchctl — but the INTENT is still cmux on a cmux host. We use
+# paperflow-cmux-detect for intent, fall back to launchd label for non-cmux.
 DAEMON_SUPERVISOR="none"
-if command -v cmux >/dev/null 2>&1 \
-   && cmux list-workspaces 2>/dev/null \
-        | awk '{ l=$0; sub(/^[* ]+/,"",l); sub(/^[^ \t]+[ \t]+/,"",l);
-                 sub(/[ \t]+\[selected\][ \t]*$/,"",l); sub(/[ \t]+$/,"",l);
-                 print l }' \
-        | grep -qx 'paperflow-daemon'; then
+CMUX_INTENT=false
+if [ -x "$HOME/.local/bin/paperflow-cmux-detect" ]; then
+    CMUX_INTENT="$("$HOME/.local/bin/paperflow-cmux-detect" 2>/dev/null \
+        | /usr/bin/env jq -r '.cmux // false' 2>/dev/null || echo false)"
+fi
+if [ "$CMUX_INTENT" = "true" ]; then
     DAEMON_SUPERVISOR="cmux"
 elif launchctl list 2>/dev/null | awk '{print $3}' | grep -qx "${LP}.paperflow-daemon"; then
     DAEMON_SUPERVISOR="launchd"
