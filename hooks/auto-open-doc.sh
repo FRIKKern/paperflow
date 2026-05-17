@@ -38,10 +38,18 @@ case "$FILE_PATH" in
     # workspace-keyed sidecar so subsequent writes navigate via `goto`
     # without re-entering the reuse-or-not lottery.
     # On non-cmux (or any failure): fall back to /usr/bin/open as before.
-    DETECT_BIN="$(dirname "$0")/../bin/paperflow-cmux-detect"
+    # Resolve detect helper: prefer PATH (deploy puts it in ~/.local/bin/),
+    # then HOME/.local/bin/ as a backstop, then the source-tree sibling
+    # (works when the hook is invoked from a paperflow checkout). The
+    # earlier source-tree-only path resolved to ~/.claude/bin/ at deploy
+    # time and was never executable, so the hook always fell back to OS
+    # browser.
+    DETECT_BIN="$(command -v paperflow-cmux-detect 2>/dev/null || true)"
+    [ -z "$DETECT_BIN" ] && [ -x "$HOME/.local/bin/paperflow-cmux-detect" ] && DETECT_BIN="$HOME/.local/bin/paperflow-cmux-detect"
+    [ -z "$DETECT_BIN" ] && [ -x "$(dirname "$0")/../bin/paperflow-cmux-detect" ] && DETECT_BIN="$(dirname "$0")/../bin/paperflow-cmux-detect"
     DETECT_JSON=""
     CMUX_ON=false
-    if [ -x "$DETECT_BIN" ]; then
+    if [ -n "$DETECT_BIN" ] && [ -x "$DETECT_BIN" ]; then
       # Detect script exits 1 when cmux absent — capture stdout either way.
       DETECT_JSON="$("$DETECT_BIN" 2>/dev/null || true)"
       if [ -n "$DETECT_JSON" ]; then
