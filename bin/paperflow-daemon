@@ -320,13 +320,18 @@ function ownerPidSweep() {
   for (const [sid, rec] of sessions) {
     const hasPid    = Number.isFinite(rec.pid) && rec.pid > 0;
     const pidDied   = hasPid && !pidAlive(rec.pid);
-    // Null-pid sessions (e.g. the b2-fb / b2-realistic / b2-ws test rows
-    // discovered during the paperflow-e2g smoke testing) have no pid anchor,
-    // so the pid-check above can never reap them — fall through to a
-    // heartbeat-age safety net keyed off registered_at.
-    const startedMs = Date.parse(rec.registered_at);
-    const ageStale  = Number.isFinite(startedMs) && (now - startedMs) > STALE_HEARTBEAT_MS;
-    if (!pidDied && !ageStale) continue;
+    // Reap matrix (paperflow-lil fix to paperflow-6vz's regression):
+    //   has-pid + alive       → keep (no upper time bound — a Claude Code
+    //                           session running for hours is normal)
+    //   has-pid + dead        → reap as pid-died
+    //   no-pid  + fresh (<30m) → keep
+    //   no-pid  + stale (>30m) → reap as stale-heartbeat
+    // Earlier `!pidDied && !ageStale` reaped live sessions at the 30-min
+    // mark, breaking session-discover for any long-running orchestrator.
+    const startedMs  = Date.parse(rec.registered_at);
+    const ageStale   = Number.isFinite(startedMs) && (now - startedMs) > STALE_HEARTBEAT_MS;
+    const shouldReap = pidDied || (!hasPid && ageStale);
+    if (!shouldReap) continue;
     const reason = pidDied ? 'pid-died' : 'stale-heartbeat';
     // Cascade doc-unregister events FIRST so the audit log carries them
     // independently of the session row, then the session-unregister.
@@ -1058,7 +1063,11 @@ function handleSessionsDiscover(req, res, url) {
     if (hasPid && !pidAlive(s.pid)) continue; // belt-and-braces; sweep should have dropped it
     const started = Date.parse(s.registered_at);
     const heartbeat_age_ms = Number.isFinite(started) ? (now - started) : null;
-    const stale = Number.isFinite(heartbeat_age_ms) && heartbeat_age_ms > STALE_HEARTBEAT_MS;
+    // alive=true when pid is alive (no upper time bound) OR (no pid AND
+    // heartbeat fresh). Matches the reaper's keep-rules in ownerPidSweep —
+    // anything not reaped reports alive=true.
+    const ageStale = Number.isFinite(heartbeat_age_ms) && heartbeat_age_ms > STALE_HEARTBEAT_MS;
+    const alive = hasPid ? true : !ageStale;
     out.push({
       session_id:        s.session_id,
       cmux_workspace:    s.cmux_workspace,
@@ -1066,7 +1075,7 @@ function handleSessionsDiscover(req, res, url) {
       tty:               s.tty,
       started_at:        s.registered_at,
       heartbeat_age_ms,
-      alive:             !stale
+      alive
     });
   }
   out.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
