@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# paperflow-doc-verify — verification gate (Layer 2) for paperflow doc writes.
+# B4 of paperflow-8hz (cmux-browser-default). See spec section 5:
+# ~/docs/paperflow/specs/2026-05-15-paperflow-cmux-integration-spec.html
+#
+# Drives the cmux docs surface bound by hooks/auto-open-doc.sh through a
+# fixed verb sequence (goto → wait load → wait mermaid → errors → console →
+# get h1 → screenshot) and emits a single-line result JSON on stdout.
+#
+# Exit: 0 = PASS or SKIP, 1 = WARN, 2 = FAIL. JSON shape per § 5.6.
+#
+# Never spawns the surface — spawn authority lives in auto-open-doc.sh (§3).
+
+set -u
+
+START_NS="$(/bin/date +%s)"
+TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+TS_SLUG="$(/bin/date -u +%Y%m%dT%H%M%SZ)"
+
+JQ="$(command -v jq || true)"
+
+# ---- result emitter ----
+# emit_result <state> <reasons-json-array> <warnings-json-array> <screenshot-or-null> <url> <kind>
+emit_result() {
+    local state="$1" reasons="$2" warnings="$3" shot="$4" url="$5" kind="$6"
+    local now_ns dur shot_arg
+    now_ns="$(/bin/date +%s)"
+    dur=$(( (now_ns - START_NS) * 1000 ))
+    if [ "$shot" = "null" ] || [ -z "$shot" ]; then
+        shot_arg='null'
+    else
+        shot_arg="$("$JQ" -nc --arg s "$shot" '$s')"
+    fi
+    if [ -n "$JQ" ]; then
+        "$JQ" -nc \
+            --arg state "$state" \
+            --argjson reasons "$reasons" \
+            --argjson warnings "$warnings" \
+            --argjson screenshot "$shot_arg" \
+            --arg url "$url" \
+            --arg kind "$kind" \
+            --argjson duration_ms "$dur" \
+            --arg ts "$TS" \
+            '{state:$state, reasons:$reasons, warnings:$warnings,
+              screenshot:$screenshot, url:$url, kind:$kind,
+              duration_ms:$duration_ms, ts:$ts}'
+    else
+        printf '{"state":"%s","reasons":[],"warnings":[],"screenshot":null,"url":"%s","kind":"%s","duration_ms":%d,"ts":"%s"}\n' \
+            "$state" "$url" "$kind" "$dur" "$TS"
+    fi
+    case "$state" in
+        PASS|SKIP) exit 0 ;;
+        WARN)      exit 1 ;;
+        FAIL)      exit 2 ;;
+        *)         exit 2 ;;
+    esac
+}
+
+trap 'emit_result FAIL "[\"internal-error: trap\"]" "[]" null "${URL:-}" "${KIND:-}"' ERR
+
+[ -n "$JQ" ] || { printf '{"state":"FAIL","reasons":["jq-missing"],"warnings":[],"screenshot":null,"url":"","kind":"","ts":"%s"}\n' "$TS"; exit 2; }
+
+# ---- arg parsing ----
+URL=""
+KIND=""
+TIMEOUT_LOAD_MS=5000
+TIMEOUT_MERMAID_MS=3000
+TIMEOUT_CALL_MS=2000
+SCREENSHOT_DIR="$HOME/.paperflow/screenshots"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --kind) KIND="${2:-}"; shift 2 ;;
+        --timeout-ms|--timeout-load-ms) TIMEOUT_LOAD_MS="${2:-5000}"; shift 2 ;;
+        --timeout-mermaid-ms) TIMEOUT_MERMAID_MS="${2:-3000}"; shift 2 ;;
+        --timeout-call-ms) TIMEOUT_CALL_MS="${2:-2000}"; shift 2 ;;
+        --screenshot-dir) SCREENSHOT_DIR="${2:-}"; shift 2 ;;
+        --) shift; break ;;
+        -*) emit_result FAIL "[\"unknown flag: $1\"]" "[]" null "" "" ;;
+        *) [ -z "$URL" ] && URL="$1" || true; shift ;;
+    esac
+done
+
+[ -n "$URL" ] || emit_result FAIL '["url required"]' '[]' null "" ""
+
+# Auto-derive kind from URL path if not passed: /paperflow/<plural>/...
+if [ -z "$KIND" ]; then
+    case "$URL" in
+        */paperflow/plans/*)         KIND="plan" ;;
+        */paperflow/specs/*)         KIND="spec" ;;
+        */paperflow/grills/*)        KIND="grill" ;;
+        */paperflow/goals/*)         KIND="goal" ;;
+        */paperflow/changelog/*)     KIND="changelog" ;;
+        */paperflow/notes/*)         KIND="note" ;;
+        */paperflow/questionnaires/*) KIND="questionnaire" ;;
+        */paperflow/reviews/*)       KIND="review" ;;
+        *) emit_result FAIL '["kind not derivable from URL — pass --kind"]' '[]' null "$URL" "" ;;
+    esac
+fi
+
+# Mermaid expectation partition (§ 5.4).
+MERMAID_MODE="absent"
+case "$KIND" in
+    plan|spec|goal|grill)         MERMAID_MODE="expected" ;;
+    questionnaire|review)         MERMAID_MODE="optional" ;;
+    changelog|note)               MERMAID_MODE="absent" ;;
+    *)                            MERMAID_MODE="absent" ;;  # fail-safe for unknown kinds
+esac
+
+# ---- Step (a): detect cmux + resolve handle. ----
+DETECT_BIN="$(dirname "$0")/paperflow-cmux-detect"
+DETECT_JSON=""
+CMUX_ON="false"
+if [ -x "$DETECT_BIN" ]; then
+    DETECT_JSON="$("$DETECT_BIN" 2>/dev/null || true)"
+    [ -n "$DETECT_JSON" ] && CMUX_ON="$(printf '%s' "$DETECT_JSON" | "$JQ" -r '.cmux // false' 2>/dev/null || echo false)"
+fi
+
+if [ "$CMUX_ON" != "true" ]; then
+    emit_result SKIP '["skipped: cmux not detected"]' '[]' null "$URL" "$KIND"
+fi
+
+WORKSPACE="$(printf '%s' "$DETECT_JSON" | "$JQ" -r '.workspace // empty' 2>/dev/null || true)"
+SIDECAR="$HOME/.paperflow/cmux-docs-surface.${WORKSPACE}.handle"
+
+if [ -z "$WORKSPACE" ] || [ ! -f "$SIDECAR" ]; then
+    emit_result SKIP '["skipped: surface not bound — run auto-open-doc first"]' '[]' null "$URL" "$KIND"
+fi
+
+HANDLE="$("$JQ" -r '.handle // empty' "$SIDECAR" 2>/dev/null || true)"
+SIDE_WS="$("$JQ" -r '.workspace // empty' "$SIDECAR" 2>/dev/null || true)"
+
+if [ -z "$HANDLE" ] || [ "$SIDE_WS" != "$WORKSPACE" ]; then
+    emit_result SKIP '["skipped: surface not bound — run auto-open-doc first"]' '[]' null "$URL" "$KIND"
+fi
+
+# Liveness probe — DO NOT respawn (§ 5.2.a).
+if ! cmux browser "$HANDLE" url >/dev/null 2>&1; then
+    emit_result SKIP '["skipped: surface not bound — run auto-open-doc first"]' '[]' null "$URL" "$KIND"
+fi
+
+# ---- Step (b): goto. ----
+GOTO_OUT="$(cmux browser "$HANDLE" goto "$URL" 2>&1)"
+GOTO_RC=$?
+if [ "$GOTO_RC" -ne 0 ]; then
+    case "$GOTO_OUT" in
+        *connect*|*refused*|*ECONN*|*unreachable*)
+            REASON="$("$JQ" -nc --arg r "skipped: doc URL unreachable: $GOTO_OUT" '[$r]')"
+            emit_result SKIP "$REASON" '[]' null "$URL" "$KIND"
+            ;;
+    esac
+    REASON="$("$JQ" -nc --arg r "goto failed: $GOTO_OUT" '[$r]')"
+    emit_result FAIL "$REASON" '[]' null "$URL" "$KIND"
+fi
+
+# ---- Step (c): wait for load. ----
+if ! cmux browser "$HANDLE" wait --load-state complete --timeout-ms "$TIMEOUT_LOAD_MS" >/dev/null 2>&1; then
+    REASON="$("$JQ" -nc --arg r "load-state complete timed out at ${TIMEOUT_LOAD_MS}ms" '[$r]')"
+    emit_result FAIL "$REASON" '[]' null "$URL" "$KIND"
+fi
+
+REASONS_JSON='[]'
+WARNINGS_JSON='[]'
+
+push_warning() {
+    WARNINGS_JSON="$(printf '%s' "$WARNINGS_JSON" | "$JQ" -c --arg m "$1" '. + [$m]')"
+}
+push_reason() {
+    REASONS_JSON="$(printf '%s' "$REASONS_JSON" | "$JQ" -c --arg m "$1" '. + [$m]')"
+}
+
+# ---- Step (d): mermaid render (kind-gated). ----
+if [ "$MERMAID_MODE" != "absent" ]; then
+    if ! cmux browser "$HANDLE" wait --selector "pre.mermaid svg" --timeout-ms "$TIMEOUT_MERMAID_MS" >/dev/null 2>&1; then
+        if [ "$MERMAID_MODE" = "expected" ]; then
+            push_reason "mermaid svg missing after ${TIMEOUT_MERMAID_MS}ms"
+        else
+            push_warning "mermaid expected but absent"
+        fi
+    fi
+fi
+
+# ---- Step (e): JS errors. ----
+ERR_OUT="$(cmux browser "$HANDLE" errors list 2>&1)" || true
+ERR_FIRST=""
+if [ -n "$ERR_OUT" ] && [ "$ERR_OUT" != "No console entries" ] && [ "$ERR_OUT" != "No errors" ]; then
+    ERR_FIRST="$(printf '%s\n' "$ERR_OUT" | /usr/bin/grep -m1 '^Error:' || true)"
+    if [ -n "$ERR_FIRST" ]; then
+        push_reason "js error: $ERR_FIRST"
+    fi
+fi
+
+# ---- Step (f): console. ----
+CON_OUT="$(cmux browser "$HANDLE" console list 2>&1)" || true
+if [ -n "$CON_OUT" ] && [ "$CON_OUT" != "No console entries" ]; then
+    # error-level lines fail; warning-level lines warn.
+    CON_ERR="$(printf '%s\n' "$CON_OUT" | /usr/bin/grep -m1 -iE '^(error|\[error\])' || true)"
+    CON_WARN="$(printf '%s\n' "$CON_OUT" | /usr/bin/grep -m1 -iE '^(warn|warning|\[warn|\[warning)' || true)"
+    if [ -n "$CON_ERR" ]; then
+        push_reason "console error: $CON_ERR"
+    elif [ -n "$CON_WARN" ]; then
+        push_warning "console warning: $CON_WARN"
+    fi
+fi
+
+# ---- Step (g): screenshot. ----
+mkdir -p "$SCREENSHOT_DIR" 2>/dev/null || true
+DOC_SLUG="$(basename "$URL" .html | /usr/bin/tr -c 'A-Za-z0-9._-' '-' | /usr/bin/sed 's/--*/-/g; s/^-//; s/-$//')"
+[ -z "$DOC_SLUG" ] && DOC_SLUG="doc"
+SHOT_PATH="$SCREENSHOT_DIR/${DOC_SLUG}-${TS_SLUG}.png"
+SHOT_RESULT="null"
+if cmux browser "$HANDLE" screenshot --out "$SHOT_PATH" >/dev/null 2>&1 && [ -s "$SHOT_PATH" ]; then
+    SHOT_RESULT="$SHOT_PATH"
+else
+    push_warning "screenshot capture failed"
+    SHOT_RESULT="null"
+fi
+
+# ---- Step (h): h1 check. ----
+H1_OUT="$(cmux browser "$HANDLE" get text --selector "h1" 2>&1)" || H1_RC=$?
+H1_RC="${H1_RC:-0}"
+H1_TRIM="$(printf '%s' "$H1_OUT" | /usr/bin/tr -d '[:space:]')"
+if [ "$H1_RC" -ne 0 ] || [ -z "$H1_TRIM" ]; then
+    push_reason "h1 missing or empty"
+fi
+
+# ---- Step (i): classify and emit. ----
+N_REASONS="$(printf '%s' "$REASONS_JSON" | "$JQ" 'length')"
+N_WARN="$(printf '%s' "$WARNINGS_JSON" | "$JQ" 'length')"
+
+if [ "$N_REASONS" -gt 0 ]; then
+    emit_result FAIL "$REASONS_JSON" "$WARNINGS_JSON" "$SHOT_RESULT" "$URL" "$KIND"
+elif [ "$N_WARN" -gt 0 ]; then
+    emit_result WARN "$REASONS_JSON" "$WARNINGS_JSON" "$SHOT_RESULT" "$URL" "$KIND"
+else
+    emit_result PASS "$REASONS_JSON" "$WARNINGS_JSON" "$SHOT_RESULT" "$URL" "$KIND"
+fi

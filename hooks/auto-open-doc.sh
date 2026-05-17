@@ -30,10 +30,88 @@ case "$FILE_PATH" in
     REL="${FILE_PATH#*/docs/}"
     URL="http://localhost:8765/$REL"
 
-    # Capture stdout + stderr from `open`. cmux's URL handler emits a line
-    # like "OK surface=2 placement=reuse" — useful for debugging tab-reuse.
-    # On non-cmux Macs `open` is silent; the log entry still records ts/url.
-    RESPONSE="$(/usr/bin/open "$URL" 2>&1)" || EXIT=$?
+    # --- Dispatch: cmux browser surface (preferred) or OS browser (fallback).
+    # B3 of paperflow-8hz (cmux-browser-default). Spec §1-3:
+    #   ~/docs/paperflow/specs/2026-05-15-paperflow-cmux-integration-spec.html
+    # On cmux: route through a shared "paperflow-docs" surface per workspace,
+    # lazy-spawned via `cmux browser open <url>`, handle persisted to a
+    # workspace-keyed sidecar so subsequent writes navigate via `goto`
+    # without re-entering the reuse-or-not lottery.
+    # On non-cmux (or any failure): fall back to /usr/bin/open as before.
+    DETECT_BIN="$(dirname "$0")/../bin/paperflow-cmux-detect"
+    DETECT_JSON=""
+    CMUX_ON=false
+    if [ -x "$DETECT_BIN" ]; then
+      # Detect script exits 1 when cmux absent — capture stdout either way.
+      DETECT_JSON="$("$DETECT_BIN" 2>/dev/null || true)"
+      if [ -n "$DETECT_JSON" ]; then
+        CMUX_ON="$(printf '%s' "$DETECT_JSON" | /usr/bin/env jq -r '.cmux // false' 2>/dev/null || echo false)"
+      fi
+    fi
+
+    RESPONSE=""
+    EXIT=0
+    DISPATCH="open"  # one of: open | cmux-goto | cmux-spawn | cmux-fallback
+
+    if [ "$CMUX_ON" = "true" ]; then
+      WORKSPACE="$(printf '%s' "$DETECT_JSON" | /usr/bin/env jq -r '.workspace // empty' 2>/dev/null || true)"
+      CMUX_VER="$(printf '%s' "$DETECT_JSON" | /usr/bin/env jq -r '.version // empty' 2>/dev/null || true)"
+      SIDECAR="$HOME/.paperflow/cmux-docs-surface.${WORKSPACE}.handle"
+      HANDLE=""
+
+      if [ -n "$WORKSPACE" ] && [ -f "$SIDECAR" ]; then
+        HANDLE="$(/usr/bin/env jq -r '.handle // empty' "$SIDECAR" 2>/dev/null || true)"
+        SIDE_WS="$(/usr/bin/env jq -r '.workspace // empty' "$SIDECAR" 2>/dev/null || true)"
+        # Cross-workspace guard + liveness probe (spec §3).
+        if [ -n "$HANDLE" ] && [ "$SIDE_WS" = "$WORKSPACE" ] && \
+           cmux browser "$HANDLE" url >/dev/null 2>&1; then
+          # Surface alive — navigate.
+          RESPONSE="$(cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
+          DISPATCH="cmux-goto"
+        else
+          # Stale — drop sidecar and fall through to spawn.
+          trash "$SIDECAR" 2>/dev/null || rm -f "$SIDECAR"
+          HANDLE=""
+        fi
+      fi
+
+      if [ "$DISPATCH" = "open" ] && [ -n "$WORKSPACE" ]; then
+        # Lazy spawn. Parse `OK surface=<ref> pane=<ref> placement=<reuse|new>`.
+        SPAWN_OUT="$(cmux browser open "$URL" 2>&1)" || SPAWN_RC=$?
+        SPAWN_RC="${SPAWN_RC:-0}"
+        NEW_HANDLE="$(printf '%s\n' "$SPAWN_OUT" | /usr/bin/awk 'NR==1 { for (i=1;i<=NF;i++) if ($i ~ /^surface=/) { sub(/^surface=/,"",$i); print $i; exit } }')"
+        if [ "$SPAWN_RC" = "0" ] && [ -n "$NEW_HANDLE" ]; then
+          SPAWN_TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p "$HOME/.paperflow" 2>/dev/null || true
+          /usr/bin/env jq -nc \
+            --arg handle "$NEW_HANDLE" \
+            --arg workspace "$WORKSPACE" \
+            --arg spawned_at "$SPAWN_TS" \
+            --arg cmux_version "$CMUX_VER" \
+            '{handle:$handle, workspace:$workspace, spawned_at:$spawned_at, cmux_version:$cmux_version}' \
+            > "$SIDECAR" 2>/dev/null || true
+          RESPONSE="$SPAWN_OUT"
+          EXIT="$SPAWN_RC"
+          DISPATCH="cmux-spawn"
+        else
+          # Spawn failed or no surface= token — fall through to OS browser.
+          RESPONSE="cmux browser open failed (rc=$SPAWN_RC): $SPAWN_OUT"
+          DISPATCH="cmux-fallback"
+        fi
+      fi
+    fi
+
+    if [ "$DISPATCH" = "open" ] || [ "$DISPATCH" = "cmux-fallback" ]; then
+      # OS browser. Captures cmux URL-handler stdout too on non-paperflow cmux
+      # tabs ("OK surface=N placement=…"); the log entry records ts/url.
+      OS_RESPONSE="$(/usr/bin/open "$URL" 2>&1)" || EXIT=$?
+      # Preserve any prior cmux failure context by prepending it to the response.
+      if [ -n "$RESPONSE" ]; then
+        RESPONSE="$RESPONSE | os-open: $OS_RESPONSE"
+      else
+        RESPONSE="$OS_RESPONSE"
+      fi
+    fi
     EXIT="${EXIT:-0}"
 
     LOG_DIR="$HOME/.paperflow"
@@ -56,8 +134,9 @@ case "$FILE_PATH" in
       --arg ts "$TS" \
       --arg url "$URL" \
       --arg response "$RESPONSE" \
+      --arg dispatch "$DISPATCH" \
       --argjson exit "$EXIT" \
-      '{ts: $ts, url: $url, response: $response, exit: $exit}' \
+      '{ts: $ts, url: $url, dispatch: $dispatch, response: $response, exit: $exit}' \
       >> "$LOG_FILE" 2>/dev/null || true
 
     # Surface doctor status to the dock by READING the cache, never by
