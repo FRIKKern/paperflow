@@ -80,6 +80,10 @@ Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `
 
 `paperflow-daemon` LaunchAgent serves `~/docs/paperflow/` on port 8767 — single host-scoped daemon that owns sessions/docs/build/marker/discover endpoints plus the static-file fallback.
 
+## cmux doc surface (default viewer + verifier)
+
+When running under cmux (`CMUX_WORKSPACE_ID` set, `cmux` on PATH), paperflow docs open in a managed cmux browser surface instead of the OS browser — `auto-open-doc.sh` routes the daemon URL into the workspace's docs surface and persists its handle at `~/.paperflow/cmux-docs-surface.<workspace>.handle`. After every doc write, `paperflow-doc-verify` drives that same surface through `goto → wait load → wait mermaid → errors → console → screenshot` and returns PASS / FAIL / WARN / SKIP before the doc is handed to the user. Without cmux, paperflow falls back to the OS browser and the verifier exits SKIP — no behaviour change for non-cmux hosts.
+
 ## Action buttons (every spec & plan)
 
 End every spec / plan / grill HTML with a one-line `<script src="/paperflow/_lib/doc.js"></script>` include. Doc.js auto-injects the right buttons based on the URL path:

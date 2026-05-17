@@ -162,6 +162,8 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
 
    The subagent returns the URL plus a JSON list of plan steps: `[{ id, title, deps: [step-id…] }]`.
 
+   **After the doc-writer subagent returns**, the orchestrator dispatches `paperflow-cmux-verifier` (see `agents/paperflow-cmux-verifier.md`) with the doc URL. The verifier runs `paperflow-doc-verify <url>` once and returns a one-line `PASS|WARN|FAIL|SKIP: <reason>` verdict. **PASS** → close the doc-write task. **WARN** → close + log. **FAIL** → route to debug (doc-write task stays claimed). **SKIP** (cmux not detected, or the docs surface isn't bound yet) → close — no regression vs the pre-cmux flow.
+
 4. **Materialise plan steps as Beads work-tasks.** Done by the orchestrator directly (Beads ceremony is exempt from subagent dispatch — see paperflow-thresholds). For each step in the returned list, run:
 
    ```bash
