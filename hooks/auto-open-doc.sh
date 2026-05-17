@@ -59,7 +59,42 @@ case "$FILE_PATH" in
 
     RESPONSE=""
     EXIT=0
-    DISPATCH="open"  # one of: open | cmux-goto | cmux-spawn | cmux-fallback
+    DISPATCH="open"  # one of: open | cmux-goto | cmux-adopt | cmux-spawn | cmux-fallback
+
+    # Discover an existing browser surface to adopt before spawning a new
+    # one. Prefer the focused surface (the tab the user is actually looking
+    # at); fall back to `cmux tree --workspace <ws>` which emits one line per
+    # surface annotated with [browser] vs [terminal] — wider scope than
+    # list-pane-surfaces, which is focused-pane only. Returns the first
+    # browser surface_ref on stdout, or exit 1. All cmux calls wrapped.
+    discover_browser_surface() {
+      local identify_json focused_browser focused_ref tree_out browser_ref
+      identify_json="$(cmux identify 2>/dev/null || true)"
+      if [ -n "$identify_json" ]; then
+        focused_browser="$(printf '%s' "$identify_json" | /usr/bin/env jq -r '.focused.is_browser_surface // false' 2>/dev/null || echo false)"
+        if [ "$focused_browser" = "true" ]; then
+          focused_ref="$(printf '%s' "$identify_json" | /usr/bin/env jq -r '.focused.surface_ref // empty' 2>/dev/null || true)"
+          [ -n "$focused_ref" ] && { printf '%s' "$focused_ref"; return 0; }
+        fi
+      fi
+      tree_out="$(cmux tree --workspace "$WORKSPACE" 2>/dev/null || true)"
+      [ -z "$tree_out" ] && return 1
+      browser_ref="$(printf '%s\n' "$tree_out" | /usr/bin/awk '/\[browser\]/ {for(i=1;i<=NF;i++) if ($i ~ /^surface:[0-9]+$/) { print $i; exit }}')"
+      [ -n "$browser_ref" ] && { printf '%s' "$browser_ref"; return 0; }
+      return 1
+    }
+
+    # Write the workspace-keyed sidecar with a handle. Used by both the
+    # cmux-adopt and cmux-spawn paths — relies on $WORKSPACE / $CMUX_VER /
+    # $SIDECAR being set by the caller.
+    write_sidecar() {
+      local ts; ts="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+      mkdir -p "$HOME/.paperflow" 2>/dev/null || true
+      /usr/bin/env jq -nc --arg handle "$1" --arg workspace "$WORKSPACE" \
+        --arg spawned_at "$ts" --arg cmux_version "$CMUX_VER" \
+        '{handle:$handle, workspace:$workspace, spawned_at:$spawned_at, cmux_version:$cmux_version}' \
+        > "$SIDECAR" 2>/dev/null || true
+    }
 
     if [ "$CMUX_ON" = "true" ]; then
       WORKSPACE="$(printf '%s' "$DETECT_JSON" | /usr/bin/env jq -r '.workspace // empty' 2>/dev/null || true)"
@@ -77,9 +112,22 @@ case "$FILE_PATH" in
           RESPONSE="$(cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
           DISPATCH="cmux-goto"
         else
-          # Stale — drop sidecar and fall through to spawn.
+          # Stale — drop sidecar and fall through to adopt/spawn.
           trash "$SIDECAR" 2>/dev/null || rm -f "$SIDECAR"
           HANDLE=""
+        fi
+      fi
+
+      if [ "$DISPATCH" = "open" ] && [ -n "$WORKSPACE" ]; then
+        # Try to adopt an existing browser surface before spawning a new one.
+        # This prevents "new tab every time" when the sidecar handle is lost
+        # but a perfectly good browser surface still exists in the workspace.
+        ADOPTED="$(discover_browser_surface || true)"
+        if [ -n "$ADOPTED" ]; then
+          HANDLE="$ADOPTED"
+          RESPONSE="$(cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
+          write_sidecar "$HANDLE"
+          DISPATCH="cmux-adopt"
         fi
       fi
 
@@ -89,15 +137,7 @@ case "$FILE_PATH" in
         SPAWN_RC="${SPAWN_RC:-0}"
         NEW_HANDLE="$(printf '%s\n' "$SPAWN_OUT" | /usr/bin/awk 'NR==1 { for (i=1;i<=NF;i++) if ($i ~ /^surface=/) { sub(/^surface=/,"",$i); print $i; exit } }')"
         if [ "$SPAWN_RC" = "0" ] && [ -n "$NEW_HANDLE" ]; then
-          SPAWN_TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
-          mkdir -p "$HOME/.paperflow" 2>/dev/null || true
-          /usr/bin/env jq -nc \
-            --arg handle "$NEW_HANDLE" \
-            --arg workspace "$WORKSPACE" \
-            --arg spawned_at "$SPAWN_TS" \
-            --arg cmux_version "$CMUX_VER" \
-            '{handle:$handle, workspace:$workspace, spawned_at:$spawned_at, cmux_version:$cmux_version}' \
-            > "$SIDECAR" 2>/dev/null || true
+          write_sidecar "$NEW_HANDLE"
           RESPONSE="$SPAWN_OUT"
           EXIT="$SPAWN_RC"
           DISPATCH="cmux-spawn"
