@@ -682,11 +682,21 @@ else
         matcher: "Write|Edit",
         hooks: [{ type: "command",
                   command: $cmd,
-                  timeout: 3 }]
+                  timeout: 10 }]
     }])' "$SETTINGS" > "$TMP"
     mv "$TMP" "$SETTINGS"
     ok "merged PostToolUse auto-open"
 fi
+# Drift-correct: if the hook entry exists but with an older timeout (<10),
+# bump it. paperflow-ym8 added a synchronous doc-verify call that needs
+# ~3s headroom on top of cmux-goto, so the 3s default kills the verifier.
+TMP="$(mktemp)"
+jq --arg cmd "$HOOK_OPEN" '
+  .hooks.PostToolUse = ((.hooks.PostToolUse // []) | map(
+    if (.hooks // []) | any(.command == $cmd and (.timeout // 60) < 10) then
+      .hooks |= map(if .command == $cmd then .timeout = 10 else . end)
+    else . end
+  ))' "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
 
 if jq -e --arg cmd "$HOOK_VALIDATE" '.hooks.PostToolUse[]?.hooks[]? | select(.command? == $cmd)' "$SETTINGS" >/dev/null 2>&1; then
     skip "PostToolUse validate hook already present"

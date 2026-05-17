@@ -187,6 +187,71 @@ case "$FILE_PATH" in
       '{ts: $ts, url: $url, dispatch: $dispatch, response: $response, exit: $exit}' \
       >> "$LOG_FILE" 2>/dev/null || true
 
+    # --- Layer-2 verification gate (paperflow-ym8).
+    # After every cmux dispatch, drive the paperflow-doc-verify pipeline
+    # against the daemon-port URL (8767) and log the JSON result. The
+    # verifier is backgrounded so PostToolUse returns fast — the user's
+    # next keystroke isn't blocked on goto+wait+screenshot. Non-cmux
+    # dispatches (`open`) skip verification and write one SKIP line.
+    VERIFY_LOG="$LOG_DIR/doc-verify.log"
+    VERIFY_FAIL_LOG="$LOG_DIR/doc-verify-failures.log"
+    VERIFY_URL="$(printf '%s' "$URL" | /usr/bin/sed 's|:8765|:8767|')"
+    if [ "$DISPATCH" = "open" ]; then
+      # Non-cmux fallback — skip the verifier, log one SKIP line.
+      /usr/bin/env jq -nc \
+        --arg state "SKIP" \
+        --arg reason "non-cmux open dispatch" \
+        --arg url "$VERIFY_URL" \
+        --arg ts "$TS" \
+        '{state:$state, reason:$reason, url:$url, ts:$ts}' \
+        >> "$VERIFY_LOG" 2>/dev/null || true
+    else
+      # cmux-goto / cmux-adopt / cmux-spawn / cmux-fallback — invoke verifier.
+      # 3-tier resolution mirroring the detect helper above.
+      VERIFY_BIN="$(command -v paperflow-doc-verify 2>/dev/null || true)"
+      [ -z "$VERIFY_BIN" ] && [ -x "$HOME/.local/bin/paperflow-doc-verify" ] && VERIFY_BIN="$HOME/.local/bin/paperflow-doc-verify"
+      [ -z "$VERIFY_BIN" ] && [ -x "$(dirname "$0")/../bin/paperflow-doc-verify" ] && VERIFY_BIN="$(dirname "$0")/../bin/paperflow-doc-verify"
+      if [ -z "$VERIFY_BIN" ] || [ ! -x "$VERIFY_BIN" ]; then
+        # Verifier missing — record SKIP and move on.
+        /usr/bin/env jq -nc \
+          --arg state "SKIP" \
+          --arg reason "paperflow-doc-verify binary unresolvable" \
+          --arg url "$VERIFY_URL" \
+          --arg ts "$TS" \
+          '{state:$state, reason:$reason, url:$url, ts:$ts}' \
+          >> "$VERIFY_LOG" 2>/dev/null || true
+      else
+        # Run synchronously — cmux daemon rejects connections from
+        # orphaned background subshells once PostToolUse parent exits
+        # (Broken pipe, errno 32). Cost: ~2-3s per doc save. The verifier
+        # already times out at 5s on missing assets, so the worst-case
+        # latency is bounded.
+        VOUT="$("$VERIFY_BIN" "$VERIFY_URL" 2>/dev/null)"
+        VRC=$?
+        REC="$(printf '%s' "$VOUT" | /usr/bin/env jq -c \
+          --arg url "$VERIFY_URL" \
+          '{ts:.ts, url:$url, state:.state, reasons:(.reasons // []), screenshot:.screenshot, duration_ms:.duration_ms}' \
+          2>/dev/null)"
+        if [ -z "$REC" ]; then
+          REC="$(/usr/bin/env jq -nc \
+            --arg ts "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "$VERIFY_URL" \
+            --arg state "FAIL" \
+            --arg reason "verifier produced no parseable JSON" \
+            '{ts:$ts, url:$url, state:$state, reasons:[$reason], screenshot:null, duration_ms:null}')"
+          VRC=2
+        fi
+        printf '%s\n' "$REC" >> "$VERIFY_LOG" 2>/dev/null || true
+        if [ "$VRC" = "2" ]; then
+          TMP="$(/usr/bin/mktemp -t pf-verify-fail.XXXXXX 2>/dev/null || echo "$VERIFY_FAIL_LOG.tmp.$$")"
+          {
+            printf '%s\n' "$REC"
+            [ -f "$VERIFY_FAIL_LOG" ] && /bin/cat "$VERIFY_FAIL_LOG"
+          } > "$TMP" 2>/dev/null && /bin/mv -f "$TMP" "$VERIFY_FAIL_LOG" 2>/dev/null || true
+        fi
+      fi
+    fi
+
     # Surface doctor status to the dock by READING the cache, never by
     # invoking paperflow-doctor — `--fast` re-execs as `--full` when the
     # cache is stale, which adds 1-5s to the user's interactive doc-save

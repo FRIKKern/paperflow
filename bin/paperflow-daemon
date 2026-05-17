@@ -50,6 +50,7 @@ const LOG_FILE            = path.join(LOGS_DIR, 'paperflow-daemon.log');
 const DOCS_ROOT           = process.env.PAPERFLOW_DOCS_ROOT
   || path.join(os.homedir(), 'docs', 'paperflow');
 const OWNER_PID_SWEEP_MS  = 3000;       // DECISION-6: owner-pid liveness cadence
+const STALE_HEARTBEAT_MS  = 30 * 60 * 1000; // 30 min — sessions with no fresh heartbeat are reaped
 const COMPACT_LINE_RATIO  = 10;         // compact when file > 10× live-state lines
 const COMPACT_SIZE_BYTES  = 10 * 1024 * 1024; // or > 10 MB
 const CONTINUE_BIN        = path.join(__dirname, 'paperflow-continue');
@@ -305,8 +306,18 @@ function compactIfNeeded() {
 // pid is gone, append a session-unregister with reason:"pid-died" — the
 // applyEvent path will cascade to drop the session's docs as well.
 function ownerPidSweep() {
+  const now = Date.now();
   for (const [sid, rec] of sessions) {
-    if (pidAlive(rec.pid)) continue;
+    const hasPid    = Number.isFinite(rec.pid) && rec.pid > 0;
+    const pidDied   = hasPid && !pidAlive(rec.pid);
+    // Null-pid sessions (e.g. the b2-fb / b2-realistic / b2-ws test rows
+    // discovered during the paperflow-e2g smoke testing) have no pid anchor,
+    // so the pid-check above can never reap them — fall through to a
+    // heartbeat-age safety net keyed off registered_at.
+    const startedMs = Date.parse(rec.registered_at);
+    const ageStale  = Number.isFinite(startedMs) && (now - startedMs) > STALE_HEARTBEAT_MS;
+    if (!pidDied && !ageStale) continue;
+    const reason = pidDied ? 'pid-died' : 'stale-heartbeat';
     // Cascade doc-unregister events FIRST so the audit log carries them
     // independently of the session row, then the session-unregister.
     for (const [nonce, doc] of docs) {
@@ -321,9 +332,9 @@ function ownerPidSweep() {
     appendEvent({
       type:       'session-unregister',
       session_id: sid,
-      reason:     'pid-died'
+      reason
     });
-    logLine(`sweep: session ${sid} pid ${rec.pid} gone — unregistered`);
+    logLine(`sweep: session ${sid} pid ${rec.pid} ${reason} — unregistered`);
   }
 }
 
@@ -478,27 +489,49 @@ const MIME = {
   '.ttf':  'font/ttf'
 };
 
+// Daemon owns docs now per CLAUDE.md (paperflow-du4 consolidation) — :8767 serves both API and ~/docs/paperflow/, retiring the old live-server on :8765.
 function serveStatic(req, res, urlPath) {
-  let rel = decodeURIComponent(urlPath.replace(/^\/+/, ''));
+  let rel;
+  try { rel = decodeURIComponent(urlPath.replace(/^\/+/, '')); }
+  catch (_) {
+    return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: urlPath }));
+  }
   if (!rel || rel.endsWith('/')) rel += 'index.html';
 
   const full = path.resolve(DOCS_ROOT, rel);
   if (!full.startsWith(DOCS_ROOT + path.sep) && full !== DOCS_ROOT) {
-    res.writeHead(403); return res.end();
+    // Path-traversal: 404 JSON (not 403) — consistent error surface.
+    return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: urlPath }));
   }
 
   fs.stat(full, (err, st) => {
-    if (err || !st.isFile()) {
-      res.writeHead(404); return res.end();
+    if (err) {
+      return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: urlPath }));
     }
-    const ext = path.extname(full).toLowerCase();
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Content-Length': st.size,
-      'Cache-Control': 'no-cache'
-    });
-    fs.createReadStream(full).pipe(res);
+    if (st.isDirectory()) {
+      const indexPath = path.join(full, 'index.html');
+      return fs.stat(indexPath, (e2, st2) => {
+        if (e2 || !st2.isFile()) {
+          return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: urlPath }));
+        }
+        sendFile(res, indexPath, st2);
+      });
+    }
+    if (!st.isFile()) {
+      return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: urlPath }));
+    }
+    sendFile(res, full, st);
   });
+}
+
+function sendFile(res, full, st) {
+  const ext = path.extname(full).toLowerCase();
+  res.writeHead(200, {
+    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Content-Length': st.size,
+    'Cache-Control': 'no-cache'
+  });
+  fs.createReadStream(full).pipe(res);
 }
 
 // ── /paperflow/spawn-continuation ───────────────────────────────────
@@ -673,10 +706,10 @@ const server = http.createServer((req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405); return res.end();
   }
-  // Reserve /paperflow/* for the API namespace — unknown /paperflow/*
-  // is a 404, not a static-file lookup.
+  // /paperflow/<rel> → ~/docs/paperflow/<rel> (last-resort fallback;
+  // all real /paperflow/* API endpoints handled above).
   if (pathname.startsWith('/paperflow/')) {
-    return jsonRes(res, 404, errEnv('not-found', 'unknown paperflow endpoint', { path: pathname }));
+    return serveStatic(req, res, pathname.slice('/paperflow'.length));
   }
   serveStatic(req, res, pathname);
 });
@@ -760,16 +793,19 @@ function handleSessionsDiscover(req, res, url) {
   const now = Date.now();
   for (const [, s] of sessions) {
     if (workspace && s.cmux_workspace !== workspace) continue;
-    if (!pidAlive(s.pid)) continue; // belt-and-braces; sweep should have dropped it
+    const hasPid = Number.isFinite(s.pid) && s.pid > 0;
+    if (hasPid && !pidAlive(s.pid)) continue; // belt-and-braces; sweep should have dropped it
     const started = Date.parse(s.registered_at);
+    const heartbeat_age_ms = Number.isFinite(started) ? (now - started) : null;
+    const stale = Number.isFinite(heartbeat_age_ms) && heartbeat_age_ms > STALE_HEARTBEAT_MS;
     out.push({
       session_id:        s.session_id,
       cmux_workspace:    s.cmux_workspace,
       cmux_surface:      s.cmux_surface,
       tty:               s.tty,
       started_at:        s.registered_at,
-      heartbeat_age_ms:  Number.isFinite(started) ? (now - started) : null,
-      alive:             true
+      heartbeat_age_ms,
+      alive:             !stale
     });
   }
   out.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
