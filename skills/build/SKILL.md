@@ -198,6 +198,10 @@ flowchart LR
 
 The two-subagent flow keeps the orchestrator's context lean — the build subagent burns its context on producing the work, the verification-subagent burns its context on judging the evidence, and the orchestrator only ever holds a verdict.
 
+#### Doc-write verification
+
+When the just-completed task wrote a paperflow HTML doc (anything under `~/docs/paperflow/{plans,specs,grills,goals,changelog,questionnaires,notes,reviews}/`), the verifier-of-choice is `paperflow-cmux-verifier` — the restricted-tools agent at `agents/paperflow-cmux-verifier.md`. It runs `paperflow-doc-verify <url>` once and returns a one-line `PASS|WARN|FAIL|SKIP: <reason>` verdict. PASS / SKIP close the doc-write task (SKIP means cmux not detected or the surface isn't bound — no regression vs the pre-cmux flow). WARN closes + logs the warning. FAIL routes to debug below; the doc-write task stays claimed.
+
 6. **Close on verified completion:**
 
    ```bash

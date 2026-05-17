@@ -12,6 +12,8 @@
 #     (plus the setup skill at ~/.claude/skills/setup/ and the
 #      autopilot skill at ~/.claude/skills/autopilot/ — 8 total)
 #   - terminal-target helper at ~/.local/bin/paperflow-target
+#   - cmux browser as the default doc viewer + post-write verifier
+#     (when cmux is present; OS browser fallback otherwise — paperflow-8hz)
 #   - ~/.claude/CLAUDE.md (preamble refresh; user content outside the
 #     <!-- paperflow:preamble:* --> sentinels is preserved)
 #
@@ -1039,6 +1041,14 @@ deploy_helper paperflow-session-unregister
 deploy_helper paperflow-bridge-spawn
 deploy_helper claude-bridge.js
 
+# cmux-browser-default (paperflow-8hz). cmux-detect probes the host for a
+# usable cmux browser CLI; doc-verify is the Layer-2 post-write verifier
+# that drives the cmux docs surface through goto → wait → errors → console
+# → screenshot and emits PASS/FAIL/WARN/SKIP. Both no-op cleanly when cmux
+# is absent (auto-open-doc.sh falls back to the OS browser).
+deploy_helper paperflow-cmux-detect
+deploy_helper paperflow-doc-verify
+
 # ─── 10g0. Beads aliases — hide kind:event from default `bd list/ready` ──
 # Sidecar-driven event-tasks (paperflow-e5v) are noise in daily ops. Append
 # two alias blocks to ~/.beads/aliases.toml so `bd list` and `bd ready` filter
@@ -1291,6 +1301,14 @@ log "Status"
         ok "dock daemon   : running    (~/.paperflow/dock.sock)"
     else
         skip "dock daemon   : not running (re-run install.sh to respawn)"
+    fi
+    # cmux integration (paperflow-8hz) — Layer 1 (auto-open routes to cmux
+    # browser surface) + Layer 2 (paperflow-doc-verify post-write check) are
+    # active when cmux-detect exits 0. OS-browser fallback otherwise.
+    if "$HOME/.local/bin/paperflow-cmux-detect" >/dev/null 2>&1; then
+        ok "cmux integration : detected (browser CLI available)"
+    else
+        skip "cmux integration : not detected (paperflow falls back to OS browser)"
     fi
     jq -e '.hooks.UserPromptSubmit' "$SETTINGS" >/dev/null 2>&1 \
                                                        && ok "settings UPS  : wired"      || err "settings UPS  : broken"

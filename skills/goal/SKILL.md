@@ -215,6 +215,8 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
 
    **Every paperflow HTML you write MUST include** `<script>window.PAPERFLOW_GOAL_ID = "<goal-id>";</script>` near the existing `window.DOC_PATH` block. The goal-path rail (`lib/goal-path-rail.js`) reads this to know which Goal's events to show. Without it the rail falls back to a server-side `?source=<doc-path>` lookup — slower, and silent on freshly-created docs that don't yet have any events.
 
+   **After the doc-writer subagent returns**, the orchestrator dispatches `paperflow-cmux-verifier` (see `agents/paperflow-cmux-verifier.md`) with the doc URL. The verifier runs `paperflow-doc-verify <url>` once and returns a one-line `PASS|WARN|FAIL|SKIP: <reason>` verdict. **PASS** → close the doc-write task. **WARN** → close + log. **FAIL** → route to debug (doc-write task stays claimed). **SKIP** (cmux not detected, or the docs surface isn't bound yet) → close — no regression vs the pre-cmux flow.
+
 ## Questionnaire on open
 
 When the Goal lacks shape — broad scope, multiple axes of variation, or expensive to redo — write a **questionnaire** before drafting any plan. Skip for trivially-shaped work. The trigger is judgment, not a rule; anchor against these case → outcome pairs:

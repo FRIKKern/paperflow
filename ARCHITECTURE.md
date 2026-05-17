@@ -515,3 +515,16 @@ Install path:
 The `setup` skill is the bridge between the plugin (skills + slash commands) and the host-side install (LaunchAgents, dock daemon, statusline, `~/.claude/CLAUDE.md`, `~/.local/bin/` shims) — it locates `$CLAUDE_PLUGIN_ROOT`, asks for consent, runs `install.sh`, then writes `~/.paperflow/installed` as the success sentinel. See `skills/setup/SKILL.md`.
 
 The legacy curl-pipe install (`scripts/quickstart.sh` / `install.sh`) continues to work in parallel — the same `install.sh` is the host-side worker for both paths.
+
+---
+
+## cmux integration
+
+paperflow-8hz makes the cmux browser the default surface for paperflow docs when cmux is present, and adds a post-write verification gate that exercises the rendered HTML before the doc is handed back to the user. Two layers shipped; a third was scoped out.
+
+- **Layer 1 — viewer routing.** `hooks/auto-open-doc.sh` consults `paperflow-cmux-detect` (probes `CMUX_WORKSPACE_ID` + `cmux` on PATH, exit `0`=ready / `1`=not present / `2`=internal error) and routes the daemon URL into a managed cmux docs surface when ready. Otherwise it falls back to the OS browser via `open` / `xdg-open`. Same daemon URL either way; only the surface differs.
+- **Layer 2 — post-write verifier.** `bin/paperflow-doc-verify` (deployed to `~/.local/bin/paperflow-doc-verify`) drives the bound cmux surface through the fixed verb sequence `goto → wait load → wait mermaid → errors → console → get h1 → screenshot` and emits a single-line JSON result. Exit `0` = PASS or SKIP, `1` = WARN, `2` = FAIL. The validate PostToolUse hook chains into it after a successful write; on cmux-absent hosts it returns SKIP and the chain is a no-op.
+- **Layer 3 — audit-tool routing.** *Not implemented in this Goal.* Routing the visual-investigator agent across Unlighthouse / chrome-devtools-mcp / Browserbase under one matrix is deferred to a separate Goal. The existing visual-investigator backend selection is unchanged.
+- **Sidecar.** The bound surface handle lives at `~/.paperflow/cmux-docs-surface.<workspace>.handle` — one file per cmux workspace, owned by `auto-open-doc.sh` (spawn authority) and read-only for `paperflow-doc-verify`.
+
+For the full contract — JSON shapes, verb timeouts, fallback decision table, exit-code matrix — see `~/docs/paperflow/specs/2026-05-15-paperflow-cmux-integration-spec.html`.

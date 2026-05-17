@@ -191,6 +191,7 @@ Beads bootstrap (`bd init`) is deferred to first `/paperflow:goal` in a repo, wh
 1. **Identify the topic.** A merged paperflow PR, an installer change, a new fragment.
 2. **Spawn a subagent** to draft the changelog HTML. Brief: article-style HTML, files-touched table, verified-by section, one-line rollback.
 3. **Write to** `~/docs/paperflow/changelog/<YYYY-MM-DD>-<topic>-changelog.html` using `/paperflow/_lib/doc.{css,js}` and the JSON from `~/.local/bin/paperflow-target <changelog-html-path>` (the path argument is required — the helper registers the doc_nonce with the bridge as a side-effect; calling it without a path now aborts with `register-failed`).
+4. **After the doc-writer subagent returns**, the orchestrator dispatches `paperflow-cmux-verifier` (see `agents/paperflow-cmux-verifier.md`) with the doc URL. The verifier runs `paperflow-doc-verify <url>` once and returns a one-line `PASS|WARN|FAIL|SKIP: <reason>` verdict. **PASS** → close the doc-write task. **WARN** → close + log. **FAIL** → route to debug (doc-write task stays claimed). **SKIP** (cmux not detected, or the docs surface isn't bound yet) → close — no regression vs the pre-cmux flow.
 
 ## Artifact
 
