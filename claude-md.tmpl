@@ -80,9 +80,11 @@ Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `
 
 `paperflow-daemon` LaunchAgent serves `~/docs/paperflow/` on port 8767 — single host-scoped daemon that owns sessions/docs/build/marker/discover endpoints plus the static-file fallback.
 
+<!-- paperflow:cmux-only:begin -->
 ## cmux doc surface (default viewer + verifier)
 
 When running under cmux (`CMUX_WORKSPACE_ID` set, `cmux` on PATH), paperflow docs open in a managed cmux browser surface instead of the OS browser — `auto-open-doc.sh` routes the daemon URL into the workspace's docs surface and persists its handle at `~/.paperflow/cmux-docs-surface.<workspace>.handle`. After every doc write, `paperflow-doc-verify` drives that same surface through `goto → wait load → wait mermaid → errors → console → screenshot` and returns PASS / FAIL / WARN / SKIP before the doc is handed to the user. Without cmux, paperflow falls back to the OS browser and the verifier exits SKIP — no behaviour change for non-cmux hosts.
+<!-- paperflow:cmux-only:end -->
 
 ## Action buttons (every spec & plan)
 
@@ -147,6 +149,7 @@ Six categories: **scope · constraints · preferences · context · success crit
 
 Artifact: `~/docs/paperflow/questionnaires/<date>-<slug>-questionnaire.html`. Reuses `/paperflow/_lib/grill.{css,js}` verbatim; differentiated via `window.GRILL.kind = "questionnaire"` (which flips the bridge-message header to "Questionnaire answers for…") and `window.GRILL.goalId = "<beads-id>"` (appended as a `Goal:` line so the orchestrator can route answers correctly when the user has switched contexts). The submit bar is `position: sticky; bottom: 0` — once the user scrolls past Q1, the button stays pinned to the viewport. See `examples/example-questionnaire.html` for the canonical shape.
 
+<!-- paperflow:cmux-only:begin -->
 # paperflow Dock
 
 paperflow surfaces its working memory in cmux's right-side Dock via four feeds rendered by a single long-running daemon. The daemon (`~/.local/bin/paperflow-dock-daemon`, Node.js, no deps) polls Beads on a 2-second internal cadence and serves cached output on a UNIX socket at `~/.paperflow/dock.sock`. Each Dock pane runs `watch -n 5 paperflow-dock-feed <name>` — the client is ~15 LOC of bash that `nc -U`s the socket and prints. The four feeds:
@@ -167,6 +170,7 @@ Debug:
     tail /tmp/paperflow-dock-daemon.log       # non-cmux stderr
     kill $(cat ~/.paperflow/dock-daemon.pid)  # graceful shutdown
     bash install.sh                           # respawns daemon
+<!-- paperflow:cmux-only:end -->
 
 # Statusline
 
