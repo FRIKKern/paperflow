@@ -8,7 +8,7 @@ The fastest path is the one-liner in the [README](./README.md). This file covers
 
 | Component | Path on your Mac | Purpose |
 |---|---|---|
-| `docs-livereload` LaunchAgent | `~/Library/LaunchAgents/dev.<user>.docs-livereload.plist` | Hot reload for `~/docs/` on port 8765 |
+| `paperflow-daemon` LaunchAgent | `~/Library/LaunchAgents/dev.<user>.paperflow-daemon.plist` | Serves `~/docs/` on port 8767 with built-in WS hot reload |
 | `claude-bridge` LaunchAgent | `~/Library/LaunchAgents/dev.<user>.claude-bridge.plist` | Routes browser button clicks back to your terminal |
 | Standing principles | `~/.claude/CLAUDE.md` | Loaded into every Claude Code session (only created if missing) |
 | UserPromptSubmit hook | `~/.claude/hooks/inject-principles.sh` | Re-injects principles every turn (bloat-resistant) |
@@ -33,7 +33,7 @@ bash ~/Documents/GitHub/paperflow/install.sh
 
 ## Customize the LaunchAgent label
 
-By default, plists are labeled `dev.<your-username>.docs-livereload` and `dev.<your-username>.claude-bridge`. To change the namespace:
+By default, plists are labeled `dev.<your-username>.paperflow-daemon` and `dev.<your-username>.claude-bridge`. To change the namespace:
 
 ```bash
 LABEL_PREFIX=dev.youralias bash install.sh
@@ -57,8 +57,8 @@ If either is missing, the script prints the exact `brew install …` command and
 ## Verify
 
 ```bash
-curl -s http://127.0.0.1:8765/    # docs-livereload (returns directory listing)
-curl -s http://127.0.0.1:8766/    # claude-bridge   (returns "claude-bridge ok")
+curl -s http://127.0.0.1:8767/    # paperflow-daemon (returns directory listing)
+curl -s http://127.0.0.1:8766/    # claude-bridge    (returns "claude-bridge ok")
 ```
 
 In any **already-running** Claude Code session, run `/hooks` once (or restart) so the hooks are picked up. New sessions get them on startup automatically.
@@ -72,9 +72,3 @@ bash ~/Documents/GitHub/paperflow/uninstall.sh
 ```
 
 Removes the LaunchAgents, hooks, settings entries, renderers, skills, and helper. **Does not** delete `~/.claude/CLAUDE.md` (your edits) or any specs/plans/grills you've written.
-
-To also remove the npm global `live-server`:
-
-```bash
-npm uninstall -g live-server
-```

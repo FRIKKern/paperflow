@@ -332,7 +332,7 @@ End every doc with:
 
 ### Live-render
 
-`docs-livereload` is a `live-server@1.2.2` LaunchAgent serving `~/docs/` on port 8765 with WebSocket hot reload (~200 ms refresh). Every paperflow HTML loads `live-render.js` via `doc.js`; on file change, the client morphs the DOM in-place — scroll position is preserved, rendered Mermaid diagrams survive.
+`paperflow-daemon` is a single host-scoped Node LaunchAgent on `localhost:8767` that owns static-file serving for `~/docs/` AND a built-in WebSocket reload channel (~200 ms refresh) plus `livereload.js` injection. Every paperflow HTML loads `live-render.js` via `doc.js`; on file change, the client morphs the DOM in-place — scroll position is preserved, rendered Mermaid diagrams survive.
 
 Live-render short-circuits when `location.hostname` isn't `localhost` / `127.0.0.1` / `::1`, so printed PDFs, emailed copies, and USB exports never try to open a WebSocket they can't reach. Per-page opt-out:
 
@@ -446,7 +446,7 @@ paperflow/
 │   └── {goal,plan,build,review,install,resume,setup,autopilot}/SKILL.md
 ├── launchagents/
 │   ├── claude-bridge.plist.tmpl
-│   └── docs-livereload.plist.tmpl
+│   └── paperflow-daemon.plist.tmpl
 ├── scripts/
 │   ├── quickstart.sh               # the curl one-liner
 │   └── check-skill-count.sh        # CI gate, 8-skill cap

@@ -2,9 +2,8 @@
 # PostToolUse hook for Write|Edit:
 # If the touched file is an HTML spec/plan under ~/docs/paperflow/ (or the
 # legacy ~/docs/superpowers/ symlink, while it still exists during the v2→v3
-# deprecation window), open it in the browser via the live-reload URL.
-# macOS `open` refocuses an existing tab without duplicating it; live-server
-# pushes the WS reload either way.
+# deprecation window), open it in the browser via the daemon URL.
+# paperflow-daemon serves docs + WS reload on :8767.
 #
 # On cmux, the URL handler returns "OK surface=N placement=reuse|new" so we
 # can verify tab-reuse vs new-tab behaviour. Spec v7 § "Tab reuse on cmux"
@@ -28,7 +27,7 @@ case "$FILE_PATH" in
       */docs/paperflow/audits/_archive/*|*/docs/superpowers/audits/_archive/*) exit 0 ;;
     esac
     REL="${FILE_PATH#*/docs/}"
-    URL="http://localhost:8765/$REL"
+    URL="http://localhost:8767/$REL"
 
     # --- Dispatch: cmux browser surface (preferred) or OS browser (fallback).
     # B3 of paperflow-8hz (cmux-browser-default). Spec §1-3:
@@ -195,7 +194,7 @@ case "$FILE_PATH" in
     # dispatches (`open`) skip verification and write one SKIP line.
     VERIFY_LOG="$LOG_DIR/doc-verify.log"
     VERIFY_FAIL_LOG="$LOG_DIR/doc-verify-failures.log"
-    VERIFY_URL="$(printf '%s' "$URL" | /usr/bin/sed 's|:8765|:8767|')"
+    VERIFY_URL="$URL"
     if [ "$DISPATCH" = "open" ]; then
       # Non-cmux fallback — skip the verifier, log one SKIP line.
       /usr/bin/env jq -nc \
