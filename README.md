@@ -174,7 +174,6 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 ### Logs
 
 ```
-~/.local/log/docs-livereload.{out,err}.log
 ~/.local/log/claude-bridge.{out,err}.log
 /tmp/paperflow-dock-daemon.log               # non-cmux stderr
 ~/.paperflow/auto-open.log                   # auto-open events (rotates at 1 MB)
