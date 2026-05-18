@@ -1,10 +1,57 @@
 # Paperflow
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![macOS only](https://img.shields.io/badge/macOS-only-blue)
+![Node 22+](https://img.shields.io/badge/node-22%2B-green)
+![8 skills](https://img.shields.io/badge/skills-8%20max-orange)
+![cmux-first](https://img.shields.io/badge/cmux-first-purple)
+![GitHub stars](https://img.shields.io/github/stars/FRIKKern/paperflow)
+
 Turn a one-line Goal into a planned, grilled, built, and reviewed change — with HTML you can read at every step.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FRIKKern/paperflow/main/scripts/quickstart.sh | bash
 ```
+
+[Why](#why-paperflow) · [First five minutes](#first-five-minutes) · [What you actually do](#what-you-actually-do) · [What it looks like](#what-it-looks-like) · [The eight skills](#the-eight-skills) · [Troubleshoot](#troubleshoot)
+
+---
+
+## Why paperflow
+
+Most Claude Code workflows let the model decide what's important and trust it to remember. That breaks at scale — context drifts, plans go half-finished, half the work happens inside one giant orchestrator turn that nobody can audit afterwards. paperflow inverts that. Every meaningful step writes an HTML doc you can read, click through, and reject. The orchestrator stays in coordination; subagents do the focused work. Specs and plans aren't disposable side-effects — they're the artifact, and the right rail keeps their full history one click away.
+
+The loop:
+
+```mermaid
+flowchart LR
+    G["/paperflow:goal"]
+    P["/paperflow:plan<br/>draft → grill → revise"]
+    B["/paperflow:build<br/>claim → dispatch →<br/>verify → close"]
+    R["/paperflow:review"]
+    Done(["Goal done"])
+
+    G --> P --> B --> R
+    R -->|"approved"| Done
+    R -->|"rejected"| B
+```
+
+Rejection re-opens the build-task on the same `branch:main`. No orphan branches, no lost work.
+
+The architectural commitment, in three boxes:
+
+```mermaid
+flowchart LR
+    O["Orchestrator<br/>(one Claude Code)"]
+    S["Subagents<br/>(dispatched per task)"]
+    BD[("Beads<br/>system of record")]
+
+    O -->|dispatches| S
+    O <-->|claim / close| BD
+    S -->|writes events| BD
+```
+
+One Claude Code instance coordinates; every non-trivial step is delegated to a subagent (hard 30 LOC / 50 line / 500 token thresholds, audited by `Subagent-Run:` commit trailers in `/paperflow:review`). Beads is the only persistent state.
 
 ---
 
@@ -22,34 +69,20 @@ There's also a `pf` CLI for kicking flows off without opening Claude Code first:
 
 ## What you actually do
 
-Four verbs, in order. **Open a Goal.** That's a vision sentence and three default phases (pre-flight, build, review). **Plan it.** A subagent drafts an HTML plan, grills it with 8–15 pointed questions, revises with you, then materialises the steps as Beads work-tasks. **Build it.** The orchestrator claims the next ready task, dispatches a focused subagent, verifies the result, closes the task, repeats until the phase empties. **Review it.** A reviewer subagent checks the work; rejection re-opens the same build-task on `branch:main`, no orphan branches.
+Four verbs, in order:
+
+```mermaid
+flowchart LR
+    A["Open a Goal"] --> B["Plan it"] --> C["Build it"] --> D["Review it"]
+```
+
+**Open a Goal** — a vision sentence and three default phases (pre-flight, build, review). **Plan it** — a subagent drafts an HTML plan, grills it with 8–15 pointed questions, revises with you, then materialises the steps as Beads work-tasks. **Build it** — the orchestrator claims the next ready task, dispatches a focused subagent, verifies the result, closes the task, repeats until the phase empties. **Review it** — a reviewer subagent checks the work; rejection re-opens the same build-task on `branch:main`, no orphan branches.
 
 Everything else — questionnaires when shape is unclear, simplify passes, changelogs with before/after screenshots — is a sub-action inside one of those four.
 
 ---
 
 ## What it looks like
-
-<!-- TODO: insert ~10s loop GIF + 2 screenshots (rail, dock) -->
-
-Specs, plans, and grills open as HTML articles in your browser at `localhost:8767` — serif body, captioned figures, Mermaid diagrams throughout. A 240 px sticky right rail shows the active Goal's lifecycle as a clickable git-graph; click an older event to walk back, shift-click two nodes for a line-level diff. Under cmux, four live feeds stream into the right-side Dock: active Goal/Phase/Task, ready tasks, recent events, the auto-open log. Action buttons inside each doc — Build this plan, Grill the spec, Submit, Simplify — POST back to the bridge, which routes the message into the terminal where Claude is running.
-
-The statusline shows the active Goal and Phase at a glance:
-
-```
-137,420 / 1M · 1209d022 · onboarding-revamp · ▸ phase 2/3: build · ▸ paperflow-a1b2.2.3 wire-bridge · 4/9 · main
-```
-
-Files you'll touch:
-
-```
-~/docs/paperflow/specs/<date>-<slug>.html        # specs
-~/docs/paperflow/plans/<date>-<slug>.html        # plans
-~/docs/paperflow/grills/<date>-<slug>.html       # grill stress-tests
-~/docs/paperflow/goals/<slug>/index.html         # the Goal's HTML home
-~/docs/paperflow/changelog/<date>-<topic>.html   # before/after proof pages
-<repo>/.paperflow/{active-goal,active-phase}     # the entire mutable state
-```
 
 A typical session in your terminal:
 
@@ -68,34 +101,28 @@ A typical session in your terminal:
   …
 ```
 
----
+Specs, plans, and grills open as HTML articles in your browser at `localhost:8767` — serif body, captioned figures, Mermaid diagrams throughout. A 240 px sticky right rail shows the active Goal's lifecycle as a clickable git-graph; click an older event to walk back, shift-click two nodes for a line-level diff. Under cmux, four live feeds stream into the right-side Dock: active Goal/Phase/Task, ready tasks, recent events, the auto-open log. Action buttons inside each doc — Build this plan, Grill the spec, Submit, Simplify — POST back to the daemon, which routes the message into the terminal where Claude is running.
 
-## Why it exists
+The statusline shows the active Goal and Phase at a glance:
 
-Most Claude Code workflows let the model decide what's important and trust it to remember. That breaks at scale — context drifts, plans go half-finished, half the work happens inside one giant orchestrator turn that nobody can audit afterwards. paperflow inverts that. Every meaningful step writes an HTML doc you can read, click through, and reject. The orchestrator stays in coordination; subagents do the focused work. Specs and plans aren't disposable side-effects — they're the artifact, and the right rail keeps their full history one click away.
-
-The loop:
-
-```mermaid
-flowchart LR
-    G["/paperflow:goal"]
-    Q["questionnaire<br/>(when useful)"]
-    P["/paperflow:plan<br/>draft → grill → revise"]
-    B["/paperflow:build<br/>claim → dispatch →<br/>verify → close"]
-    R["/paperflow:review"]
-    Done(["Goal done"])
-
-    G --> Q --> P --> B --> R
-    G -->|"trivial shape"| P
-    R -->|"approved"| Done
-    R -->|"rejected"| B
+```
+137,420 / 1M · 1209d022 · onboarding-revamp · ▸ phase 2/3: build · ▸ paperflow-a1b2.2.3 wire-bridge · 4/9 · main
 ```
 
-Rejection re-opens the build-task on the same `branch:main`. The orchestrator is one Claude Code instance; every non-trivial step is delegated to a subagent (hard 30 LOC / 50 line / 500 token thresholds, audited by `Subagent-Run:` commit trailers in `/paperflow:review`).
+Files you'll touch:
+
+```
+~/docs/paperflow/specs/<date>-<slug>.html        # specs
+~/docs/paperflow/plans/<date>-<slug>.html        # plans
+~/docs/paperflow/grills/<date>-<slug>.html       # grill stress-tests
+~/docs/paperflow/goals/<slug>/index.html         # the Goal's HTML home
+~/docs/paperflow/changelog/<date>-<topic>.html   # before/after proof pages
+<repo>/.paperflow/{active-goal,active-phase}     # the entire mutable state
+```
 
 ---
 
-## Reference: the slash commands
+## The eight skills
 
 Eight skills, total. The cap is enforced by `scripts/check-skill-count.sh` — a ninth needs to displace one of these.
 
@@ -113,13 +140,6 @@ Eight skills, total. The cap is enforced by `scripts/check-skill-count.sh` — a
 ---
 
 ## Prerequisites and other install paths
-
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![macOS only](https://img.shields.io/badge/macOS-only-blue)
-![Node 22+](https://img.shields.io/badge/node-22%2B-green)
-![8 skills](https://img.shields.io/badge/skills-8%20max-orange)
-![cmux-first](https://img.shields.io/badge/cmux-first-purple)
-![GitHub stars](https://img.shields.io/github/stars/FRIKKern/paperflow)
 
 - macOS only. Linux is an explicit non-goal — `paperflow-target` and the cmux integration are mac-specific.
 - [Homebrew](https://brew.sh) — used to auto-install `jq` and `beads` if missing.
@@ -151,17 +171,13 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 
 **`brew not found`** — Install brew first at https://brew.sh, then re-run the quickstart. macOS-only.
 
-**Bridge port 8766 unreachable** — `lsof -i :8766` for a stale process; kill it and re-run install. Only one paperflow bridge can listen on 8766 at a time.
-
-**Daemon port 8767 unreachable** — same idea: `lsof -i :8767`. Most often a dev server is squatting on the port. Kill it or override the daemon port in the LaunchAgent plist.
+**Daemon port 8767 unreachable** — `lsof -i :8767`. Most often a dev server is squatting on the port. Kill it or override the daemon port in the LaunchAgent plist.
 
 **npm EACCES on global install** — the installer is nvm-aware. If your `node` is from nvm you'll skip the EACCES branch. If it's a system install: `sudo chown -R $(whoami) /usr/local/{lib/node_modules,bin,share}`.
 
 **CLAUDE.md exists, but I want the new `--with-X` fragments** — re-run with `--merge --with-openclaw` (or whichever flag). Each fragment has a sentinel comment, so re-merging is safe.
 
 **Hooks duplicated in `settings.json`** — fixed in 2026-05-07: hook dedup uses exact-path match. For older duplicates, edit `~/.claude/settings.json` and remove the duplicate `command` entries under `hooks.PostToolUse[].hooks[]`.
-
-**cmux trust broken-pipe on browser button clicks** — the bridge needs to inherit cmux's socket auth. Respawn from inside a cmux pane: `cmux new-workspace --command "node ~/.local/lib/paperflow/claude-bridge.js"`.
 
 **Statusline empty in a Goal-active repo** — cache stale and live composition failed. Run any Beads-mutating action (claim/close); cache rewrites.
 
@@ -174,7 +190,6 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 ### Logs
 
 ```
-~/.local/log/claude-bridge.{out,err}.log
 /tmp/paperflow-dock-daemon.log               # non-cmux stderr
 ~/.paperflow/auto-open.log                   # auto-open events (rotates at 1 MB)
 ~/.paperflow/simplify-failures.log           # rejected Simplify candidates
@@ -185,7 +200,7 @@ Full install detail, optional `--with-*` flags, manual install, and uninstall in
 
 ## Architecture and internals
 
-The bridge HTTP endpoints, hook composition, statusline internals, dock daemon, simplify pipeline, subagent thresholds, doc authoring conventions, and repo layout all live in [ARCHITECTURE.md](ARCHITECTURE.md). Read that if you're hacking on paperflow itself.
+The daemon HTTP endpoints, hook composition, statusline internals, dock daemon, simplify pipeline, subagent thresholds, doc authoring conventions, and repo layout all live in [ARCHITECTURE.md](ARCHITECTURE.md). Read that if you're hacking on paperflow itself.
 
 ---
 
