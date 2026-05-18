@@ -12,6 +12,26 @@
 
 set -e
 
+# pf_cmux — hard wall-clock cap for any `cmux` subprocess call.
+# cmux 0.64.6 can deadlock its main thread inside v2AwaitCallback when a
+# browser surface is unresponsive (sample: ~/cmux-sample-stuck-1753.txt).
+# Without this wrapper a single `cmux browser` call here could hang the
+# PostToolUse hook indefinitely and stall every doc save. Exit 124 on
+# timeout; otherwise propagates child rc. Stdout/stderr pass through.
+pf_cmux() {
+    /usr/bin/perl -e '
+        my $secs = shift @ARGV;
+        my $pid = fork() // die "pf_cmux fork: $!";
+        if ($pid == 0) { exec @ARGV; die "pf_cmux exec: $!" }
+        $SIG{ALRM} = sub { kill "TERM", $pid; sleep 1; kill "KILL", $pid; waitpid $pid, 0; exit 124 };
+        alarm $secs;
+        waitpid $pid, 0;
+        alarm 0;
+        my $rc = $?;
+        exit($rc & 0x7f ? 128 + ($rc & 0x7f) : ($rc >> 8));
+    ' -- "$@"
+}
+
 # Hook input is JSON on stdin.
 PAYLOAD="$(cat)"
 FILE_PATH="$(printf '%s' "$PAYLOAD" | /usr/bin/env jq -r '.tool_input.file_path // .tool_response.filePath // empty' 2>/dev/null)"
@@ -68,7 +88,7 @@ case "$FILE_PATH" in
     # browser surface_ref on stdout, or exit 1. All cmux calls wrapped.
     discover_browser_surface() {
       local identify_json focused_browser focused_ref tree_out browser_ref
-      identify_json="$(cmux identify 2>/dev/null || true)"
+      identify_json="$(pf_cmux 5 cmux identify 2>/dev/null || true)"
       if [ -n "$identify_json" ]; then
         focused_browser="$(printf '%s' "$identify_json" | /usr/bin/env jq -r '.focused.is_browser_surface // false' 2>/dev/null || echo false)"
         if [ "$focused_browser" = "true" ]; then
@@ -76,7 +96,7 @@ case "$FILE_PATH" in
           [ -n "$focused_ref" ] && { printf '%s' "$focused_ref"; return 0; }
         fi
       fi
-      tree_out="$(cmux tree --workspace "$WORKSPACE" 2>/dev/null || true)"
+      tree_out="$(pf_cmux 5 cmux tree --workspace "$WORKSPACE" 2>/dev/null || true)"
       [ -z "$tree_out" ] && return 1
       browser_ref="$(printf '%s\n' "$tree_out" | /usr/bin/awk '/\[browser\]/ {for(i=1;i<=NF;i++) if ($i ~ /^surface:[0-9]+$/) { print $i; exit }}')"
       [ -n "$browser_ref" ] && { printf '%s' "$browser_ref"; return 0; }
@@ -106,9 +126,9 @@ case "$FILE_PATH" in
         SIDE_WS="$(/usr/bin/env jq -r '.workspace // empty' "$SIDECAR" 2>/dev/null || true)"
         # Cross-workspace guard + liveness probe (spec §3).
         if [ -n "$HANDLE" ] && [ "$SIDE_WS" = "$WORKSPACE" ] && \
-           cmux browser "$HANDLE" url >/dev/null 2>&1; then
+           pf_cmux 5 cmux browser "$HANDLE" url >/dev/null 2>&1; then
           # Surface alive — navigate.
-          RESPONSE="$(cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
+          RESPONSE="$(pf_cmux 10 cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
           DISPATCH="cmux-goto"
         else
           # Stale — drop sidecar and fall through to adopt/spawn.
@@ -124,7 +144,7 @@ case "$FILE_PATH" in
         ADOPTED="$(discover_browser_surface || true)"
         if [ -n "$ADOPTED" ]; then
           HANDLE="$ADOPTED"
-          RESPONSE="$(cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
+          RESPONSE="$(pf_cmux 10 cmux browser "$HANDLE" goto "$URL" 2>&1)" || EXIT=$?
           write_sidecar "$HANDLE"
           DISPATCH="cmux-adopt"
         fi
@@ -132,7 +152,7 @@ case "$FILE_PATH" in
 
       if [ "$DISPATCH" = "open" ] && [ -n "$WORKSPACE" ]; then
         # Lazy spawn. Parse `OK surface=<ref> pane=<ref> placement=<reuse|new>`.
-        SPAWN_OUT="$(cmux browser open "$URL" 2>&1)" || SPAWN_RC=$?
+        SPAWN_OUT="$(pf_cmux 12 cmux browser open "$URL" 2>&1)" || SPAWN_RC=$?
         SPAWN_RC="${SPAWN_RC:-0}"
         NEW_HANDLE="$(printf '%s\n' "$SPAWN_OUT" | /usr/bin/awk 'NR==1 { for (i=1;i<=NF;i++) if ($i ~ /^surface=/) { sub(/^surface=/,"",$i); print $i; exit } }')"
         if [ "$SPAWN_RC" = "0" ] && [ -n "$NEW_HANDLE" ]; then

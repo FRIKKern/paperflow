@@ -13,6 +13,26 @@
 
 set -u
 
+# pf_cmux — hard wall-clock cap for any `cmux` subprocess call.
+# cmux 0.64.6 can deadlock its main thread inside v2AwaitCallback when a
+# browser surface is unresponsive (sample: ~/cmux-sample-stuck-1753.txt).
+# Without this wrapper a single `cmux browser` call here could hang
+# paperflow indefinitely. Exit 124 on timeout; otherwise propagates child rc.
+# Stdout/stderr pass through unchanged so $(...) capture sites still work.
+pf_cmux() {
+    /usr/bin/perl -e '
+        my $secs = shift @ARGV;
+        my $pid = fork() // die "pf_cmux fork: $!";
+        if ($pid == 0) { exec @ARGV; die "pf_cmux exec: $!" }
+        $SIG{ALRM} = sub { kill "TERM", $pid; sleep 1; kill "KILL", $pid; waitpid $pid, 0; exit 124 };
+        alarm $secs;
+        waitpid $pid, 0;
+        alarm 0;
+        my $rc = $?;
+        exit($rc & 0x7f ? 128 + ($rc & 0x7f) : ($rc >> 8));
+    ' -- "$@"
+}
+
 START_NS="$(/bin/date +%s)"
 TS="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
 TS_SLUG="$(/bin/date -u +%Y%m%dT%H%M%SZ)"
@@ -135,12 +155,12 @@ if [ -z "$HANDLE" ] || [ "$SIDE_WS" != "$WORKSPACE" ]; then
 fi
 
 # Liveness probe — DO NOT respawn (§ 5.2.a).
-if ! cmux browser "$HANDLE" url >/dev/null 2>&1; then
-    emit_result SKIP '["skipped: liveness probe failed"]' '[]' null "$URL" "$KIND"
+if ! pf_cmux 5 cmux browser "$HANDLE" url >/dev/null 2>&1; then
+    emit_result SKIP '["skipped: liveness probe failed or timed out"]' '[]' null "$URL" "$KIND"
 fi
 
 # ---- Step (b): goto. ----
-GOTO_OUT="$(cmux browser "$HANDLE" goto "$URL" 2>&1)"
+GOTO_OUT="$(pf_cmux 10 cmux browser "$HANDLE" goto "$URL" 2>&1)"
 GOTO_RC=$?
 if [ "$GOTO_RC" -ne 0 ]; then
     case "$GOTO_OUT" in
@@ -154,7 +174,10 @@ if [ "$GOTO_RC" -ne 0 ]; then
 fi
 
 # ---- Step (c): wait for load. ----
-if ! cmux browser "$HANDLE" wait --load-state complete --timeout-ms "$TIMEOUT_LOAD_MS" >/dev/null 2>&1; then
+# Outer pf_cmux cap = cmux-side timeout (sec) + 3s buffer so cmux's own
+# timeout fires first when it can; pf_cmux is the safety net when it can't.
+LOAD_CAP=$(( (TIMEOUT_LOAD_MS / 1000) + 3 ))
+if ! pf_cmux "$LOAD_CAP" cmux browser "$HANDLE" wait --load-state complete --timeout-ms "$TIMEOUT_LOAD_MS" >/dev/null 2>&1; then
     REASON="$("$JQ" -nc --arg r "load-state complete timed out at ${TIMEOUT_LOAD_MS}ms" '[$r]')"
     emit_result FAIL "$REASON" '[]' null "$URL" "$KIND"
 fi
@@ -171,7 +194,8 @@ push_reason() {
 
 # ---- Step (d): mermaid render (kind-gated). ----
 if [ "$MERMAID_MODE" != "absent" ]; then
-    if ! cmux browser "$HANDLE" wait --selector "pre.mermaid svg" --timeout-ms "$TIMEOUT_MERMAID_MS" >/dev/null 2>&1; then
+    MERMAID_CAP=$(( (TIMEOUT_MERMAID_MS / 1000) + 3 ))
+    if ! pf_cmux "$MERMAID_CAP" cmux browser "$HANDLE" wait --selector "pre.mermaid svg" --timeout-ms "$TIMEOUT_MERMAID_MS" >/dev/null 2>&1; then
         if [ "$MERMAID_MODE" = "expected" ]; then
             push_reason "mermaid svg missing after ${TIMEOUT_MERMAID_MS}ms"
         else
@@ -181,7 +205,7 @@ if [ "$MERMAID_MODE" != "absent" ]; then
 fi
 
 # ---- Step (e): JS errors. ----
-ERR_OUT="$(cmux browser "$HANDLE" errors list 2>&1)" || true
+ERR_OUT="$(pf_cmux 5 cmux browser "$HANDLE" errors list 2>&1)" || true
 ERR_FIRST=""
 if [ -n "$ERR_OUT" ] && [ "$ERR_OUT" != "No console entries" ] && [ "$ERR_OUT" != "No errors" ]; then
     ERR_FIRST="$(printf '%s\n' "$ERR_OUT" | /usr/bin/grep -m1 '^Error:' || true)"
@@ -191,7 +215,7 @@ if [ -n "$ERR_OUT" ] && [ "$ERR_OUT" != "No console entries" ] && [ "$ERR_OUT" !
 fi
 
 # ---- Step (f): console. ----
-CON_OUT="$(cmux browser "$HANDLE" console list 2>&1)" || true
+CON_OUT="$(pf_cmux 5 cmux browser "$HANDLE" console list 2>&1)" || true
 if [ -n "$CON_OUT" ] && [ "$CON_OUT" != "No console entries" ]; then
     # error-level lines fail; warning-level lines warn.
     CON_ERR="$(printf '%s\n' "$CON_OUT" | /usr/bin/grep -m1 -iE '^(error|\[error\])' || true)"
@@ -209,7 +233,7 @@ DOC_SLUG="$(basename "$URL" .html | /usr/bin/tr -c 'A-Za-z0-9._-' '-' | /usr/bin
 [ -z "$DOC_SLUG" ] && DOC_SLUG="doc"
 SHOT_PATH="$SCREENSHOT_DIR/${DOC_SLUG}-${TS_SLUG}.png"
 SHOT_RESULT="null"
-if cmux browser "$HANDLE" screenshot --out "$SHOT_PATH" >/dev/null 2>&1 && [ -s "$SHOT_PATH" ]; then
+if pf_cmux 10 cmux browser "$HANDLE" screenshot --out "$SHOT_PATH" >/dev/null 2>&1 && [ -s "$SHOT_PATH" ]; then
     SHOT_RESULT="$SHOT_PATH"
 else
     push_warning "screenshot capture failed"
@@ -217,7 +241,7 @@ else
 fi
 
 # ---- Step (h): h1 check. ----
-H1_OUT="$(cmux browser "$HANDLE" get text --selector "h1" 2>&1)" || H1_RC=$?
+H1_OUT="$(pf_cmux 5 cmux browser "$HANDLE" get text --selector "h1" 2>&1)" || H1_RC=$?
 H1_RC="${H1_RC:-0}"
 H1_TRIM="$(printf '%s' "$H1_OUT" | /usr/bin/tr -d '[:space:]')"
 if [ "$H1_RC" -ne 0 ] || [ -z "$H1_TRIM" ]; then
