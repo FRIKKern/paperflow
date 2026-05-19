@@ -99,7 +99,8 @@ fi
 printf '\n%s▸%s Running installer\n\n' "$C_CYAN" "$C_RST"
 INSTALL_ARGS=()
 [ "${PAPERFLOW_YES:-0}" = 1 ] && INSTALL_ARGS+=(--yes)
-bash "$REPO/install.sh" "${INSTALL_ARGS[@]}"
+# Safe when INSTALL_ARGS is empty (macOS bash 3.2 + set -u)
+bash "$REPO/install.sh" ${INSTALL_ARGS+"${INSTALL_ARGS[@]}"}
 
 # ── Finish ──────────────────────────────────────────────────────────
 printf '\n%sYou'\''re ready.%s Here'\''s what to try first:\n' "$C_BOLD" "$C_RST"
