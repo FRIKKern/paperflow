@@ -34,12 +34,38 @@ has_body=0
 grep -q '<body' "$src" && has_body=1
 
 awk -v has_body="$has_body" '
-  BEGIN { inbody = (has_body ? 0 : 1); buffering = 0; buf = "" }
+  # Elide HTML comment spans from a line, tracking multi-line comments via the
+  # incomment state. index-based (not regex) so a <body> or a stray > living
+  # inside a comment never leaks out to the body detector below.
+  function strip_comments(s,   out, p) {
+    out = ""
+    while (1) {
+      if (incomment) {
+        p = index(s, "-->")
+        if (p == 0) return out          # whole remainder still inside comment
+        incomment = 0
+        s = substr(s, p + 3)
+      }
+      p = index(s, "<!--")
+      if (p == 0) return out s           # no further comment opens
+      out = out substr(s, 1, p - 1)      # keep text before the comment
+      incomment = 1
+      s = substr(s, p + 4)
+    }
+  }
 
-  # Detect <body> (drop head). Begin emitting on the line AFTER it.
+  BEGIN { inbody = (has_body ? 0 : 1); buffering = 0; buf = ""; incomment = 0 }
+
+  # Detect the real <body> (drop head). A <body> mentioned inside a <head>
+  # comment is stripped first, so it cannot false-trigger. Content trailing the
+  # open tag on the same line (e.g. <body>Intro) is reprocessed as body.
   inbody == 0 {
-    if ($0 ~ /<body[^>]*>/) { inbody = 1; next }
-    next
+    line = strip_comments($0)
+    if (match(line, /<body[^>]*>/)) {
+      inbody = 1
+      rest = substr(line, RSTART + RLENGTH)
+      if (rest ~ /[^ \t]/) { $0 = rest } else next   # fall through w/ remainder
+    } else next
   }
 
   # </body> ends the article regardless of state. Any buffered (still-open)
@@ -48,6 +74,13 @@ awk -v has_body="$has_body" '
 
   # A <script src=...doc.js ...> tag is an unambiguous tail anchor: stop now.
   /<script[^>]*doc\.js/ { buffering = 0; buf = ""; exit }
+
+  # A self-contained inline <script>…</script> on ONE line carrying a tail
+  # marker is itself the tail anchor (the multi-line case is handled by the
+  # buffering block below, which keys off the unclosed opening tag).
+  /<script[^>]*>.*<\/script>/ && /CLAUDE_TARGET|DOC_PATH|PAPERFLOW_/ {
+    buffering = 0; buf = ""; exit
+  }
 
   # An inline <script ...> opening tag: could be a legit body script or the
   # CLAUDE_TARGET tail. Buffer the block until we can tell.
