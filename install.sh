@@ -31,6 +31,10 @@
 #   --with-unlighthouse   Append the Unlighthouse fragment. Offers to
 #                         `npm i -g @unlighthouse/cli puppeteer` if
 #                         not already on PATH (asks first).
+#   --with-barkpark       Append the Barkpark fragment + write the
+#                         ~/.paperflow/barkpark.env template (ingest
+#                         URL + dev token). No binary check — Barkpark
+#                         is a local HTTP service.
 #   --reset               Tarball ~/.claude/{CLAUDE.md, hooks, skills}
 #                         and ~/.paperflow/ to
 #                         ~/.paperflow/backups/<YYYY-MM-DD-HHMMSS>.tar.gz,
@@ -54,6 +58,7 @@ set -euo pipefail
 WITH_OPENCLAW=0
 WITH_BROWSERBASE=0
 WITH_UNLIGHTHOUSE=0
+WITH_BARKPARK=0
 DO_RESET=0
 DO_RESET_DOCK=0
 MERGE_CLAUDEMD=0
@@ -63,12 +68,13 @@ for arg in "$@"; do
         --with-openclaw)     WITH_OPENCLAW=1 ;;
         --with-browserbase)  WITH_BROWSERBASE=1 ;;
         --with-unlighthouse) WITH_UNLIGHTHOUSE=1 ;;
+        --with-barkpark)     WITH_BARKPARK=1 ;;
         --reset)             DO_RESET=1 ;;
         --reset-dock)        DO_RESET_DOCK=1 ;;
         --merge|--merge-claude-md) MERGE_CLAUDEMD=1 ;;
         --yes)               YES=1 ;;
         --help|-h)
-            sed -n '2,40p' "$0"
+            sed -n '2,53p' "$0"
             exit 0
             ;;
         *)
@@ -236,6 +242,24 @@ if [ "$WITH_UNLIGHTHOUSE" -eq 1 ]; then
                 *) skip "unlighthouse: skipping install — fragment will still ship in CLAUDE.md" ;;
             esac
         fi
+    fi
+fi
+if [ "$WITH_BARKPARK" -eq 1 ]; then
+    # Barkpark is a local HTTP service — no binary check. Lay down the
+    # env template (skip-if-exists so a user's edited token survives a re-run).
+    mkdir -p "$HOME/.paperflow"
+    BARKPARK_ENV="$HOME/.paperflow/barkpark.env"
+    if [ -f "$BARKPARK_ENV" ]; then
+        skip "barkpark: $BARKPARK_ENV exists — leaving user values intact (delete to re-template)"
+    else
+        cat > "$BARKPARK_ENV" <<'EOF'
+# paperflow → Barkpark ingest contract. Sourced by the paper-streaming
+# integration when --with-barkpark is enabled. Edit the values to match
+# your local Barkpark instance.
+BARKPARK_INGEST_URL=http://127.0.0.1:4000/api/papers/ingest
+BARKPARK_INGEST_TOKEN=barkpark-dev-token
+EOF
+        ok "barkpark: wrote $BARKPARK_ENV template (local service — fragment will ship in CLAUDE.md)"
     fi
 fi
 
@@ -1195,7 +1219,7 @@ render_claude_md() {
     local dst="$1" tmp
     tmp="$(mktemp)"
     render "$REPO/claude-md.tmpl" "$tmp" ""
-    # Append fragments in a stable order: openclaw, browserbase, unlighthouse.
+    # Append fragments in a stable order: openclaw, browserbase, unlighthouse, barkpark.
     if [ "$WITH_OPENCLAW" -eq 1 ] && [ -f "$REPO/claude-md-fragments/openclaw.md" ]; then
         printf '\n\n' >> "$tmp"
         cat "$REPO/claude-md-fragments/openclaw.md" >> "$tmp"
@@ -1207,6 +1231,10 @@ render_claude_md() {
     if [ "$WITH_UNLIGHTHOUSE" -eq 1 ] && [ -f "$REPO/claude-md-fragments/unlighthouse.md" ]; then
         printf '\n\n' >> "$tmp"
         cat "$REPO/claude-md-fragments/unlighthouse.md" >> "$tmp"
+    fi
+    if [ "$WITH_BARKPARK" -eq 1 ] && [ -f "$REPO/claude-md-fragments/barkpark.md" ]; then
+        printf '\n\n' >> "$tmp"
+        cat "$REPO/claude-md-fragments/barkpark.md" >> "$tmp"
     fi
     mv "$tmp" "$dst"
 }
@@ -1298,7 +1326,8 @@ if [ -f "$CLAUDE_MD" ]; then
         [ "$WITH_OPENCLAW" -eq 1 ]     && append_fragment_if_missing openclaw     "$REPO/claude-md-fragments/openclaw.md"
         [ "$WITH_BROWSERBASE" -eq 1 ]  && append_fragment_if_missing browserbase  "$REPO/claude-md-fragments/browserbase.md"
         [ "$WITH_UNLIGHTHOUSE" -eq 1 ] && append_fragment_if_missing unlighthouse "$REPO/claude-md-fragments/unlighthouse.md"
-        if [ "$WITH_OPENCLAW" -eq 0 ] && [ "$WITH_BROWSERBASE" -eq 0 ] && [ "$WITH_UNLIGHTHOUSE" -eq 0 ]; then
+        [ "$WITH_BARKPARK" -eq 1 ]     && append_fragment_if_missing barkpark     "$REPO/claude-md-fragments/barkpark.md"
+        if [ "$WITH_OPENCLAW" -eq 0 ] && [ "$WITH_BROWSERBASE" -eq 0 ] && [ "$WITH_UNLIGHTHOUSE" -eq 0 ] && [ "$WITH_BARKPARK" -eq 0 ]; then
             skip "--merge passed but no --with-* flags set (nothing to append)"
         fi
     fi
@@ -1309,7 +1338,8 @@ else
     [ "$WITH_OPENCLAW" -eq 1 ]     && printf '\n<!-- paperflow:with-openclaw -->\n'     >> "$CLAUDE_MD"
     [ "$WITH_BROWSERBASE" -eq 1 ]  && printf '\n<!-- paperflow:with-browserbase -->\n'  >> "$CLAUDE_MD"
     [ "$WITH_UNLIGHTHOUSE" -eq 1 ] && printf '\n<!-- paperflow:with-unlighthouse -->\n' >> "$CLAUDE_MD"
-    ok "written (fragments: openclaw=$WITH_OPENCLAW browserbase=$WITH_BROWSERBASE unlighthouse=$WITH_UNLIGHTHOUSE)"
+    [ "$WITH_BARKPARK" -eq 1 ]     && printf '\n<!-- paperflow:with-barkpark -->\n'     >> "$CLAUDE_MD"
+    ok "written (fragments: openclaw=$WITH_OPENCLAW browserbase=$WITH_BROWSERBASE unlighthouse=$WITH_UNLIGHTHOUSE barkpark=$WITH_BARKPARK)"
 fi
 
 # ─── 12. Status ─────────────────────────────────────────────────────
