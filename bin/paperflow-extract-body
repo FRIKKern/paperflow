@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# paperflow-extract-body — emit a paperflow doc's article body to stdout.
+#
+# Input : path to a paperflow doc HTML (e.g. ~/docs/paperflow/specs/*.html).
+# Output: the content inside <body>, from the body open up to BUT NOT
+#         INCLUDING the paperflow script tail. The tail is anchored on the
+#         first <script src="...doc.js"> OR the first <script> block that
+#         contains window.CLAUDE_TARGET, and runs through </body>. <head>
+#         chrome is dropped. In-body <pre class="mermaid"> blocks and all
+#         article content survive. Idempotent: re-running on its own output
+#         (a bare body fragment with no tail) returns it unchanged.
+set -euo pipefail
+
+usage() {
+  echo "usage: paperflow-extract-body <doc.html>" >&2
+  exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+src="$1"
+[ -f "$src" ] || { echo "paperflow-extract-body: no such file: $src" >&2; exit 1; }
+
+# awk slices the file in one pass:
+#  - Strip everything up to and including the <body> tag (drops <head> chrome).
+#    With no <body> tag (a bare fragment) we emit from the top — idempotent.
+#  - Stop emitting at the tail anchor: a <script ... doc.js> line, or the
+#    <script> line that opens a block whose later lines hold CLAUDE_TARGET.
+#    To anchor the cut on the *opening* <script> (CLAUDE_TARGET sits a few
+#    lines below it), we buffer each plain <script> block and only flush it
+#    once we know it is not the tail.
+# Does the file even have a <body> tag? A bare fragment (this tool's own
+# output) has none — treat the whole thing as body so re-running is a no-op.
+has_body=0
+grep -q '<body' "$src" && has_body=1
+
+awk -v has_body="$has_body" '
+  BEGIN { inbody = (has_body ? 0 : 1); buffering = 0; buf = "" }
+
+  # Detect <body> (drop head). Begin emitting on the line AFTER it.
+  inbody == 0 {
+    if ($0 ~ /<body[^>]*>/) { inbody = 1; next }
+    next
+  }
+
+  # </body> ends the article regardless of state. Any buffered (still-open)
+  # block is part of the tail by construction, so discard it.
+  /<\/body>/ { buffering = 0; buf = ""; exit }
+
+  # A <script src=...doc.js ...> tag is an unambiguous tail anchor: stop now.
+  /<script[^>]*doc\.js/ { buffering = 0; buf = ""; exit }
+
+  # An inline <script ...> opening tag: could be a legit body script or the
+  # CLAUDE_TARGET tail. Buffer the block until we can tell.
+  buffering == 0 && /<script(>|[ \t][^>]*>)/ && $0 !~ /<\/script>/ {
+    buffering = 1; buf = $0; next
+  }
+
+  buffering == 1 {
+    # Tail markers anywhere in the buffered block => the whole block is tail.
+    # Drop the buffer (incl. the opening <script> tag) and stop.
+    if ($0 ~ /CLAUDE_TARGET/ || $0 ~ /DOC_PATH/ \
+        || $0 ~ /PAPERFLOW_/ || $0 ~ /doc\.js/) { buffering = 0; buf = ""; exit }
+    buf = buf "\n" $0
+    if ($0 ~ /<\/script>/) { print buf; buffering = 0; buf = "" }
+    next
+  }
+
+  { print }
+
+  END {
+    # A buffered block that never closed and held no markers: flush it.
+    if (buffering == 1) print buf
+  }
+' "$src"
