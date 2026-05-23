@@ -49,6 +49,19 @@ case "$FILE_PATH" in
     REL="${FILE_PATH#*/docs/}"
     URL="http://localhost:8767/$REL"
 
+    # --- Barkpark takeover (convergence MVP, masterplan Figure 6) -----------
+    # When --with-barkpark is enabled, papers open INSIDE Barkpark via a
+    # Phoenix LiveView (no reload, by construction) — driven by the
+    # event-on-save.sh seam. In that mode the cmux goto-reload below is the
+    # very "avid refresh" bug Figure 6 calls out, so it must NOT run: the
+    # LiveView is the surface. Detect the same U5 signal event-on-save uses
+    # (env var present, or the install-written env file exists) and bow out.
+    # When Barkpark is NOT enabled this is a no-op and the path below is
+    # entirely unchanged — no regression.
+    if [ -n "${BARKPARK_INGEST_URL:-}" ] || [ -f "$HOME/.paperflow/barkpark.env" ]; then
+      exit 0
+    fi
+
     # --- Dispatch: cmux browser surface (preferred) or OS browser (fallback).
     # B3 of paperflow-8hz (cmux-browser-default). Spec §1-3:
     #   ~/docs/paperflow/specs/2026-05-15-paperflow-cmux-integration-spec.html

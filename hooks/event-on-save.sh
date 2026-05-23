@@ -153,4 +153,147 @@ if [ -n "$PARENT_EVENT" ] && [ -n "$RESP" ]; then
   fi
 fi
 
+# ── Barkpark mirror (convergence MVP, masterplan Figure 5 S2 / Figure 6) ──
+# When --with-barkpark is enabled, mirror the saved paper into the LOCAL
+# Barkpark so it opens inside a Phoenix LiveView (no reload, by construction)
+# instead of the cmux goto-reload that auto-open-doc.sh would otherwise do.
+#
+# Enablement signal (reuse U5's contract — do NOT invent a new env name):
+#   - $BARKPARK_INGEST_URL already in the environment, OR
+#   - ~/.paperflow/barkpark.env exists (written by install.sh --with-barkpark)
+#     and is sourced here to populate BARKPARK_INGEST_URL / BARKPARK_INGEST_TOKEN.
+# When neither is present, this block is a complete no-op and the original
+# cmux/auto-open path runs unchanged — no regression.
+#
+# Defensive throughout: extract-body failure, an unreachable Barkpark, or a
+# missing `open` all log + fall back. The doc has already landed on disk; this
+# seam must NEVER break the save.
+BARKPARK_ENV_FILE="$HOME/.paperflow/barkpark.env"
+if [ -z "${BARKPARK_INGEST_URL:-}" ] && [ -f "$BARKPARK_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$BARKPARK_ENV_FILE" 2>/dev/null || true
+fi
+
+if [ -n "${BARKPARK_INGEST_URL:-}" ]; then
+  # ── Single repointable variables. The Barkpark ingest endpoint and the
+  # ── LiveView surface do not exist yet (a later barkpark unit builds them);
+  # ── these two lines are the only thing to touch when that side lands.
+  BARKPARK_INGEST_ENDPOINT="$BARKPARK_INGEST_URL"          # POST target for the body
+  BARKPARK_LIVEVIEW_PATH_TEMPLATE="/papers/{slug}"          # LiveView route; {slug} substituted
+
+  # Derive the LiveView base (scheme://host[:port]) from the ingest URL so a
+  # single env edit repoints both ingest and view. Strip everything from the
+  # first slash after the authority. Falls back to the dev default if the URL
+  # is malformed.
+  BARKPARK_ORIGIN="$(printf '%s' "$BARKPARK_INGEST_ENDPOINT" \
+    | /usr/bin/sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#')"
+  case "$BARKPARK_ORIGIN" in
+    *://*) ;;                                  # looks like scheme://authority
+    *) BARKPARK_ORIGIN="http://localhost:4000" ;;
+  esac
+
+  # Doc identity available at the seam: relative path, slug, goal id.
+  BP_SRC_REL="$SRC_REL"
+  BP_SLUG="$(/usr/bin/basename "$FILE_PATH" .html)"
+  BP_GOAL_ID="$GOAL_ID"
+  # Fill {slug} via shell parameter expansion (NOT sed) — a slug containing
+  # sed metacharacters (& # \) would otherwise corrupt or break the command.
+  BP_LIVEVIEW_PATH="${BARKPARK_LIVEVIEW_PATH_TEMPLATE//\{slug\}/$BP_SLUG}"
+  BP_LIVEVIEW_URL="${BARKPARK_ORIGIN}${BP_LIVEVIEW_PATH}"
+
+  BP_LOG_DIR="$HOME/.paperflow"
+  /bin/mkdir -p "$BP_LOG_DIR" 2>/dev/null || true
+  BP_LOG="$BP_LOG_DIR/barkpark-mirror.log"
+  bp_log() {
+    /usr/bin/env jq -nc \
+      --arg ts "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg event "$1" \
+      --arg slug "$BP_SLUG" \
+      --arg src "$BP_SRC_REL" \
+      --arg goal "$BP_GOAL_ID" \
+      --arg url "$BP_LIVEVIEW_URL" \
+      --arg detail "${2:-}" \
+      '{ts:$ts, event:$event, slug:$slug, source:$src, goal:$goal, liveview_url:$url, detail:$detail}' \
+      >> "$BP_LOG" 2>/dev/null || true
+  }
+
+  # 1. Extract the clean article body (strips the doc.js / CLAUDE_TARGET tail).
+  #    Resolve the helper from PATH, then ~/.local/bin, then the source tree —
+  #    mirrors the resolution other paperflow hooks use.
+  EXTRACT_BIN="$(command -v paperflow-extract-body 2>/dev/null || true)"
+  [ -z "$EXTRACT_BIN" ] && [ -x "$HOME/.local/bin/paperflow-extract-body" ] && EXTRACT_BIN="$HOME/.local/bin/paperflow-extract-body"
+  [ -z "$EXTRACT_BIN" ] && [ -x "$(/usr/bin/dirname "$0")/../bin/paperflow-extract-body" ] && EXTRACT_BIN="$(/usr/bin/dirname "$0")/../bin/paperflow-extract-body"
+
+  BP_BODY=""
+  if [ -n "$EXTRACT_BIN" ] && [ -x "$EXTRACT_BIN" ]; then
+    BP_BODY="$("$EXTRACT_BIN" "$FILE_PATH" 2>/dev/null || true)"
+  fi
+
+  if [ -z "$BP_BODY" ]; then
+    # Defensive: no body (helper missing or empty) — log and fall back to the
+    # original cmux/auto-open path by NOT suppressing it (see suppress flag).
+    bp_log "extract-failed" "paperflow-extract-body unresolved or produced empty body"
+  else
+    # 2. POST the body + identity to the local Barkpark ingest URL. jq builds
+    #    the JSON so the body's quotes/newlines survive. Bearer token optional.
+    BP_REQ_BODY="$(/usr/bin/env jq -nc \
+      --arg source_doc "$BP_SRC_REL" \
+      --arg slug       "$BP_SLUG" \
+      --arg goal_id    "$BP_GOAL_ID" \
+      --arg event_type "$EVT" \
+      --arg body_html  "$BP_BODY" \
+      '{source_doc:$source_doc, slug:$slug, event_type:$event_type, body_html:$body_html}
+       + (if $goal_id != "" then {goal_id:$goal_id} else {} end)' 2>/dev/null || true)"
+
+    if [ -n "$BP_REQ_BODY" ]; then
+      # Build curl argv. PAPERFLOW_DRYRUN=1 echoes the curl invocation to the
+      # log INSTEAD of running it — the documented dry-run hook for tests
+      # (the Barkpark server does not exist yet, so this is the only way to
+      # exercise the path). 2s timeout — never block the save.
+      set -- /usr/bin/curl -s --max-time 2 \
+        -H 'Content-Type: application/json'
+      if [ -n "${BARKPARK_INGEST_TOKEN:-}" ]; then
+        set -- "$@" -H "Authorization: Bearer ${BARKPARK_INGEST_TOKEN}"
+      fi
+      set -- "$@" --data-binary "$BP_REQ_BODY" "$BARKPARK_INGEST_ENDPOINT"
+
+      if [ "${PAPERFLOW_DRYRUN:-0}" = "1" ]; then
+        # Dry-run: record that extract-body ran (body non-empty) and the exact
+        # POST target, without hitting the network.
+        bp_log "dryrun-post" "POST ${BARKPARK_INGEST_ENDPOINT}"
+        BP_OK=1
+      else
+        if "$@" >/dev/null 2>&1; then
+          BP_OK=1
+          bp_log "ingest-ok" "POST ${BARKPARK_INGEST_ENDPOINT}"
+        else
+          BP_OK=0
+          bp_log "ingest-failed" "Barkpark unreachable at ${BARKPARK_INGEST_ENDPOINT} — doc still on disk"
+        fi
+      fi
+
+      # 3. Open the Barkpark LiveView URL INSTEAD of the cmux goto-reload.
+      #    auto-open-doc.sh independently detects the same U5 enablement signal
+      #    and bows out (it runs FIRST in PostToolUse order, so a per-file
+      #    handshake here couldn't gate it anyway) — the LiveView is the
+      #    surface. Here we just open it. BP_OK is unused for branching: even
+      #    if the ingest POST failed (Barkpark unreachable) we still try to
+      #    surface the LiveView; if THAT fails too we log and the doc remains
+      #    on disk. The save is never broken.
+      : "$BP_OK"  # retained for log/debugging symmetry; not a control gate
+      if [ "${PAPERFLOW_DRYRUN:-0}" = "1" ]; then
+        bp_log "dryrun-open" "open ${BP_LIVEVIEW_URL}"
+      else
+        if /usr/bin/open "$BP_LIVEVIEW_URL" >/dev/null 2>&1; then
+          bp_log "open-ok" "open ${BP_LIVEVIEW_URL}"
+        else
+          bp_log "open-failed" "could not open ${BP_LIVEVIEW_URL}"
+        fi
+      fi
+    else
+      bp_log "request-build-failed" "jq could not assemble the ingest body"
+    fi
+  fi
+fi
+
 exit 0
