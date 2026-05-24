@@ -229,7 +229,99 @@ if [ -n "${BARKPARK_INGEST_URL:-}" ]; then
     BP_BODY="$("$EXTRACT_BIN" "$FILE_PATH" 2>/dev/null || true)"
   fi
 
-  if [ -z "$BP_BODY" ]; then
+  # ── 1b. NATIVE portable-doc blocks (P5 automate) ──────────────────────────
+  # For article-grammar paperflow docs, convert the HTML to native portable-doc
+  # blocks and POST {slug, style:"article", blocks} so Barkpark renders the doc
+  # natively in article mode at /papers/:slug — instead of storing raw
+  # body_html. Grills and questionnaires use a different (form) grammar and are
+  # OUT OF SCOPE: they keep the legacy body_html mirror untouched.
+  #
+  # CRITICAL ROBUSTNESS: if the converter is missing, errors, or yields no
+  # blocks, BP_BLOCKS stays empty and we fall through to the body_html path
+  # below — the save is never broken. The converter is resolved the same way
+  # as paperflow-extract-body (PATH → ~/.local/bin → source tree).
+  BP_BLOCKS=""
+  case "$EVT" in
+    grill-written|questionnaire-written)
+      # Form grammar — out of scope. Leave BP_BLOCKS empty → body_html path.
+      : ;;
+    *)
+      BLOCKS_BIN="$(command -v paperflow-to-blocks 2>/dev/null || true)"
+      [ -z "$BLOCKS_BIN" ] && [ -x "$HOME/.local/bin/paperflow-to-blocks" ] && BLOCKS_BIN="$HOME/.local/bin/paperflow-to-blocks"
+      [ -z "$BLOCKS_BIN" ] && [ -x "$(/usr/bin/dirname "$0")/../bin/paperflow-to-blocks" ] && BLOCKS_BIN="$(/usr/bin/dirname "$0")/../bin/paperflow-to-blocks"
+      if [ -n "$BLOCKS_BIN" ] && [ -x "$BLOCKS_BIN" ]; then
+        # Emit just the blocks array. A non-empty JSON array ("[ … ]" with at
+        # least one element) is the gate; anything else (converter error, empty
+        # doc, "[]") falls through. jq validates the shape so a partial/garbled
+        # stdout can't reach Barkpark.
+        BP_BLOCKS_RAW="$("$BLOCKS_BIN" "$FILE_PATH" --blocks 2>/dev/null || true)"
+        if [ -n "$BP_BLOCKS_RAW" ]; then
+          BP_BLOCKS="$(printf '%s' "$BP_BLOCKS_RAW" \
+            | /usr/bin/env jq -c 'if (type=="array" and length>0) then . else empty end' 2>/dev/null || true)"
+        fi
+      fi
+      ;;
+  esac
+
+  if [ -n "$BP_BLOCKS" ]; then
+    # ── Native-blocks POST. Build {slug, style:"article", blocks, …} and POST
+    # ── to the SAME ingest endpoint. Bearer token optional. On any failure
+    # ── (jq build, unreachable, non-2xx) we log and STILL try to open the
+    # ── LiveView; the doc is already on disk. exit 0 always.
+    BP_REQ_BODY="$(/usr/bin/env jq -nc \
+      --arg source_doc "$BP_SRC_REL" \
+      --arg slug       "$BP_SLUG" \
+      --arg goal_id    "$BP_GOAL_ID" \
+      --arg event_type "$EVT" \
+      --argjson blocks "$BP_BLOCKS" \
+      '{source_doc:$source_doc, slug:$slug, event_type:$event_type, style:"article", blocks:$blocks}
+       + (if $goal_id != "" then {goal_id:$goal_id} else {} end)' 2>/dev/null || true)"
+
+    if [ -n "$BP_REQ_BODY" ]; then
+      set -- /usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+        -H 'Content-Type: application/json'
+      if [ -n "${BARKPARK_INGEST_TOKEN:-}" ]; then
+        set -- "$@" -H "Authorization: Bearer ${BARKPARK_INGEST_TOKEN}"
+      fi
+      set -- "$@" --data-binary "$BP_REQ_BODY" "$BARKPARK_INGEST_ENDPOINT"
+
+      if [ "${PAPERFLOW_DRYRUN:-0}" = "1" ]; then
+        bp_log "dryrun-post-blocks" "POST ${BARKPARK_INGEST_ENDPOINT} (native blocks)"
+        BP_OK=1
+      else
+        BP_CODE="$("$@" 2>/dev/null || true)"
+        case "$BP_CODE" in
+          2*)
+            BP_OK=1
+            bp_log "ingest-blocks-ok" "POST ${BARKPARK_INGEST_ENDPOINT} -> ${BP_CODE} (native blocks)" ;;
+          *)
+            BP_OK=0
+            bp_log "ingest-blocks-failed" "POST ${BARKPARK_INGEST_ENDPOINT} -> ${BP_CODE:-no-response} — doc still on disk" ;;
+        esac
+      fi
+
+      : "$BP_OK"  # not a control gate — surface the LiveView either way
+      if [ "${PAPERFLOW_DRYRUN:-0}" = "1" ]; then
+        bp_log "dryrun-open" "open ${BP_LIVEVIEW_URL}"
+      else
+        if /usr/bin/open "$BP_LIVEVIEW_URL" >/dev/null 2>&1; then
+          bp_log "open-ok" "open ${BP_LIVEVIEW_URL}"
+        else
+          bp_log "open-failed" "could not open ${BP_LIVEVIEW_URL}"
+        fi
+      fi
+    else
+      # jq could not assemble the native body — fall back to body_html below.
+      bp_log "blocks-request-build-failed" "jq could not assemble the native-blocks body; falling back to body_html"
+      BP_BLOCKS=""
+    fi
+  fi
+
+  if [ -n "$BP_BLOCKS" ]; then
+    # Native path already handled the mirror + open above — skip the legacy
+    # body_html block entirely.
+    :
+  elif [ -z "$BP_BODY" ]; then
     # Defensive: no body (helper missing or empty) — log and fall back to the
     # original cmux/auto-open path by NOT suppressing it (see suppress flag).
     bp_log "extract-failed" "paperflow-extract-body unresolved or produced empty body"
