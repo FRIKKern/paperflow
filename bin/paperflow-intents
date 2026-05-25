@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# paperflow-intents — read side of the Option B loop.
+#
+# Lists the pending action:* / simplify-* intents that Barkpark stores for
+# paperflow to pick up (rail button clicks that originated inside a Phoenix
+# LiveView surface), and marks them processed once acted on.
+#
+# Barkpark side (U6a) exposes:
+#   GET  <url>/v1/paperflow/intents              -> {"intents":[ {id,event_type,goal_id,paper_slug,branch,payload_html,inserted_at}, … ]}
+#   POST <url>/v1/paperflow/intents/:id/processed -> {"ok":true,"id":"…"} | 404 {"ok":false,"error":"not_found"}
+# Both endpoints are token-gated via an Authorization: Bearer header.
+
+usage() {
+  cat <<'EOF'
+Usage: paperflow-intents [--json | --mark <id> | --help]
+
+  (no args)     List pending intents, one per line, with a count footer.
+  --json        Print the raw GET response JSON (for piping).
+  --mark <id>   POST the intent <id> as processed.
+  --help, -h    Show this help.
+
+Config (env, first non-empty wins):
+  Base URL : $BARKPARK_INTENTS_URL → $BARKPARK_INGEST_URL → $BARKPARK_API_URL → http://localhost:4000
+  Token    : $BARKPARK_INGEST_TOKEN → paperflow-dev-ingest-token (dev default)
+  Env file : ~/.paperflow/barkpark.env is sourced if present and URL not already set.
+EOF
+}
+
+# ── Config sourcing — mirror hooks/event-on-save.sh's env-file fallback. ──
+BARKPARK_ENV_FILE="$HOME/.paperflow/barkpark.env"
+if [ -z "${BARKPARK_INGEST_URL:-}" ] && [ -f "$BARKPARK_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$BARKPARK_ENV_FILE" 2>/dev/null || true
+fi
+
+# Base URL: dedicated intents var, then the ingest URL (origin), then api, then dev default.
+BASE_URL="${BARKPARK_INTENTS_URL:-${BARKPARK_INGEST_URL:-${BARKPARK_API_URL:-http://localhost:4000}}}"
+# Reduce a full ingest URL (which may carry a path) to its scheme://authority origin.
+ORIGIN="$(printf '%s' "$BASE_URL" \
+  | /usr/bin/sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#')"
+case "$ORIGIN" in
+  *://*) BASE_URL="$ORIGIN" ;;
+  *) ;;                       # not a scheme://authority — keep BASE_URL as given
+esac
+# Strip any trailing slash so path concatenation is clean.
+BASE_URL="${BASE_URL%/}"
+
+TOKEN="${BARKPARK_INGEST_TOKEN:-paperflow-dev-ingest-token}"
+
+INTENTS_PATH="/v1/paperflow/intents"
+
+have_jq() { command -v jq >/dev/null 2>&1; }
+
+# curl wrapper. Captures body to stdout; non-2xx → message on stderr + non-zero exit.
+# Token travels only in the header, never echoed.
+http_get() {
+  curl --max-time 10 -fsS \
+    -H "Authorization: Bearer ${TOKEN}" \
+    "${BASE_URL}${INTENTS_PATH}"
+}
+
+http_post_processed() {
+  # $1 = intent id
+  curl --max-time 10 -fsS -X POST \
+    -H "Authorization: Bearer ${TOKEN}" \
+    "${BASE_URL}${INTENTS_PATH}/$1/processed"
+}
+
+cmd_json() {
+  if ! body="$(http_get 2>/tmp/paperflow-intents.err)"; then
+    echo "paperflow-intents: GET ${BASE_URL}${INTENTS_PATH} failed: $(cat /tmp/paperflow-intents.err 2>/dev/null)" >&2
+    rm -f /tmp/paperflow-intents.err
+    return 1
+  fi
+  rm -f /tmp/paperflow-intents.err
+  printf '%s\n' "$body"
+}
+
+cmd_list() {
+  if ! body="$(http_get 2>/tmp/paperflow-intents.err)"; then
+    echo "paperflow-intents: GET ${BASE_URL}${INTENTS_PATH} failed: $(cat /tmp/paperflow-intents.err 2>/dev/null)" >&2
+    rm -f /tmp/paperflow-intents.err
+    return 1
+  fi
+  rm -f /tmp/paperflow-intents.err
+
+  if have_jq; then
+    count="$(printf '%s' "$body" | jq -r '.intents | length' 2>/dev/null || echo 0)"
+    if [ "${count:-0}" = "0" ]; then
+      echo "No pending intents."
+      return 0
+    fi
+    # One line per intent: <id>  <event_type>  <paper_slug>  [<branch>]  <payload-snippet>
+    printf '%s' "$body" | jq -r '
+      .intents[]
+      | ( .payload_html // "" | gsub("\\s+"; " ") | .[0:60] ) as $snip
+      | "\(.id)  \(.event_type)  \(.paper_slug // "-")  [\(.branch // "-")]  \($snip)"
+    '
+    echo "${count} pending intent(s)"
+  else
+    # jq-optional fallback: dump the raw JSON and a coarse count via grep.
+    printf '%s\n' "$body"
+    count="$(printf '%s' "$body" | grep -o '"id"' | wc -l | tr -d ' ')"
+    if [ "${count:-0}" = "0" ]; then
+      echo "No pending intents."
+    else
+      echo "${count} pending intent(s)"
+    fi
+  fi
+}
+
+cmd_mark() {
+  id="$1"
+  if [ -z "$id" ]; then
+    echo "paperflow-intents: --mark requires an intent id" >&2
+    return 2
+  fi
+  if ! body="$(http_post_processed "$id" 2>/tmp/paperflow-intents.err)"; then
+    # -f makes curl fail on 404; surface whatever the server said (or the status).
+    echo "paperflow-intents: mark ${id} failed: $(cat /tmp/paperflow-intents.err 2>/dev/null)" >&2
+    rm -f /tmp/paperflow-intents.err
+    return 1
+  fi
+  rm -f /tmp/paperflow-intents.err
+
+  if have_jq; then
+    ok="$(printf '%s' "$body" | jq -r '.ok // false' 2>/dev/null || echo false)"
+    if [ "$ok" = "true" ]; then
+      echo "marked ${id}"
+      return 0
+    fi
+    err="$(printf '%s' "$body" | jq -r '.error // "unknown"' 2>/dev/null || echo unknown)"
+    echo "paperflow-intents: mark ${id} not ok: ${err}" >&2
+    return 1
+  else
+    case "$body" in
+      *'"ok":true'*|*'"ok": true'*) echo "marked ${id}"; return 0 ;;
+      *) echo "paperflow-intents: mark ${id} not ok: ${body}" >&2; return 1 ;;
+    esac
+  fi
+}
+
+main() {
+  case "${1:-}" in
+    -h|--help)
+      usage
+      ;;
+    --json)
+      cmd_json
+      ;;
+    --mark)
+      cmd_mark "${2:-}"
+      ;;
+    "")
+      cmd_list
+      ;;
+    *)
+      echo "paperflow-intents: unknown argument '$1'" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
