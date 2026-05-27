@@ -10,9 +10,24 @@
 #   --clear              remove both pointers for current scope (not unscoped)
 #   --list-all           JSON map of every scope's pointer pair
 #   --migrate-legacy     copy unscoped → current-scope pointers (preserve legacy)
+#   --validate goal|phase     verify scoped pointer exists in barkpark (W7c)
+#   --migrate-bd-to-doc       reserved for the post-W7d UUID flip (currently a noop)
 #   --help               this text
 #
-# Exit codes: 0 ok · 1 empty --read · 2 args · 3 fatal write.
+# Exit codes: 0 ok · 1 empty pointer · 2 args / drift · 3 fatal write.
+#
+# ── Pointer-namespace invariant (W7c) ──────────────────────────────────
+# Pointer files hold bd-id strings (e.g. "paperflow-7r9"). Under the
+# current dual-write substrate (W7c), barkpark stores the SAME string in
+# its `doc_id` column when paperflow-mirror writes a goal/phase document.
+# So the pointer's value IS the barkpark doc_id — there is no namespace
+# translation today. The post-W7d flip will keep this invariant.
+#
+# When PAPERFLOW_MIRROR_GOALS=1 + PAPERFLOW_BARKPARK_URL set,
+# `--validate` round-trips the pointer through barkpark to surface drift
+# (pointer set locally but the doc was never mirrored / was deleted).
+# When the mirror env is unset, `--validate` exits 0 silently — the daily
+# driver remains validation-free.
 
 set -eu
 
@@ -30,11 +45,22 @@ Usage: paperflow-active-scope <subcommand> [args]
   --clear                clear scoped pointers for current scope (legacy untouched)
   --list-all             JSON of every scope's {goal, phase}
   --migrate-legacy       copy unscoped pointers into current scope (one-shot)
+  --validate goal|phase  verify scoped pointer exists in barkpark (W7c, gated on PAPERFLOW_MIRROR_GOALS=1)
+  --migrate-bd-to-doc    reserved for post-W7d UUID flip — currently a noop
+                         (doc_id == bd-id in the W7c substrate)
   --help                 show this text
+
+Pointer-namespace invariant:
+  Pointer values are bd-ids today. Barkpark documents are keyed by the same
+  string in their doc_id column under the W7c dual-write substrate. There is
+  no translation table; --validate just round-trips the pointer through
+  barkpark to surface drift when the mirror env is set.
 
 Examples:
   paperflow-active-scope --resolve
   paperflow-active-scope --read goal
+  PAPERFLOW_MIRROR_GOALS=1 PAPERFLOW_BARKPARK_URL=http://localhost:4001 \
+    paperflow-active-scope --validate goal
 EOF
 }
 
@@ -135,12 +161,119 @@ cmd_write() {
   local scope; scope="$(_resolve)"
   local p; p="$(_path_for "$kind" "$scope")"
   printf '%s\n' "$id" > "$p" || { echo "fatal: write $p" >&2; exit 3; }
+
+  # W7c: when the mirror is enabled, post-write probe barkpark to surface
+  # drift early. Warning-only — barkpark might be down, or the goal/phase
+  # might be created milliseconds later by paperflow-mirror-{goal,phase}
+  # in a race with this write. The write itself always succeeds.
+  if [ "${PAPERFLOW_MIRROR_GOALS:-0}" = "1" ] && [ -n "${PAPERFLOW_BARKPARK_URL:-}" ]; then
+    _validate_pointer "$kind" "$id" "warn" || true
+  fi
 }
 
 cmd_clear() {
   local scope; scope="$(_resolve)"
   [ "$scope" = "unscoped" ] && return 0
   rm -f "$(_path_for goal "$scope")" "$(_path_for phase "$scope")" 2>/dev/null || true
+}
+
+# _validate_pointer <kind> <id> <mode>
+#   mode = "warn" → log to stderr but always exit 0
+#   mode = "strict" → exit 2 on drift, exit 0 on found
+#
+# Sources lib/barkpark-mirror.sh on demand so the helper has zero impact
+# on the daily-driver no-env path (the file isn't even read).
+_validate_pointer() {
+  local kind="$1" id="$2" mode="${3:-strict}"
+  # If the env gates aren't set, both validate paths short-circuit to 0.
+  if [ "${PAPERFLOW_MIRROR_GOALS:-0}" != "1" ] || [ -z "${PAPERFLOW_BARKPARK_URL:-}" ]; then
+    return 0
+  fi
+  # Locate the mirror lib next to this script (../lib/barkpark-mirror.sh).
+  local self_dir lib
+  self_dir="$(cd "$(dirname "$0")" && pwd)"
+  lib="$self_dir/../lib/barkpark-mirror.sh"
+  if [ ! -r "$lib" ]; then
+    # Fall back to PAPERFLOW_LIB_DIR or a sibling install-time location.
+    lib="${PAPERFLOW_LIB_DIR:-$HOME/.paperflow/lib}/barkpark-mirror.sh"
+  fi
+  if [ ! -r "$lib" ]; then
+    if [ "$mode" = "strict" ]; then
+      echo "validate: barkpark-mirror.sh not found (mirror lib missing)" >&2
+      exit 2
+    fi
+    return 0
+  fi
+  # shellcheck disable=SC1090
+  . "$lib"
+  if ! command -v barkpark_doc_exists >/dev/null 2>&1; then
+    if [ "$mode" = "strict" ]; then
+      echo "validate: barkpark_doc_exists not loaded" >&2
+      exit 2
+    fi
+    return 0
+  fi
+  # set -e is active for the whole script — bare-call would propagate
+  # the helper's non-zero rc and exit the script silently before the
+  # case branch can emit the drift message. Capture via `|| rc=$?`.
+  local rc=0
+  barkpark_doc_exists "$kind" "$id" || rc=$?
+  case "$rc" in
+    0) [ "$mode" = "warn" ] || return 0 ;;
+    1) # mirror disabled inside the helper — treat as no-op
+       return 0 ;;
+    2) # drift — pointer set but doc absent / wrong kind
+       if [ "$mode" = "warn" ]; then
+         echo "warn: pointer $kind=$id not found in barkpark ($PAPERFLOW_BARKPARK_URL) — drift" >&2
+         return 0
+       fi
+       echo "drift: pointer $kind=$id not found in barkpark ($PAPERFLOW_BARKPARK_URL)" >&2
+       exit 2 ;;
+    3) # unreachable — be lenient even in strict mode (barkpark may be
+       # down; the daily driver still works). Stay quiet in warn mode.
+       if [ "$mode" = "strict" ]; then
+         echo "warn: barkpark unreachable at $PAPERFLOW_BARKPARK_URL — skipping validate" >&2
+       fi
+       return 0 ;;
+    *) if [ "$mode" = "strict" ]; then
+         echo "validate: unexpected exit $rc from barkpark_doc_exists" >&2
+         exit 2
+       fi
+       return 0 ;;
+  esac
+}
+
+cmd_validate() {
+  local kind="${1:-}"
+  case "$kind" in goal|phase) ;; *) echo "usage: --validate goal|phase" >&2; exit 2 ;; esac
+  # When the env isn't set we are a silent no-op (daily-driver invariant).
+  if [ "${PAPERFLOW_MIRROR_GOALS:-0}" != "1" ] || [ -z "${PAPERFLOW_BARKPARK_URL:-}" ]; then
+    return 0
+  fi
+  local scope; scope="$(_resolve)"
+  local p; p="$(_path_for "$kind" "$scope")"
+  local val=""
+  [ -r "$p" ] && val="$(head -n1 "$p" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$val" ] && [ "$scope" != "unscoped" ]; then
+    local legacy; legacy="$(_path_for "$kind" "unscoped")"
+    [ -r "$legacy" ] && val="$(head -n1 "$legacy" 2>/dev/null | tr -d '[:space:]')"
+  fi
+  if [ -z "$val" ]; then
+    echo "validate: no $kind pointer set for scope $scope" >&2
+    exit 1
+  fi
+  _validate_pointer "$kind" "$val" "strict"
+}
+
+cmd_migrate_bd_to_doc() {
+  # Reserved for the post-W7d substrate flip, where barkpark may begin
+  # issuing UUIDs as the primary doc_id and bd-ids become a secondary
+  # column. Today the two namespaces are unified (doc_id == bd-id under
+  # the W7c dual-write substrate), so this subcommand is a deliberate
+  # noop — present so callers can probe the existence/behaviour ahead of
+  # the flip without environment branching.
+  echo "noop: doc_id == bd-id in current substrate (W7c) — no migration needed"
+  return 0
 }
 
 cmd_list_all() {
@@ -236,12 +369,14 @@ cmd_migrate_legacy() {
 
 # ── Dispatch ───────────────────────────────────────────────────────
 case "${1:-}" in
-  --resolve)        cmd_resolve ;;
-  --read)           shift; cmd_read "${1:-}" ;;
-  --write)          shift; cmd_write "${1:-}" "${2:-}" ;;
-  --clear)          cmd_clear ;;
-  --list-all)       cmd_list_all ;;
-  --migrate-legacy) cmd_migrate_legacy ;;
-  --help|-h|"")     usage ;;
+  --resolve)           cmd_resolve ;;
+  --read)              shift; cmd_read "${1:-}" ;;
+  --write)             shift; cmd_write "${1:-}" "${2:-}" ;;
+  --clear)             cmd_clear ;;
+  --list-all)          cmd_list_all ;;
+  --migrate-legacy)    cmd_migrate_legacy ;;
+  --validate)          shift; cmd_validate "${1:-}" ;;
+  --migrate-bd-to-doc) cmd_migrate_bd_to_doc ;;
+  --help|-h|"")        usage ;;
   *) echo "unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
 esac

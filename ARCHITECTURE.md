@@ -57,7 +57,12 @@ paperflow-active-scope --read goal       # current scope's active goal
 paperflow-active-scope --write goal <id> # set it
 paperflow-active-scope --list-all        # see every scope's state
 paperflow-active-scope --resolve         # debug: print current scope token
+paperflow-active-scope --validate goal   # W7c: barkpark round-trip (gated on PAPERFLOW_MIRROR_GOALS=1)
 ```
+
+#### Pointer namespace (W7c)
+
+Pointer files hold bd-id strings (e.g. `paperflow-7r9`). Under the W7c dual-write substrate, barkpark stores the SAME string in its `doc_id` column when `paperflow-mirror-{goal,phase}` writes a document — so the pointer's value IS the barkpark `doc_id`. No translation table, no migration. `--validate goal|phase` round-trips the pointer through `GET /v1/tasks/:doc_id` to surface drift (pointer set locally but the mirror never landed / the doc was deleted). When `PAPERFLOW_MIRROR_GOALS` is unset, `--validate` is a silent no-op, and `--write` skips its post-write probe — the daily driver remains validation-free. The reserved `--migrate-bd-to-doc` subcommand is a present-day noop kept so callers can probe ahead of the post-W7d UUID flip without environment branching.
 
 ### Umbrella label
 

@@ -35,6 +35,20 @@
 #   barkpark_mirror_goal  <goal_id> <title> [<slug>]
 #   barkpark_mirror_phase <phase_id> <phase_name> <parent_goal_id> [<title>]
 # Both return 0 always — caller must not branch on exit code.
+#
+#   barkpark_doc_exists   <kind> <doc_id>
+#     Existence + kind probe for the namespace-validation path used by
+#     `bin/paperflow-active-scope --validate`. UNLIKE the mirror writes,
+#     this DOES return a meaningful exit code:
+#       0  → barkpark has a doc whose doc_id matches and whose type == kind
+#       1  → mirror-disabled (env unset / curl missing) — caller decides
+#       2  → barkpark reachable but no matching doc (drift)
+#       3  → barkpark unreachable / curl error (transient — caller decides)
+#     Tries the raw doc_id first, then the persisted "drafts.<id>" form —
+#     same dual-candidate trick bd-shim uses (Barkpark.Content.upsert_document
+#     prefixes inserted ids with "drafts." for the draft→published lifecycle;
+#     paperflow consumers never see / care about the prefix). doc_id IS the
+#     bd-id-as-string under the current dual-write substrate; no translation.
 
 BARKPARK_MIRROR_LOG="${BARKPARK_MIRROR_LOG:-$HOME/.paperflow/doc-meta-mirror.log}"
 BARKPARK_MIRROR_TOKEN="${BARKPARK_MIRROR_TOKEN:-barkpark-dev-token}"
@@ -171,4 +185,66 @@ barkpark_mirror_phase() {
         *)                   _barkpark_mirror_log "warn: phase mirror returned err id=$phase_id resp=$out" ;;
     esac
     return 0
+}
+
+# barkpark_doc_exists <kind> <doc_id>
+#   Exit 0  → found, type matches kind
+#   Exit 1  → mirror disabled (env unset or curl missing) — caller decides
+#   Exit 2  → reachable but no matching doc (drift)
+#   Exit 3  → unreachable / transport error
+barkpark_doc_exists() {
+    local kind="$1" doc_id="$2"
+    [ -n "$kind" ]   || { _barkpark_mirror_log "skip: barkpark_doc_exists missing kind";   return 1; }
+    [ -n "$doc_id" ] || { _barkpark_mirror_log "skip: barkpark_doc_exists missing doc_id"; return 1; }
+    _barkpark_mirror_enabled || return 1
+
+    # Try the bare id first, then the persisted "drafts.<id>" form.
+    local candidate http body rc seen_2xx=0
+    for candidate in "$doc_id" "drafts.$doc_id"; do
+        # Single roundtrip — capture status + body in one curl call.
+        body="$(curl -sS -m 3 \
+            -o /dev/null \
+            -w 'HTTP:%{http_code}\n' \
+            -H "Authorization: Bearer $BARKPARK_MIRROR_TOKEN" \
+            "$PAPERFLOW_BARKPARK_URL/v1/tasks/$candidate" 2>&1)"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            _barkpark_mirror_log "warn: barkpark_doc_exists curl rc=$rc candidate=$candidate"
+            continue
+        fi
+        http="${body##*HTTP:}"
+        http="${http%$'\n'}"
+        case "$http" in 2*) seen_2xx=1; break ;; esac
+    done
+
+    if [ "$seen_2xx" -ne 1 ]; then
+        # Determine reachability — a final probe against the list endpoint
+        # (a 2xx/4xx means "barkpark is answering"; anything else is unreachable).
+        local probe
+        probe="$(curl -s -m 2 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $BARKPARK_MIRROR_TOKEN" \
+            "$PAPERFLOW_BARKPARK_URL/v1/tasks" 2>/dev/null || echo 000)"
+        case "$probe" in
+            2*|4*) return 2 ;;
+            *)     return 3 ;;
+        esac
+    fi
+
+    # Found a 2xx — now confirm the doc's type matches the requested kind.
+    # Re-fetch with body so we can inspect content.kind / type. Re-uses the
+    # winning candidate captured above.
+    body="$(curl -sS -m 3 \
+        -H "Authorization: Bearer $BARKPARK_MIRROR_TOKEN" \
+        "$PAPERFLOW_BARKPARK_URL/v1/tasks/$candidate" 2>/dev/null)"
+    local got_type
+    if command -v jq >/dev/null 2>&1; then
+        got_type="$(printf '%s' "$body" | jq -r '.doc.type // .doc.content.kind // empty' 2>/dev/null)"
+    else
+        got_type="$(printf '%s' "$body" | sed -n 's/.*"type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    fi
+    if [ "$got_type" = "$kind" ]; then
+        return 0
+    fi
+    _barkpark_mirror_log "warn: barkpark_doc_exists kind drift doc_id=$doc_id want=$kind got=${got_type:-<empty>}"
+    return 2
 }
