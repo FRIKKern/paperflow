@@ -1,0 +1,153 @@
+[
+  {
+    "assignee": "Frikkern",
+    "comment_count": 0,
+    "created_at": "2026-05-27T19:27:21Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T21:27:22Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-rx0",
+        "issue_id": "paperflow-5wk",
+        "metadata": "{}",
+        "type": "blocks"
+      },
+      {
+        "created_at": "2026-05-27T21:27:22Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-xmb",
+        "issue_id": "paperflow-5wk",
+        "metadata": "{}",
+        "type": "blocks"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 0,
+    "description": "W7b step 2. Capture every distinct bd … --json invocation across statusline / dock-daemon / claim-files / goal-merge / skills. Freeze each as golden fixture in portable-doc/test/fixtures/bd-shim/<cmd>.json. Contract test: shim against seeded Postgres → jq -S . shim_out == jq -S . golden. Dock-daemon active-context grows a one-line 'shim ok' probe (red on failure). Gate-B: every fixture green. Deps: w7-07.",
+    "id": "paperflow-5wk",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "phase-build",
+      "subwave-w7b"
+    ],
+    "priority": 2,
+    "started_at": "2026-05-27T19:42:35Z",
+    "status": "in_progress",
+    "title": "w7-08 JSON-shape snapshot tests + dock health probe — all reader calls round-trip byte-shape-equal",
+    "updated_at": "2026-05-27T19:42:35Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T19:27:21Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T21:27:23Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-rx0",
+        "issue_id": "paperflow-rrl",
+        "metadata": "{}",
+        "type": "blocks"
+      },
+      {
+        "created_at": "2026-05-27T21:27:22Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-xmb",
+        "issue_id": "paperflow-rrl",
+        "metadata": "{}",
+        "type": "blocks"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 0,
+    "description": "W7b step 3. Switch the four bd-reader sites to call the shim binary by absolute path (shim still not in PATH so daily driver stays on real bd). Verifies the shim's JSON shapes survive real-world consumer parsing. Deps: w7-07.",
+    "id": "paperflow-rrl",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "phase-build",
+      "subwave-w7b"
+    ],
+    "priority": 2,
+    "status": "open",
+    "title": "w7-12 Repoint readers — statusline / dock-daemon bd() / claim-files / goal-merge → shim (shim not yet on PATH)",
+    "updated_at": "2026-05-27T19:27:21Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T19:27:20Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T21:27:21Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-xmb",
+        "issue_id": "paperflow-rx0",
+        "metadata": "{}",
+        "type": "blocks"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 2,
+    "description": "W7b step 1. Shim binary (paperflow/bin/) that translates bd CLI surface to Barkpark Tasks.* via HTTP + direct SQL read paths. Must produce JSON byte-shape identical to bd --json (verified by w7-08 fixtures). Touches: barkpark api (new HTTP controller for ready/claim/close/edges) + paperflow bin (new bd-shim binary). Deps satisfied: paperflow-qt0 (ready), paperflow-oae (claim/close). Gate-B precondition.",
+    "id": "paperflow-rx0",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "phase-build",
+      "subwave-w7b"
+    ],
+    "priority": 2,
+    "status": "open",
+    "title": "w7-07 bd-compatible shim — show/list/ready/update/dep/epic close-eligible → Barkpark HTTP+SQL with exact bd JSON shapes",
+    "updated_at": "2026-05-27T19:27:20Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T09:17:15Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T11:17:59Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-7r9",
+        "issue_id": "paperflow-xmb",
+        "metadata": "{}",
+        "type": "parent-child"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 3,
+    "id": "paperflow-xmb",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "kind:phase",
+      "phase-build"
+    ],
+    "parent": "paperflow-7r9",
+    "priority": 2,
+    "status": "open",
+    "title": "Wave 7 build phase",
+    "updated_at": "2026-05-27T09:17:15Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T09:17:14Z",
+    "created_by": "pelle",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "id": "paperflow-7r9",
+    "issue_type": "epic",
+    "labels": [
+      "goal-w7-retire-beads",
+      "kind:goal"
+    ],
+    "priority": 2,
+    "status": "open",
+    "title": "Wave 7 — retire Beads onto Postgres document substrate",
+    "updated_at": "2026-05-27T09:17:14Z"
+  }
+]

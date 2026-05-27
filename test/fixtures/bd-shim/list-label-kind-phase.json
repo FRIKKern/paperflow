@@ -1,0 +1,118 @@
+[
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T09:17:15Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T11:17:59Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-7r9",
+        "issue_id": "paperflow-xmb",
+        "metadata": "{}",
+        "type": "parent-child"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 3,
+    "id": "paperflow-xmb",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "kind:phase",
+      "phase-build"
+    ],
+    "parent": "paperflow-7r9",
+    "priority": 2,
+    "status": "open",
+    "title": "Wave 7 build phase",
+    "updated_at": "2026-05-27T09:17:15Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-23T16:46:52Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-23T18:46:53Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-jya",
+        "issue_id": "paperflow-hb2",
+        "metadata": "{}",
+        "type": "parent-child"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "id": "paperflow-hb2",
+    "issue_type": "task",
+    "labels": [
+      "goal-session-2026-05-23",
+      "kind:phase",
+      "phase-review"
+    ],
+    "parent": "paperflow-jya",
+    "priority": 2,
+    "status": "open",
+    "title": "review",
+    "updated_at": "2026-05-23T16:46:52Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-23T16:46:52Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-23T18:46:52Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-jya",
+        "issue_id": "paperflow-smt",
+        "metadata": "{}",
+        "type": "parent-child"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "id": "paperflow-smt",
+    "issue_type": "task",
+    "labels": [
+      "goal-session-2026-05-23",
+      "kind:phase",
+      "phase-build"
+    ],
+    "parent": "paperflow-jya",
+    "priority": 2,
+    "status": "open",
+    "title": "build",
+    "updated_at": "2026-05-23T16:46:52Z"
+  },
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-23T16:46:51Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-23T18:46:52Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-jya",
+        "issue_id": "paperflow-t17",
+        "metadata": "{}",
+        "type": "parent-child"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "id": "paperflow-t17",
+    "issue_type": "task",
+    "labels": [
+      "goal-session-2026-05-23",
+      "kind:phase",
+      "phase-pre-flight"
+    ],
+    "parent": "paperflow-jya",
+    "priority": 2,
+    "status": "open",
+    "title": "pre-flight",
+    "updated_at": "2026-05-23T16:46:51Z"
+  }
+]

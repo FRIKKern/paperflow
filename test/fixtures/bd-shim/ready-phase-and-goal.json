@@ -1,0 +1,31 @@
+[
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T09:17:15Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T11:17:59Z",
+        "created_by": "pelle",
+        "depends_on_id": "paperflow-7r9",
+        "issue_id": "paperflow-xmb",
+        "metadata": "{}",
+        "type": "parent-child"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 3,
+    "id": "paperflow-xmb",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "kind:phase",
+      "phase-build"
+    ],
+    "parent": "paperflow-7r9",
+    "priority": 2,
+    "status": "open",
+    "title": "Wave 7 build phase",
+    "updated_at": "2026-05-27T09:17:15Z"
+  }
+]

@@ -1,0 +1,210 @@
+[
+  {
+    "created_at": "2026-05-27T09:17:15Z",
+    "created_by": "pelle",
+    "dependencies": [
+      {
+        "created_at": "2026-05-27T09:17:14Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-7r9",
+        "issue_type": "epic",
+        "labels": [
+          "goal-w7-retire-beads",
+          "kind:goal"
+        ],
+        "priority": 2,
+        "status": "open",
+        "title": "Wave 7 — retire Beads onto Postgres document substrate",
+        "updated_at": "2026-05-27T09:17:14Z"
+      }
+    ],
+    "dependents": [
+      {
+        "assignee": "Frikkern",
+        "created_at": "2026-05-27T19:27:21Z",
+        "created_by": "pelle",
+        "dependency_type": "blocks",
+        "description": "W7b step 2. Capture every distinct bd … --json invocation across statusline / dock-daemon / claim-files / goal-merge / skills. Freeze each as golden fixture in portable-doc/test/fixtures/bd-shim/<cmd>.json. Contract test: shim against seeded Postgres → jq -S . shim_out == jq -S . golden. Dock-daemon active-context grows a one-line 'shim ok' probe (red on failure). Gate-B: every fixture green. Deps: w7-07.",
+        "id": "paperflow-5wk",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7b"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T19:42:35Z",
+        "status": "in_progress",
+        "title": "w7-08 JSON-shape snapshot tests + dock health probe — all reader calls round-trip byte-shape-equal",
+        "updated_at": "2026-05-27T19:42:35Z"
+      },
+      {
+        "assignee": "pelle",
+        "close_reason": "Tasks.Compactor: revisions.action='compaction_snapshot' discriminator; 60-entry restore byte-equal proof; 12/12 new + 1346/0 full; W7a complete; merged c140146",
+        "closed_at": "2026-05-27T19:25:54Z",
+        "created_at": "2026-05-27T09:17:22Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-9b4",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7a"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T19:15:00Z",
+        "status": "closed",
+        "title": "w7-06 compaction job (Oban): analyze → summary in content → reversible snapshot in revisions",
+        "updated_at": "2026-05-27T19:25:54Z"
+      },
+      {
+        "assignee": "pelle",
+        "close_reason": "task-document schema + lifecycle_status (option b) + 4 schemas seeded + 3-surface validation; 26+1277 tests; ecto chain clean; merged barkpark main ac80b61",
+        "closed_at": "2026-05-27T09:37:41Z",
+        "created_at": "2026-05-27T09:17:16Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-j38",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7a"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T09:18:51Z",
+        "status": "closed",
+        "title": "w7-01 task-document schema (type goal/phase/task on documents; widen status enum; content field contract)",
+        "updated_at": "2026-05-27T09:37:41Z"
+      },
+      {
+        "assignee": "pelle",
+        "close_reason": "TTL sweep Oban worker; advisory-locked epoch bump; NULL-tolerant ts_iso; 11/11 new + 14/14 w7-04 regression; 5×1 sweep-vs-close concurrency clean; merged 192f41a",
+        "closed_at": "2026-05-27T19:14:59Z",
+        "created_at": "2026-05-27T09:17:21Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-mdf",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7a"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T19:00:20Z",
+        "status": "closed",
+        "title": "w7-05 TTL lease sweep (Oban) — recover crashed-agent claims, bump epoch",
+        "updated_at": "2026-05-27T19:14:59Z"
+      },
+      {
+        "assignee": "pelle",
+        "close_reason": "task_edges table + typed dep graph + idempotent CRUD; 17+1294 tests; ecto chain clean; merged 612c681",
+        "closed_at": "2026-05-27T18:39:51Z",
+        "created_at": "2026-05-27T09:17:17Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-nnh",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7a"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T09:37:42Z",
+        "status": "closed",
+        "title": "w7-02 task_edges table + typed dep graph (blocks, discovered-from) + migration",
+        "updated_at": "2026-05-27T18:39:51Z"
+      },
+      {
+        "assignee": "pelle",
+        "close_reason": "CAS(rev)+fencing(content.claim.epoch)+advisory-lock(per-task hashtext)+durable-then-ack(mutation_events:task.claimed/closed/mutated); 14 new + 58/58 task + 1323/0 full; 10-concurrent-close→1ok+9stale_claim proof; merged 9440aec",
+        "closed_at": "2026-05-27T19:00:19Z",
+        "created_at": "2026-05-27T09:17:20Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-oae",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7a"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T18:49:08Z",
+        "status": "closed",
+        "title": "w7-04 claim primitives (expected-version CAS, fencing epoch, advisory-lock close+unblock, durable-then-ack)",
+        "updated_at": "2026-05-27T19:00:19Z"
+      },
+      {
+        "assignee": "pelle",
+        "close_reason": "ready/claim skeleton with SKIP LOCKED; 400-race concurrency proof; 15+1309 tests; merged 8c9b0f1",
+        "closed_at": "2026-05-27T18:49:07Z",
+        "created_at": "2026-05-27T09:17:18Z",
+        "created_by": "pelle",
+        "dependency_type": "parent-child",
+        "id": "paperflow-qt0",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7a"
+        ],
+        "priority": 2,
+        "started_at": "2026-05-27T18:40:17Z",
+        "status": "closed",
+        "title": "w7-03 ready-queue query (FOR UPDATE SKIP LOCKED, dep-aware, phase-scoped)",
+        "updated_at": "2026-05-27T18:49:07Z"
+      },
+      {
+        "created_at": "2026-05-27T19:27:21Z",
+        "created_by": "pelle",
+        "dependency_type": "blocks",
+        "description": "W7b step 3. Switch the four bd-reader sites to call the shim binary by absolute path (shim still not in PATH so daily driver stays on real bd). Verifies the shim's JSON shapes survive real-world consumer parsing. Deps: w7-07.",
+        "id": "paperflow-rrl",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7b"
+        ],
+        "priority": 2,
+        "status": "open",
+        "title": "w7-12 Repoint readers — statusline / dock-daemon bd() / claim-files / goal-merge → shim (shim not yet on PATH)",
+        "updated_at": "2026-05-27T19:27:21Z"
+      },
+      {
+        "created_at": "2026-05-27T19:27:20Z",
+        "created_by": "pelle",
+        "dependency_type": "blocks",
+        "description": "W7b step 1. Shim binary (paperflow/bin/) that translates bd CLI surface to Barkpark Tasks.* via HTTP + direct SQL read paths. Must produce JSON byte-shape identical to bd --json (verified by w7-08 fixtures). Touches: barkpark api (new HTTP controller for ready/claim/close/edges) + paperflow bin (new bd-shim binary). Deps satisfied: paperflow-qt0 (ready), paperflow-oae (claim/close). Gate-B precondition.",
+        "id": "paperflow-rx0",
+        "issue_type": "task",
+        "labels": [
+          "goal-w7-retire-beads",
+          "phase-build",
+          "subwave-w7b"
+        ],
+        "priority": 2,
+        "status": "open",
+        "title": "w7-07 bd-compatible shim — show/list/ready/update/dep/epic close-eligible → Barkpark HTTP+SQL with exact bd JSON shapes",
+        "updated_at": "2026-05-27T19:27:20Z"
+      }
+    ],
+    "id": "paperflow-xmb",
+    "issue_type": "task",
+    "labels": [
+      "goal-w7-retire-beads",
+      "kind:phase",
+      "phase-build"
+    ],
+    "parent": "paperflow-7r9",
+    "priority": 2,
+    "status": "open",
+    "title": "Wave 7 build phase",
+    "updated_at": "2026-05-27T09:17:15Z"
+  }
+]

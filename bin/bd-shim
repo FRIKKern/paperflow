@@ -135,22 +135,45 @@ async function cmdShow(argv) {
   const id = positional[0];
   if (!id) return die("bd show: missing <id>");
   try {
-    // Show via list with doc_id filter — the controller's /ready endpoint
-    // doesn't take an id; the cleanest path is the edges endpoint, which
-    // returns 404 cleanly + a sidecar `dependencies` view we already use.
-    const edges = await httpJson("GET", `/v1/tasks/${encodeURIComponent(id)}/edges?kind=all`);
-    if (!edges || !edges.ok) return die(`bd show: not found (${id})`);
-    // edges returns dependencies + dependents but NOT the doc itself; do a
-    // second roundtrip via the ready filter to fetch the doc. For w7-07 we
-    // accept this small inefficiency; w7-08 introduces a dedicated GET.
-    const docs = await listAll();
-    const found = docs.find((d) => d.doc_id === id || d.id === id);
-    if (!found) return die(`bd show: not found (${id})`);
-    const bdShape = renderToBdShape(found, {
-      children: edges.dependents,
-      parents: edges.dependencies,
+    // w7-08: single roundtrip to the dedicated GET /v1/tasks/:doc_id.
+    // Try the raw id first; if not found, try the persisted-doc-id form
+    // (Barkpark's Content.upsert_document prefixes inserted ids with
+    // "drafts." for the draft → published lifecycle). bd consumers don't
+    // see / care about this prefix — they pass the bare paperflow-* id.
+    const candidates = id.startsWith("drafts.") ? [id] : [id, `drafts.${id}`];
+    let showRes = null;
+    let resolvedId = null;
+    for (const candidate of candidates) {
+      try {
+        const res = await httpJson("GET", `/v1/tasks/${encodeURIComponent(candidate)}`);
+        if (res && res.ok) {
+          showRes = res;
+          resolvedId = candidate;
+          break;
+        }
+      } catch (_) { /* try next candidate */ }
+    }
+    if (!showRes) return die(`bd show: not found (${id})`);
+
+    const edgesRes = await httpJson(
+      "GET",
+      `/v1/tasks/${encodeURIComponent(resolvedId)}/edges?kind=all`
+    ).catch(() => null);
+
+    // Strip the "drafts." prefix from the rendered id so the bd-shape
+    // output uses the bare consumer-facing id (real bd has no prefix).
+    const docForRender = { ...showRes.doc };
+    if (docForRender.doc_id && docForRender.doc_id.startsWith("drafts.")) {
+      docForRender.doc_id = docForRender.doc_id.slice("drafts.".length);
+    }
+
+    const bdShape = renderToBdShape(docForRender, {
+      children: (edgesRes && edgesRes.dependents) || [],
+      parents: (edgesRes && edgesRes.dependencies) || [],
     });
-    console.log(JSON.stringify(bdShape, null, 2));
+    // Real `bd show <id> --json` emits an ARRAY with one element (so jq
+    // pipelines treat show and list/ready uniformly). Wrap to match.
+    console.log(JSON.stringify([bdShape], null, 2));
     process.exit(0);
   } catch (err) {
     return die(`bd show: ${err.message}`);
@@ -217,16 +240,15 @@ async function cmdUpdate(argv) {
 
   if (flags.claim !== undefined) {
     try {
-      // The barkpark claim endpoint picks a row from the ready queue; bd's
-      // `update <id> --claim` is targeted. For w7-07 we pass the phase_id
-      // implied by the row's parent and accept the orchestrator-side caveat
-      // documented in w7-08 (targeted claim is a sibling task).
-      const docs = await listAll();
-      const target = docs.find((d) => d.doc_id === id || d.id === id);
-      if (!target) return die(`bd update --claim: not found (${id})`);
-      const body = { worker_id: WORKER_ID };
-      if (target.parent_id) body.phase_id = target.parent_id;
-      const result = await httpJson("POST", "/v1/tasks/claim", body);
+      // w7-08: targeted POST /v1/tasks/:doc_id/claim — same semantics as
+      // bd's `update <id> --claim` (caller names the row). No listAll() walk;
+      // the controller's Tasks.claim_by_id/3 carries the advisory lock + CAS
+      // + epoch bump on that specific doc.
+      const result = await httpJson(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(id)}/claim`,
+        { worker_id: WORKER_ID }
+      );
       if (!result || result.ok !== true) {
         return die(`bd update --claim: ${result && result.reason}`);
       }
@@ -319,12 +341,19 @@ async function cmdEpic(argv) {
     }
   }
   if (sub === "close-eligible") {
-    // No aggregator endpoint yet — compute client-side per the brief.
-    // An epic is "close-eligible" when all of its child tasks are done.
-    // For w7-07 we conservatively emit an empty array; w7-08 wires the real
-    // computation when the controller gains a child-tree endpoint.
-    console.log("[]");
-    process.exit(0);
+    // w7-08: server-side aggregator. Returns [doc_id, …] of every goal whose
+    // full child-subtree (phases + work-tasks) is closed. Real `bd epic
+    // close-eligible --json` prints the doc_id list as a JSON array.
+    try {
+      const result = await httpJson("GET", "/v1/tasks/epic/close-eligible");
+      if (!result || result.ok !== true) {
+        return die(`bd epic close-eligible: ${result && result.reason}`);
+      }
+      console.log(JSON.stringify(result.doc_ids || [], null, 2));
+      process.exit(0);
+    } catch (err) {
+      return die(`bd epic close-eligible: ${err.message}`);
+    }
   }
   return forwardToRealBd(["epic", ...argv]);
 }
@@ -416,32 +445,83 @@ function httpJson(method, pathStr, body) {
   });
 }
 
-// Pull every ready row to find a target by id. This is wasteful — w7-08
-// introduces a real GET-by-id endpoint. For w7-07 ready+filter is acceptable.
+// Pull every ready row — used by `bd list` only (which is naturally a
+// list operation). `bd show` and `bd update --claim` use dedicated
+// endpoints (w7-08) so the listAll waste is contained to list semantics.
 async function listAll() {
   const result = await httpJson("GET", "/v1/tasks/ready?limit=1000");
   if (!result || !result.ok) return [];
   return result.docs;
 }
 
-// Translate barkpark's render_doc shape into the bd-show / bd-list JSON
-// shape consumers parse. Keep the field set close to bd's so a shell pipeline
-// like `bd show foo --json | jq .status` keeps working.
+// Translate barkpark's render_doc shape into the EXACT bd-show / bd-list
+// JSON shape consumers parse. The shape contract is the union of keys real
+// `bd show <id> --json` and `bd ready/list --json` emit — both as a single
+// object (show) and as elements inside an array (list/ready).
+//
+// w7-08 fidelity gate (`test/bd-shim-fidelity.sh`) asserts the KEY SET +
+// per-key type signature of this output matches real bd byte-for-byte.
+// Adding/removing a key here without updating the fixtures will fail Gate-B.
+//
+// Real bd keys per fixture inspection:
+//   id, title, status, priority, issue_type, created_at, created_by,
+//   updated_at, labels, dependencies, dependency_count, dependent_count,
+//   comment_count, parent, assignee, started_at, description
+//
+// Optional keys (assignee, started_at, description, parent) are emitted ONLY
+// when set, matching real bd's behaviour of omitting null fields.
 function renderToBdShape(doc, edges) {
-  return {
+  const issueType = mapTypeToIssueType(doc.type);
+  const out = {
     id: doc.doc_id || doc.id,
-    title: doc.title,
-    status: doc.lifecycle_status || doc.status,
-    type: doc.type,
-    priority: doc.priority,
-    kind: doc.kind,
-    content: doc.content,
-    labels: [], // w7-08 wires label storage; bd consumers tolerate empty
-    assignee: doc.assignee,
-    ts_created: doc.inserted_at,
-    ts_updated: doc.updated_at,
-    dependencies: edges || { children: [], parents: [] },
+    title: doc.title || "",
+    status: doc.lifecycle_status || doc.status || "open",
+    priority: doc.priority == null ? 0 : doc.priority,
+    issue_type: issueType,
+    created_at: doc.inserted_at || doc.created_at || null,
+    created_by: doc.created_by || "bd-shim",
+    updated_at: doc.updated_at || null,
+    labels: doc.labels || [],
+    dependencies: edges ? toBdDependencies(edges, doc) : [],
+    dependency_count:
+      (edges && edges.parents && edges.parents.length) || 0,
+    dependent_count:
+      (edges && edges.children && edges.children.length) || 0,
+    comment_count: 0,
   };
+  if (doc.parent_id) out.parent = doc.parent_id;
+  if (doc.assignee) out.assignee = doc.assignee;
+  if (doc.started_at) out.started_at = doc.started_at;
+  if (doc.description) out.description = doc.description;
+  return out;
+}
+
+// Real bd's `issue_type` is one of: epic, task, story, bug. Our W7 substrate
+// uses `type` for the schema discriminator (goal/phase/task/event). Map:
+//   goal  → epic   (matches paperflow's "Goals as Beads epics" convention)
+//   phase → task   (phases ride the task lifecycle but live below the goal)
+//   task  → task
+//   event → task
+function mapTypeToIssueType(type) {
+  if (type === "goal") return "epic";
+  return "task";
+}
+
+// Real bd's `dependencies` is an array of {issue_id, depends_on_id, type, …}
+// objects, not the {children, parents} grouping the controller's /edges
+// endpoint returns. Translate to the bd shape — one entry per BLOCKER
+// (parent) edge, matching `bd show`'s "this is what I'm blocked on" view.
+function toBdDependencies(edges, doc) {
+  const id = doc.doc_id || doc.id;
+  const parents = (edges && edges.parents) || [];
+  return parents.map((p) => ({
+    issue_id: id,
+    depends_on_id: p.doc_id || p.id,
+    type: "blocks",
+    created_at: p.inserted_at || p.created_at || null,
+    created_by: "bd-shim",
+    metadata: "{}",
+  }));
 }
 
 function printConfirm(verb, doc) {

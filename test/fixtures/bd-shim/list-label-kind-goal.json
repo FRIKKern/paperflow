@@ -1,0 +1,19 @@
+[
+  {
+    "comment_count": 0,
+    "created_at": "2026-05-27T09:17:14Z",
+    "created_by": "pelle",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "id": "paperflow-7r9",
+    "issue_type": "epic",
+    "labels": [
+      "goal-w7-retire-beads",
+      "kind:goal"
+    ],
+    "priority": 2,
+    "status": "open",
+    "title": "Wave 7 — retire Beads onto Postgres document substrate",
+    "updated_at": "2026-05-27T09:17:14Z"
+  }
+]

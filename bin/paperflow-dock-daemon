@@ -157,8 +157,38 @@ async function phaseTask(phaseId) {
 // ──────────────────────────────────────────────────────────────────────
 // Feed renderers.
 // ──────────────────────────────────────────────────────────────────────
+// w7-08: bd-shim health probe. Each active-context render spawns
+// `bd-shim --selftest` (exit 0 = OK). Rendered in ANSI green when up
+// and ANSI red when down so a quiet dock surface becomes loud the
+// instant the shim or barkpark goes sideways.
+//
+// Graceful degradation: the probe is FULLY wrapped — any exception
+// (shim missing, timeout, ENOENT) renders as "shim: down (probe error)"
+// rather than crashing the active-context feed.
+const SHIM_PATH = (() => {
+  const local = path.join(HOME, ".local", "bin", "bd-shim");
+  try { fs.accessSync(local, fs.constants.X_OK); return local; } catch (_) {}
+  return null;
+})();
+
+function shimHealthLine() {
+  if (!SHIM_PATH) return "shim: \x1b[33mskip (not installed)\x1b[0m";
+  try {
+    const r = spawnSync(SHIM_PATH, ["--selftest"], {
+      timeout: 1500,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+    if (r.status === 0) return "shim: \x1b[32mok\x1b[0m";
+    const why = (r.stderr || "").trim().split("\n").pop() || `exit ${r.status}`;
+    return `shim: \x1b[31mdown (${trunc(why, 28)})\x1b[0m`;
+  } catch (_e) {
+    return `shim: \x1b[31mdown (probe error)\x1b[0m`;
+  }
+}
+
 async function renderActiveContext(goalId, goalSlugLbl, phaseId, phaseTaskObj) {
-  if (!goalId) return NO_GOAL;
+  if (!goalId) return [NO_GOAL, shimHealthLine()].join("\n");
   const phName = (phaseTaskObj && phaseTaskObj.title) || "";
   let claimedLine = "        (no claimed task)";
   try {
@@ -180,6 +210,7 @@ async function renderActiveContext(goalId, goalSlugLbl, phaseId, phaseTaskObj) {
     `Phase:  ${phaseId || "?"} · ${phName || "?"}`,
     `Task:`,
     claimedLine,
+    shimHealthLine(),
   ].join("\n");
 }
 
