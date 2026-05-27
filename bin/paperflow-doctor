@@ -39,14 +39,17 @@ REAPED_JSONL="${PAPERFLOW_DOCTOR_REAPED:-}"
 # --repair only affects the instance-check pass; other auto-fixes (hooks/bins/
 # renderers) already run unconditionally because they're side-effect-free.
 MODE_SEEN=0
+GATE_FOR_FLIP=0
 for arg in "$@"; do
     case "$arg" in
-        ""|"--fast")   MODE="--fast";   MODE_SEEN=1 ;;
-        "--full")      MODE="--full";   MODE_SEEN=1 ;;
-        "--ensure-bd") MODE="--ensure-bd"; MODE_SEEN=1 ;;
-        "--bindings")  MODE="--bindings";  MODE_SEEN=1 ;;
-        "--repair")    REAP_ENABLED=1 ;;
-        *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd | --bindings] [--repair]\n' >&2; exit 1 ;;
+        ""|"--fast")     MODE="--fast";   MODE_SEEN=1 ;;
+        "--full")        MODE="--full";   MODE_SEEN=1 ;;
+        "--ensure-bd")   MODE="--ensure-bd"; MODE_SEEN=1 ;;
+        "--ensure-tasks") MODE="--ensure-tasks"; MODE_SEEN=1 ;;
+        "--bindings")    MODE="--bindings";  MODE_SEEN=1 ;;
+        "--repair")      REAP_ENABLED=1 ;;
+        "--gate-for-flip") GATE_FOR_FLIP=1 ;;
+        *) printf 'usage: paperflow-doctor [--fast | --full | --ensure-bd | --ensure-tasks [--gate-for-flip] | --bindings] [--repair]\n' >&2; exit 1 ;;
     esac
 done
 # default mode when only --repair was passed
@@ -79,8 +82,9 @@ if [ "$MODE" = "--ensure-bd" ]; then
     exit 2
 fi
 
-# (--bindings subcommand handler is defined below, after helpers, because it
-# reuses extract_doc_target + tcp_listening + iso_age_seconds.)
+# (--ensure-tasks and --bindings subcommand handlers are defined below,
+# after the helpers section, because they reuse now_iso + (--bindings only)
+# extract_doc_target + tcp_listening + iso_age_seconds.)
 
 # ── helpers ────────────────────────────────────────────────────────
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -259,6 +263,247 @@ emit_and_exit() {
                           surface_dead:$i_surface_dead}}'
     exit "$ec"
 }
+
+# ── --ensure-tasks: W7d state-aware migration health check ─────────
+# W7d step 2 (paperflow-5ki). Surfaces 6 checks gating the eventual flip
+# from .beads/issues.jsonl onto barkpark as the system of record:
+#   (a) barkpark-reachable      — daemon answers HTTP on /v1/tasks (401 ok)
+#   (b) dual-write-enabled      — PAPERFLOW_MIRROR_GOALS=1
+#   (c) active-goal-mirrored    — pointer's bd-id exists in barkpark
+#   (d) importer-run-recent     — ~/.paperflow/importer-*.log ≤ 30 days
+#   (e) orphan-task-count       — bin/paperflow-import-bd dry-run orphan sum
+#   (f) shim-on-path-check      — both `bd` and `bd-shim` resolve on PATH
+#
+# Output: distinct JSON envelope with top-level `ensure_tasks` map. Each
+# check carries {check, status: pass|warn|fail, message, repair_command?}.
+# Exit: 0 if no fails; 2 if any fail. Under --gate-for-flip the bar rises:
+# 0 only when ALL 6 checks pass; 2 if any warn OR fail. w7-16 (the atomic
+# flip) is the sole intended caller of --gate-for-flip.
+#
+# Daily-driver-safe: short-circuits BEFORE the standard sweep, like
+# --ensure-bd. The default + --fast code paths are byte-identical to pre.
+if [ "$MODE" = "--ensure-tasks" ]; then
+    ET_RUN=0
+    ET_PASSED=0
+    ET_WORST=0   # 0 ok · 1 warn · 2 fail
+    ET_ROWS_JSONL=""
+
+    et_bump() {
+        case "$1" in
+            fail) [ "$ET_WORST" -lt 2 ] && ET_WORST=2 ;;
+            warn) [ "$ET_WORST" -lt 1 ] && ET_WORST=1 ;;
+        esac; return 0
+    }
+    # et_emit_row <key> <status> <message> [<repair_command>] [<extra_json>]
+    #   extra_json is a raw JSON fragment merged into the row (e.g. count fields).
+    et_emit_row() {
+        local key="$1" status="$2" msg="$3" repair="${4:-}" extra="${5:-}"
+        [ -z "$extra" ] && extra="{}"
+        ET_RUN=$((ET_RUN+1))
+        [ "$status" = "pass" ] && ET_PASSED=$((ET_PASSED+1))
+        et_bump "$status"
+        local row
+        row="$(jq -nc \
+            --arg key "$key" --arg status "$status" --arg msg "$msg" \
+            --arg repair "$repair" --argjson extra "$extra" \
+            '{check:$key, status:$status, message:$msg}
+              + (if $repair == "" then {} else {repair_command:$repair} end)
+              + $extra')" || return 0
+        ET_ROWS_JSONL="${ET_ROWS_JSONL}${row}
+"
+    }
+
+    BARKPARK_URL="${PAPERFLOW_BARKPARK_URL:-http://localhost:4000}"
+    TOKEN="${BARKPARK_MIRROR_TOKEN:-barkpark-dev-token}"
+
+    # (a) barkpark-reachable — /v1/tasks accepts unauthenticated requests
+    # and answers 401 (auth required) when up. Any 2xx/4xx = answering.
+    # Connection refused / timeout = unreachable. 3 s ceiling.
+    bp_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $TOKEN" \
+        "$BARKPARK_URL/v1/tasks" 2>/dev/null || echo 000)"
+    case "$bp_code" in
+        2*|4*) et_emit_row "barkpark_reachable" "pass" \
+                  "barkpark answered HTTP $bp_code at $BARKPARK_URL/v1/tasks" "" ;;
+        3*|5*) et_emit_row "barkpark_reachable" "warn" \
+                  "barkpark answered HTTP $bp_code (degraded)" \
+                  "# check barkpark logs at $BARKPARK_URL" ;;
+        *)     et_emit_row "barkpark_reachable" "fail" \
+                  "barkpark unreachable at $BARKPARK_URL (curl rc/timeout, code=$bp_code)" \
+                  "# start barkpark: cd barkpark && mix phx.server" ;;
+    esac
+
+    # (b) dual-write-enabled — env-gated opt-in. WARN when unset because
+    # the daily driver doesn't require it; only the flip gate does.
+    if [ "${PAPERFLOW_MIRROR_GOALS:-0}" = "1" ]; then
+        et_emit_row "dual_write_enabled" "pass" "PAPERFLOW_MIRROR_GOALS=1"
+    else
+        et_emit_row "dual_write_enabled" "warn" \
+            "PAPERFLOW_MIRROR_GOALS is unset (dual-write off)" \
+            "export PAPERFLOW_MIRROR_GOALS=1"
+    fi
+
+    # (c) active-goal-mirrored — read pointer, probe barkpark. Skip cleanly
+    # when no active goal pointer (no opinion either way).
+    AS_BIN=""
+    if command -v paperflow-active-scope >/dev/null 2>&1; then
+        AS_BIN="paperflow-active-scope"
+    elif [ -x "$HOME/.local/bin/paperflow-active-scope" ]; then
+        AS_BIN="$HOME/.local/bin/paperflow-active-scope"
+    fi
+    ACTIVE_GOAL=""
+    if [ -n "$AS_BIN" ]; then
+        ACTIVE_GOAL="$("$AS_BIN" --read goal 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [ -z "$ACTIVE_GOAL" ]; then
+        et_emit_row "active_goal_mirrored" "warn" \
+            "no active goal pointer set — skipping mirror probe" \
+            "/paperflow:goal   # open or resume a Goal first"
+    else
+        # Probe barkpark for the doc. Use the same dual-id trick as the
+        # mirror helper (bare id + drafts.<id>). doctor probes directly
+        # (no source) so drift surfaces even with mirror env unset.
+        ag_found=0
+        for cand in "$ACTIVE_GOAL" "drafts.$ACTIVE_GOAL"; do
+            ag_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer $TOKEN" \
+                "$BARKPARK_URL/v1/tasks/$cand" 2>/dev/null || echo 000)"
+            case "$ag_code" in 2*) ag_found=1; break ;; esac
+        done
+        if [ "$ag_found" = "1" ]; then
+            et_emit_row "active_goal_mirrored" "pass" \
+                "active goal $ACTIVE_GOAL exists in barkpark"
+        else
+            et_emit_row "active_goal_mirrored" "fail" \
+                "drift: active goal $ACTIVE_GOAL not in barkpark" \
+                "PAPERFLOW_MIRROR_GOALS=1 $HOME/.local/bin/paperflow-import-bd --apply"
+        fi
+    fi
+
+    # (d) importer-run-recent — ~/.paperflow/importer-*.log ≤ 30 days.
+    # find -mtime works fine on BSD/macOS for this.
+    RECENT_LOG=""
+    if [ -d "$HOME/.paperflow" ]; then
+        RECENT_LOG="$(find "$HOME/.paperflow" -maxdepth 1 -name 'importer-*.log' -type f -mtime -30 2>/dev/null | head -n 1)"
+    fi
+    if [ -n "$RECENT_LOG" ]; then
+        et_emit_row "importer_run_recent" "pass" \
+            "found recent importer log: $(basename "$RECENT_LOG")"
+    else
+        et_emit_row "importer_run_recent" "warn" \
+            "no importer-*.log within 30 days under ~/.paperflow" \
+            "$HOME/.local/bin/paperflow-import-bd --apply"
+    fi
+
+    # (e) orphan-task-count — dry-run the importer against default stores
+    # and parse the per-store `classified: G=N P=N T=N (orphan=N)` lines.
+    # Aggregate across all stores. fail if orphan > 25% of total tasks.
+    IMPORTER_BIN=""
+    # PATH first (so tests can shim via a wrapper bin), then $REPO/bin
+    # (installed), then same-dir-as-doctor (worktree dev), then legacy.
+    if command -v paperflow-import-bd >/dev/null 2>&1; then
+        IMPORTER_BIN="$(command -v paperflow-import-bd)"
+    elif [ -x "$REPO/bin/paperflow-import-bd" ]; then
+        IMPORTER_BIN="$REPO/bin/paperflow-import-bd"
+    else
+        DOCTOR_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+        if [ -n "$DOCTOR_DIR" ] && [ -x "$DOCTOR_DIR/paperflow-import-bd" ]; then
+            IMPORTER_BIN="$DOCTOR_DIR/paperflow-import-bd"
+        elif [ -x "$HOME/.local/bin/paperflow-import-bd" ]; then
+            IMPORTER_BIN="$HOME/.local/bin/paperflow-import-bd"
+        fi
+    fi
+    if [ -n "$IMPORTER_BIN" ]; then
+        # Dry-run — no --apply means no curl traffic (verified in
+        # tests/importer-dry-run.sh). PAPERFLOW_MIRROR_GOALS deliberately
+        # cleared inside the call so even an enabled environment doesn't
+        # send traffic during the probe.
+        IMP_OUT="$(PAPERFLOW_MIRROR_GOALS=0 bash "$IMPORTER_BIN" 2>&1 || true)"
+        # Sum orphan + task counts across STORE blocks. awk one-shot.
+        ORPHAN_SUM="$(printf '%s\n' "$IMP_OUT" | awk -F'[=()[:space:]]+' '
+            /classified:/ {
+                for (i=1; i<=NF; i++) {
+                    if ($i == "T")      { tsum += $(i+1) }
+                    if ($i == "orphan") { osum += $(i+1) }
+                }
+            }
+            END { printf "%d\t%d\n", osum+0, tsum+0 }')"
+        ORPHAN_COUNT="${ORPHAN_SUM%	*}"
+        TASK_TOTAL="${ORPHAN_SUM#*	}"
+        : "${ORPHAN_COUNT:=0}"
+        : "${TASK_TOTAL:=0}"
+        # 25% threshold; guard against div-by-zero.
+        if [ "$TASK_TOTAL" -gt 0 ] 2>/dev/null; then
+            ORPHAN_PCT_X100=$(( ORPHAN_COUNT * 100 / TASK_TOTAL ))
+        else
+            ORPHAN_PCT_X100=0
+        fi
+        EXTRA="$(jq -nc --argjson c "$ORPHAN_COUNT" --argjson t "$TASK_TOTAL" \
+                  --argjson pct "$ORPHAN_PCT_X100" \
+            '{count:$c, of_total:$t, percent:$pct}')"
+        if [ "$ORPHAN_COUNT" = "0" ]; then
+            et_emit_row "orphan_task_count" "pass" \
+                "0 orphan tasks across $TASK_TOTAL classified" "" "$EXTRA"
+        elif [ "$ORPHAN_PCT_X100" -gt 25 ] 2>/dev/null; then
+            et_emit_row "orphan_task_count" "fail" \
+                "$ORPHAN_COUNT orphan tasks / $TASK_TOTAL total ($ORPHAN_PCT_X100% > 25%)" \
+                "# triage: paperflow-2hs (soft-spots), paperflow-gmb (orphan handling)" \
+                "$EXTRA"
+        else
+            et_emit_row "orphan_task_count" "warn" \
+                "$ORPHAN_COUNT orphan tasks / $TASK_TOTAL total ($ORPHAN_PCT_X100%)" \
+                "# triage: paperflow-2hs (soft-spots), paperflow-gmb (orphan handling)" \
+                "$EXTRA"
+        fi
+    else
+        et_emit_row "orphan_task_count" "warn" \
+            "paperflow-import-bd not found; cannot estimate orphan count" \
+            "bash $REPO/install.sh"
+    fi
+
+    # (f) shim-on-path — both bd and bd-shim must resolve. bd missing is
+    # daily-driver-broken (fail); bd-shim missing means w7-12 not installed (warn).
+    BD_PATH="$(command -v bd 2>/dev/null || true)"
+    SHIM_PATH="$(command -v bd-shim 2>/dev/null || true)"
+    if [ -z "$BD_PATH" ]; then
+        et_emit_row "shim_on_path" "fail" \
+            "bd missing on PATH (daily driver broken)" \
+            "brew install beads"
+    elif [ -z "$SHIM_PATH" ]; then
+        et_emit_row "shim_on_path" "warn" \
+            "bd present ($BD_PATH); bd-shim missing (w7-12 not installed)" \
+            "bash $REPO/install.sh   # installs bd-shim into ~/.local/bin"
+    else
+        et_emit_row "shim_on_path" "pass" \
+            "bd=$BD_PATH ; bd-shim=$SHIM_PATH"
+    fi
+
+    # Build the ensure_tasks object, keyed by check name, preserving order.
+    rows_arr="$(printf '%s' "$ET_ROWS_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
+    et_obj="$(printf '%s' "$rows_arr" | jq 'reduce .[] as $r ({}; .[$r.check] = $r)' 2>/dev/null || printf '{}')"
+
+    # Determine exit code. Default: 2 if any fail, else 0 (warns ok).
+    # --gate-for-flip: 2 if any warn OR fail.
+    et_ec=0
+    if [ "$GATE_FOR_FLIP" = "1" ]; then
+        [ "$ET_WORST" -ge 1 ] && et_ec=2
+    else
+        [ "$ET_WORST" -ge 2 ] && et_ec=2
+    fi
+    [ "$et_ec" = "0" ] && et_ok_val=true || et_ok_val=false
+    [ "$GATE_FOR_FLIP" = "1" ] && et_gate_val=true || et_gate_val=false
+
+    jq -nc --argjson ok "$et_ok_val" --argjson exit_code "$et_ec" \
+           --arg ts "$(now_iso)" \
+           --argjson ensure_tasks "$et_obj" \
+           --argjson checks_run "$ET_RUN" --argjson checks_passed "$ET_PASSED" \
+           --argjson gate "$et_gate_val" \
+        '{ok:$ok, exit:$exit_code, ts:$ts, mode:"ensure-tasks",
+          gate_for_flip:$gate,
+          checks_run:$checks_run, checks_passed:$checks_passed,
+          ensure_tasks:$ensure_tasks}'
+    exit "$et_ec"
+fi
 
 # ── --bindings: audit doc HTMLs against live bridge registrations ──
 # Distinct from the standard sweep. Used by paperflow-4t5 (migration) to know
