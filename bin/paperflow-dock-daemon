@@ -26,6 +26,10 @@ const { spawn, spawnSync } = require("child_process");
 
 const HOME    = os.homedir();
 const PF_DIR  = path.join(HOME, ".paperflow");
+// W7b step 3: bd backend selector. Default = "bd" (real bd on PATH) so the
+// daily driver is unchanged. PAPERFLOW_BD=/abs/path/to/bd-shim (or bare
+// "bd-shim" on PATH) flips every bd spawn in this daemon to the shim.
+const PAPERFLOW_BD_BIN = process.env.PAPERFLOW_BD || "bd";
 const SOCK    = process.env.PAPERFLOW_DOCK_SOCK || path.join(PF_DIR, "dock.sock");
 const PID_FILE = path.join(PF_DIR, "dock-daemon.pid");
 const SCOPE_HELPER = (() => {
@@ -76,7 +80,7 @@ function readFileSafe(p) {
 // Async bd. Resolves to {ok:true, out} or {ok:false, err}.
 function bd(args, timeoutMs = 5000) {
   return new Promise((resolve) => {
-    const proc = spawn("bd", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(PAPERFLOW_BD_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
     let done = false;
     const finish = (result) => { if (!done) { done = true; resolve(result); } };

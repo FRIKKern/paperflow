@@ -50,6 +50,11 @@ LIMITS_DEFAULT=""
 SOURCE="unset"
 FALLBACK_REASON=""
 
+# bd backend selector (W7b step 3). Default = real bd on PATH — daily driver
+# unchanged. Set PAPERFLOW_BD=/path/to/bd-shim (or bare "bd-shim" on PATH)
+# to route every bd query in this script through the shim instead.
+PAPERFLOW_BD_BIN="${PAPERFLOW_BD:-bd}"
+
 PAPERFLOW_DIR="$HOME/.paperflow"
 CACHE_DIR="$PAPERFLOW_DIR/statusline-cache"
 LIMITS_FILE="$PAPERFLOW_DIR/statusline-limits.json"
@@ -432,8 +437,9 @@ find_paperflow_repo_root() {
 # drops the segments. The user never sees a "bd: command not found" leak into
 # the statusline.
 resolve_goal_phase_task() {
-    # Hard prerequisite: bd + jq on PATH.
-    command -v bd >/dev/null 2>&1 || return 0
+    # Hard prerequisite: bd + jq on PATH. The bd binary is resolved via
+    # $PAPERFLOW_BD_BIN so the shim can be substituted via PAPERFLOW_BD.
+    command -v "$PAPERFLOW_BD_BIN" >/dev/null 2>&1 || return 0
     command -v jq >/dev/null 2>&1 || return 0
 
     # Per-instance scope resolver owns the pointer-file lookup.
@@ -449,7 +455,7 @@ resolve_goal_phase_task() {
 
     # Goal slug: pick the goal-<slug> label off the goal-task.
     local goal_json goal_slug
-    goal_json=$(bd show "$goal_id" --json 2>/dev/null) || return 0
+    goal_json=$("$PAPERFLOW_BD_BIN" show "$goal_id" --json 2>/dev/null) || return 0
     [ -z "$goal_json" ] && return 0
     goal_slug=$(printf '%s' "$goal_json" \
         | jq -r '(.labels // [])[]? | select(startswith("goal-")) | sub("^goal-"; "")' 2>/dev/null \
@@ -458,7 +464,7 @@ resolve_goal_phase_task() {
 
     # Phase name: pick the phase-<name> label off the phase-task.
     local phase_json phase_name
-    phase_json=$(bd show "$phase_id" --json 2>/dev/null) || return 0
+    phase_json=$("$PAPERFLOW_BD_BIN" show "$phase_id" --json 2>/dev/null) || return 0
     [ -z "$phase_json" ] && return 0
     phase_name=$(printf '%s' "$phase_json" \
         | jq -r '(.labels // [])[]? | select(startswith("phase-")) | sub("^phase-"; "")' 2>/dev/null \
@@ -472,7 +478,7 @@ resolve_goal_phase_task() {
     # Phase index/total: enumerate all phase-tasks under the goal in stable
     # creation order (id sort), find the active phase's 1-based position.
     local phase_list
-    phase_list=$(bd list --label "kind:phase" --label "goal-$goal_slug" --json 2>/dev/null) || phase_list=""
+    phase_list=$("$PAPERFLOW_BD_BIN" list --label "kind:phase" --label "goal-$goal_slug" --json 2>/dev/null) || phase_list=""
     if [ -n "$phase_list" ]; then
         local phases_total phases_idx
         phases_total=$(printf '%s' "$phase_list" \
@@ -493,7 +499,7 @@ resolve_goal_phase_task() {
     # itself is bd-a1b2.2; its work-task children are bd-a1b2.2.* — query by
     # the phase-<name> label for portability.
     local doing_json doing_id doing_title
-    doing_json=$(bd list --label "phase-$phase_name" --label "goal-$goal_slug" --status doing --json 2>/dev/null) || doing_json=""
+    doing_json=$("$PAPERFLOW_BD_BIN" list --label "phase-$phase_name" --label "goal-$goal_slug" --status doing --json 2>/dev/null) || doing_json=""
     if [ -n "$doing_json" ]; then
         doing_id=$(printf '%s' "$doing_json" \
             | jq -r '(.[0].id // "")' 2>/dev/null || echo "")
@@ -511,7 +517,7 @@ resolve_goal_phase_task() {
 
     # Task progress within the active phase: total + closed.
     local phase_tasks
-    phase_tasks=$(bd list --label "phase-$phase_name" --label "goal-$goal_slug" --json 2>/dev/null) || phase_tasks=""
+    phase_tasks=$("$PAPERFLOW_BD_BIN" list --label "phase-$phase_name" --label "goal-$goal_slug" --json 2>/dev/null) || phase_tasks=""
     if [ -n "$phase_tasks" ]; then
         local t_total t_done
         t_total=$(printf '%s' "$phase_tasks" \

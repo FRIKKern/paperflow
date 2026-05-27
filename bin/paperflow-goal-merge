@@ -21,6 +21,11 @@
 
 set -eu
 
+# W7b step 3: bd backend selector. Default = real bd on PATH so the daily
+# driver is unchanged. PAPERFLOW_BD=/path/to/bd-shim (or bare "bd-shim" on
+# PATH) flips every bd call below to the shim.
+PAPERFLOW_BD_BIN="${PAPERFLOW_BD:-bd}"
+
 usage() {
   cat >&2 <<EOF
 usage: paperflow-goal-merge <source-id> <target-id>
@@ -36,13 +41,13 @@ SRC="$1"
 TGT="$2"
 [ "$SRC" = "$TGT" ] && { echo "error: source and target are the same id" >&2; exit 1; }
 
-command -v bd >/dev/null 2>&1 || { echo "error: bd not on PATH" >&2; exit 1; }
+command -v "$PAPERFLOW_BD_BIN" >/dev/null 2>&1 || { echo "error: bd not on PATH ($PAPERFLOW_BD_BIN)" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "error: jq not on PATH" >&2; exit 1; }
 
 # Fetch + validate both Goals.
 fetch_goal() {
   local id="$1" json
-  json="$(bd show "$id" --json 2>/dev/null)" || { echo "error: bd show $id failed (does it exist?)" >&2; exit 1; }
+  json="$("$PAPERFLOW_BD_BIN" show "$id" --json 2>/dev/null)" || { echo "error: bd show $id failed (does it exist?)" >&2; exit 1; }
   # bd show returns either an array or a single object — normalise.
   local first
   first="$(printf '%s' "$json" | jq -c 'if type=="array" then .[0] else . end')"
@@ -64,21 +69,21 @@ SRC_SLUG_LBL="$(printf '%s' "$SRC_JSON" | jq -r '.labels[]? | select(startswith(
 
 # 1. Create the merged phase-task under target.
 NEW_PHASE_TITLE="Merged from ${SRC_TITLE} (was ${SRC})"
-MERGE_PHASE_OUT="$(bd create "$NEW_PHASE_TITLE" \
+MERGE_PHASE_OUT="$("$PAPERFLOW_BD_BIN" create "$NEW_PHASE_TITLE" \
   --type task \
   --labels "kind:phase,${TGT_SLUG_LBL},phase-merged-from-${SRC}" \
   --json 2>/dev/null)" || { echo "error: bd create (merged phase) failed" >&2; exit 2; }
 MERGE_PHASE_ID="$(printf '%s' "$MERGE_PHASE_OUT" | jq -r '.id // empty')"
 [ -n "$MERGE_PHASE_ID" ] || { echo "error: could not parse new phase id from bd create output" >&2; exit 2; }
 # `bd dep add` rejects task→epic; use --parent for the merged-phase → target-Goal edge.
-bd update "$MERGE_PHASE_ID" --parent "$TGT" >/dev/null 2>&1 \
+"$PAPERFLOW_BD_BIN" update "$MERGE_PHASE_ID" --parent "$TGT" >/dev/null 2>&1 \
   || { echo "warn: bd update $MERGE_PHASE_ID --parent $TGT failed — continuing" >&2; }
 
 # 2. Re-parent source's phase-tasks under the merged phase.
-SRC_PHASES_JSON="$(bd list --label kind:phase --label "$SRC_SLUG_LBL" --json 2>/dev/null || echo '[]')"
+SRC_PHASES_JSON="$("$PAPERFLOW_BD_BIN" list --label kind:phase --label "$SRC_SLUG_LBL" --json 2>/dev/null || echo '[]')"
 PHASE_COUNT=0
 for PHASE_ID in $(printf '%s' "$SRC_PHASES_JSON" | jq -r '.[].id // empty'); do
-  bd dep add "$PHASE_ID" "$MERGE_PHASE_ID" >/dev/null 2>&1 \
+  "$PAPERFLOW_BD_BIN" dep add "$PHASE_ID" "$MERGE_PHASE_ID" >/dev/null 2>&1 \
     && PHASE_COUNT=$((PHASE_COUNT + 1)) \
     || echo "warn: dep add $PHASE_ID -> $MERGE_PHASE_ID failed" >&2
 done
@@ -103,7 +108,7 @@ NEW_DESC="Merged into ${TGT}: ${TGT_TITLE} on ${TODAY}.
 
 --- original description ---
 ${SRC_DESC}"
-bd update "$SRC" \
+"$PAPERFLOW_BD_BIN" update "$SRC" \
   --status closed \
   --add-label "merged-into-${TGT}" \
   --description "$NEW_DESC" \
@@ -112,13 +117,13 @@ bd update "$SRC" \
 
 # 5. Emit a rail event under target.
 EVENT_TITLE="merged: ${SRC_TITLE} · from ${SRC}"
-EVENT_OUT="$(bd create "$EVENT_TITLE" \
+EVENT_OUT="$("$PAPERFLOW_BD_BIN" create "$EVENT_TITLE" \
   --labels "kind:event,${TGT_SLUG_LBL},event:goal-merged,branch:merged-from-${SRC}" \
   --json 2>/dev/null || echo '')"
 EVENT_ID="$(printf '%s' "$EVENT_OUT" | jq -r '.id // empty' 2>/dev/null || true)"
 if [ -n "$EVENT_ID" ]; then
   # task→epic — use --parent.
-  bd update "$EVENT_ID" --parent "$TGT" >/dev/null 2>&1 || true
+  "$PAPERFLOW_BD_BIN" update "$EVENT_ID" --parent "$TGT" >/dev/null 2>&1 || true
 fi
 
 # 6. Summary.

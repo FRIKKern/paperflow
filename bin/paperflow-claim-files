@@ -12,6 +12,11 @@
 
 set -euo pipefail
 
+# W7b step 3: bd backend selector. Default = real bd on PATH so the daily
+# driver is unchanged. PAPERFLOW_BD=/path/to/bd-shim (or bare "bd-shim" on
+# PATH) flips every bd call below to the shim.
+PAPERFLOW_BD_BIN="${PAPERFLOW_BD:-bd}"
+
 usage() {
     cat <<'USAGE' >&2
 paperflow-claim-files claim   <task-id> <path>...
@@ -24,7 +29,7 @@ USAGE
 cmd="${1:-}"
 [ -z "$cmd" ] && usage
 shift || true
-command -v bd >/dev/null 2>&1 || { echo "bd not found in PATH" >&2; exit 127; }
+command -v "$PAPERFLOW_BD_BIN" >/dev/null 2>&1 || { echo "bd not found in PATH ($PAPERFLOW_BD_BIN)" >&2; exit 127; }
 command -v jq >/dev/null 2>&1 || { echo "jq not found in PATH" >&2; exit 127; }
 
 case "$cmd" in
@@ -32,7 +37,7 @@ case "$cmd" in
     task="${1:-}"; shift || true
     [ -z "$task" ] || [ "$#" -eq 0 ] && usage
     for p in "$@"; do
-        bd update "$task" --add-label "file-claim:${p}" >/dev/null
+        "$PAPERFLOW_BD_BIN" update "$task" --add-label "file-claim:${p}" >/dev/null
     done
     printf '{"ok":true,"task":"%s","claimed":%s}\n' \
         "$task" "$(printf '%s\n' "$@" | jq -R . | jq -sc .)"
@@ -41,7 +46,7 @@ case "$cmd" in
     [ "$#" -eq 0 ] && usage
     conflicts="$(
         for p in "$@"; do
-            bd list --label "file-claim:${p}" --json 2>/dev/null \
+            "$PAPERFLOW_BD_BIN" list --label "file-claim:${p}" --json 2>/dev/null \
               | jq -c --arg p "$p" '.[] | select(.status != "closed") | {task_id: .id, title, file: $p}'
         done | jq -cs '
             group_by(.task_id)
@@ -60,7 +65,7 @@ case "$cmd" in
   release)
     task="${1:-}"
     [ -z "$task" ] && usage
-    labels="$(bd show "$task" --json 2>/dev/null \
+    labels="$("$PAPERFLOW_BD_BIN" show "$task" --json 2>/dev/null \
               | jq -r '(if type=="array" then .[0] else . end).labels[]? | select(startswith("file-claim:"))')"
     if [ -z "$labels" ]; then
         printf '{"ok":true,"task":"%s","released":[]}\n' "$task"
@@ -69,7 +74,7 @@ case "$cmd" in
     released=()
     while IFS= read -r lbl; do
         [ -z "$lbl" ] && continue
-        bd update "$task" --remove-label "$lbl" >/dev/null
+        "$PAPERFLOW_BD_BIN" update "$task" --remove-label "$lbl" >/dev/null
         released+=("$lbl")
     done <<< "$labels"
     printf '{"ok":true,"task":"%s","released":%s}\n' \
