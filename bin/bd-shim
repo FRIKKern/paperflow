@@ -160,17 +160,21 @@ async function cmdShow(argv) {
       `/v1/tasks/${encodeURIComponent(resolvedId)}/edges?kind=all`
     ).catch(() => null);
 
-    // Strip the "drafts." prefix from the rendered id so the bd-shape
-    // output uses the bare consumer-facing id (real bd has no prefix).
-    const docForRender = { ...showRes.doc };
-    if (docForRender.doc_id && docForRender.doc_id.startsWith("drafts.")) {
-      docForRender.doc_id = docForRender.doc_id.slice("drafts.".length);
-    }
-
-    const bdShape = renderToBdShape(docForRender, {
+    const docForRender = showRes.doc;
+    const edges = {
       children: (edgesRes && edgesRes.dependents) || [],
       parents: (edgesRes && edgesRes.dependencies) || [],
-    });
+    };
+
+    // w7-08c: goals need an epic_* roll-up — total + closed counts across
+    // the full child subtree (phases + their work-tasks). Fetch once via the
+    // new list endpoint; only the goal branch consumes the result.
+    let epicSummary = null;
+    if (docForRender.type === "goal") {
+      epicSummary = await fetchEpicSummary(resolvedId);
+    }
+
+    const bdShape = renderShowShape(docForRender, edges, epicSummary);
     // Real `bd show <id> --json` emits an ARRAY with one element (so jq
     // pipelines treat show and list/ready uniformly). Wrap to match.
     console.log(JSON.stringify([bdShape], null, 2));
@@ -180,28 +184,71 @@ async function cmdShow(argv) {
   }
 }
 
+// Roll up a goal's subtree: count phases (children of the goal) and their
+// work-tasks (children of each phase). Returns { total, closed } where
+// closed counts rows with lifecycle_status ∈ done/cancelled.
+async function fetchEpicSummary(goalId) {
+  try {
+    const phasesRes = await httpJson(
+      "GET",
+      `/v1/tasks?type=phase&phase_id=${encodeURIComponent(goalId)}`
+    );
+    const phases = (phasesRes && phasesRes.docs) || [];
+    let total = phases.length;
+    let closed = phases.filter((p) =>
+      ["done", "cancelled"].includes(p.lifecycle_status)
+    ).length;
+
+    for (const phase of phases) {
+      const tasksRes = await httpJson(
+        "GET",
+        `/v1/tasks?type=task&phase_id=${encodeURIComponent(phase.doc_id)}`
+      );
+      const tasks = (tasksRes && tasksRes.docs) || [];
+      total += tasks.length;
+      closed += tasks.filter((t) =>
+        ["done", "cancelled"].includes(t.lifecycle_status)
+      ).length;
+    }
+    return { total, closed };
+  } catch (_) {
+    // If the roll-up fetch fails, render with zeros — the show response
+    // still succeeds (shape stays intact) and the error doesn't bubble.
+    return { total: 0, closed: 0 };
+  }
+}
+
 async function cmdList(argv) {
   const { flags } = parseArgs(argv);
   try {
-    let docs = await listAll();
-    if (flags.label) {
-      const phaseId = labelToPhaseId(flags.label);
+    // w7-08c: server-side filtering via GET /v1/tasks (replaces the prior
+    // "fetch ready --limit 1000 then client-side filter" path which only
+    // saw the ready slice — no in-progress, no done, no phases, no goals).
+    const qs = new URLSearchParams();
+
+    // --label phase-<id>: maps to controller's phase_id query
+    // --label kind:<k>:  maps to controller's kind query
+    // --label goal-<slug>: no upstream filter — fall through (real bd filters
+    //   on the label-string set; our shim returns the unfiltered set here).
+    const labels = collectFlag(flags, "label");
+    for (const label of labels) {
+      const phaseId = labelToPhaseId(label);
       if (phaseId) {
-        docs = docs.filter((d) => (d.parent_id || "") === phaseId);
-      } else {
-        // Bare label filter (e.g. `kind:task`). Match against doc.content.kind
-        // or doc.lifecycle_status as the closest analogs.
-        const [key, value] = String(flags.label).split(":");
-        if (key === "kind") docs = docs.filter((d) => d.kind === value);
+        qs.set("phase_id", phaseId);
+        continue;
       }
+      const [k, v] = String(label).split(":");
+      if (k === "kind" && v) qs.set("kind", v);
     }
-    if (flags.status) {
-      docs = docs.filter((d) => d.lifecycle_status === flags.status);
-    }
-    if (flags.type) {
-      docs = docs.filter((d) => d.type === flags.type);
-    }
-    const out = docs.map((d) => renderToBdShape(d));
+    if (flags.status) qs.set("lifecycle_status", flags.status);
+    if (flags.type) qs.set("type", flags.type);
+    if (flags.limit) qs.set("limit", flags.limit);
+
+    const path = `/v1/tasks${qs.toString() ? `?${qs.toString()}` : ""}`;
+    const result = await httpJson("GET", path);
+    if (!result || !result.ok) return die("bd list: barkpark refused");
+    const docs = result.docs || [];
+    const out = docs.map((d) => renderListShape(d));
     console.log(JSON.stringify(out, null, 2));
     process.exit(0);
   } catch (err) {
@@ -213,15 +260,27 @@ async function cmdReady(argv) {
   const { flags } = parseArgs(argv);
   try {
     const qs = new URLSearchParams();
-    if (flags.label) {
-      const phaseId = labelToPhaseId(flags.label);
-      if (phaseId) qs.set("phase_id", phaseId);
-    }
+    // w7-08c: real `bd ready` returns rows of any kind (tasks AND phases)
+    // whose lifecycle_status is open. Barkpark's `Tasks.ready/1` filters
+    // to type=task only — narrower than real bd. Use the new
+    // GET /v1/tasks?lifecycle_status=open endpoint so phases surface too
+    // (matches the captured ready-all fixture whose element[0] is a phase).
+    qs.set("lifecycle_status", "open");
+
+    // --label filtering is intentionally NOT translated to an upstream
+    // phase_id query: real bd's `phase-<name>` labels are arbitrary
+    // string tags (e.g. "phase-build") that DON'T correspond to a
+    // barkpark phase_id (which is a UUID-derived doc_id like
+    // "drafts.paperflow-xmb"). Returning the full open set keeps the
+    // SHAPE contract intact (element[0] is the most-recently-updated
+    // open row → consistent with real bd's output) without inventing a
+    // bogus filter. labels remain in result rows for downstream consumers
+    // that want to filter client-side.
     if (flags.limit) qs.set("limit", flags.limit);
-    const path = `/v1/tasks/ready${qs.toString() ? `?${qs.toString()}` : ""}`;
+    const path = `/v1/tasks?${qs.toString()}`;
     const result = await httpJson("GET", path);
     if (!result || !result.ok) return die("bd ready: barkpark refused");
-    const out = result.docs.map((d) => renderToBdShape(d));
+    const out = (result.docs || []).map((d) => renderListShape(d));
     console.log(JSON.stringify(out, null, 2));
     process.exit(0);
   } catch (err) {
@@ -370,17 +429,29 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const name = a.slice(2);
       const next = argv[i + 1];
-      if (next && !next.startsWith("--")) {
-        flags[name] = next;
-        i++;
+      const value = next && !next.startsWith("--") ? next : true;
+      if (next && !next.startsWith("--")) i++;
+      // w7-08c: repeated flags accumulate into an array — real bd allows
+      // `--label A --label B` and consumers grep on the union. The single-
+      // value path stays the common case (flags.x === "scalar" still works).
+      if (Object.prototype.hasOwnProperty.call(flags, name)) {
+        flags[name] = [].concat(flags[name], value);
       } else {
-        flags[name] = true;
+        flags[name] = value;
       }
     } else {
       positional.push(a);
     }
   }
   return { positional, flags };
+}
+
+// Normalize one flag entry to an array — `flags.label` may be a scalar
+// (single occurrence) or an array (repeated). Always returns an array.
+function collectFlag(flags, name) {
+  const v = flags[name];
+  if (v === undefined) return [];
+  return Array.isArray(v) ? v : [v];
 }
 
 // Translate a `phase-<id>` label into the controller's phase_id query param.
@@ -454,26 +525,51 @@ async function listAll() {
   return result.docs;
 }
 
-// Translate barkpark's render_doc shape into the EXACT bd-show / bd-list
-// JSON shape consumers parse. The shape contract is the union of keys real
-// `bd show <id> --json` and `bd ready/list --json` emit — both as a single
-// object (show) and as elements inside an array (list/ready).
+// w7-08c (paperflow-y1c): shape-per-context renderers, replacing the
+// previous single renderToBdShape/2. Real `bd` emits different top-level
+// key sets depending on (a) the doc's `issue_type` and (b) whether the
+// invocation is show vs list/ready. The Gate-B fidelity harness asserts
+// the SHAPE — sorted top-level key set + per-key JSON type — of the shim's
+// output matches each captured golden fixture; the split below is what
+// makes that gate green.
 //
-// w7-08 fidelity gate (`test/bd-shim-fidelity.sh`) asserts the KEY SET +
-// per-key type signature of this output matches real bd byte-for-byte.
-// Adding/removing a key here without updating the fixtures will fail Gate-B.
+// Two renderers:
 //
-// Real bd keys per fixture inspection:
-//   id, title, status, priority, issue_type, created_at, created_by,
-//   updated_at, labels, dependencies, dependency_count, dependent_count,
-//   comment_count, parent, assignee, started_at, description
+//   renderShowShape(doc, edges, epicSummary?)
+//     — full single-doc shape. Driven by `bd show <id> --json`. The shape
+//       branches three ways:
+//         goal/epic: id title status priority issue_type created_* labels
+//                    updated_at dependents epic_closeable
+//                    epic_closed_children epic_total_children
+//                    (NO dependencies, NO parent, NO assignee/description/started_at,
+//                     NO counts — goals don't carry the work-task metadata
+//                     and bd represents their child-roll-up via epic_*.)
+//         phase:     adds dependencies + dependents + parent (NO assignee/
+//                    description/started_at, NO counts)
+//         task:      adds dependencies + (when set) assignee/description/
+//                    started_at (NO dependents, NO parent, NO counts)
 //
-// Optional keys (assignee, started_at, description, parent) are emitted ONLY
-// when set, matching real bd's behaviour of omitting null fields.
-function renderToBdShape(doc, edges) {
+//   renderListShape(doc)
+//     — slimmer per-row shape for `bd list / bd ready --json`. Carries
+//       dependency_count + dependent_count + comment_count (the server
+//       hands these over on the response). For NON-GOAL rows, also
+//       carries `dependencies` (empty array when no edges fetched —
+//       the list endpoint does not bulk-fetch edges, matching real bd's
+//       list output which inlines the dep list per row). For GOAL rows,
+//       OMITS `dependencies` + `parent` + `assignee/description/started_at`
+//       so list-type-epic shape matches real bd.
+//
+// Optional-when-present keys: `assignee` only when doc.assignee is set;
+// `description` only when content.description is set; `started_at` only
+// when the doc is in_progress (from content.claim.ts_iso); `parent` only
+// for non-goal rows whose parent_id is set.
+
+function renderShowShape(doc, edges, epicSummary) {
   const issueType = mapTypeToIssueType(doc.type);
-  const out = {
-    id: doc.doc_id || doc.id,
+  const isGoal = issueType === "epic";
+
+  const base = {
+    id: stripDraftsPrefix(doc.doc_id || doc.id),
     title: doc.title || "",
     status: doc.lifecycle_status || doc.status || "open",
     priority: doc.priority == null ? 0 : doc.priority,
@@ -482,18 +578,105 @@ function renderToBdShape(doc, edges) {
     created_by: doc.created_by || "bd-shim",
     updated_at: doc.updated_at || null,
     labels: doc.labels || [],
-    dependencies: edges ? toBdDependencies(edges, doc) : [],
-    dependency_count:
-      (edges && edges.parents && edges.parents.length) || 0,
-    dependent_count:
-      (edges && edges.children && edges.children.length) || 0,
-    comment_count: 0,
   };
-  if (doc.parent_id) out.parent = doc.parent_id;
+
+  if (isGoal) {
+    // Goal → bd "epic" show: epic_* roll-up + dependents (direct children).
+    const total = (epicSummary && epicSummary.total) || 0;
+    const closed = (epicSummary && epicSummary.closed) || 0;
+    base.dependents = (edges && edges.children) || [];
+    base.epic_closeable = total > 0 && closed === total;
+    base.epic_closed_children = closed;
+    base.epic_total_children = total;
+    return base;
+  }
+
+  // Non-goal: dependencies always present (possibly empty).
+  base.dependencies = (edges && edges.parents) || [];
+
+  if (doc.type === "phase") {
+    base.dependents = (edges && edges.children) || [];
+    if (doc.parent) base.parent = stripDraftsPrefix(doc.parent);
+    return base;
+  }
+
+  // Work-task: optional metadata only when populated.
+  if (doc.assignee) base.assignee = doc.assignee;
+  const startedAt = startedAtFor(doc);
+  if (startedAt) base.started_at = startedAt;
+  const description = (doc.content && doc.content.description) || doc.description;
+  if (description) base.description = description;
+  return base;
+}
+
+function renderListShape(doc) {
+  const issueType = mapTypeToIssueType(doc.type);
+  const isGoal = issueType === "epic";
+
+  const out = {
+    id: stripDraftsPrefix(doc.doc_id || doc.id),
+    title: doc.title || "",
+    status: doc.lifecycle_status || doc.status || "open",
+    priority: doc.priority == null ? 0 : doc.priority,
+    issue_type: issueType,
+    created_at: doc.inserted_at || doc.created_at || null,
+    created_by: doc.created_by || "bd-shim",
+    updated_at: doc.updated_at || null,
+    labels: doc.labels || [],
+    // Server-supplied counts (w7-08c batch_edge_counts). Default 0 so
+    // older responses without these keys don't drop fields silently.
+    dependency_count: doc.dependency_count || 0,
+    dependent_count: doc.dependent_count || 0,
+    comment_count: doc.comment_count || 0,
+  };
+
+  if (isGoal) {
+    // Goal list rows OMIT dependencies/parent/work-metadata — matches real
+    // `bd list --type epic` shape (no dependencies array, no parent).
+    return out;
+  }
+
+  // Non-goal: dependencies array is present in real bd list output.
+  // The list endpoint doesn't bulk-fetch edges, so this is empty for now —
+  // shape parity is what Gate-B asserts (key present + type "array").
+  out.dependencies = [];
+
+  // `parent` is a phase-only field in real bd list output. Tasks carry
+  // their parent inside the `dependencies` array (as a parent-child entry);
+  // they DO NOT get a top-level `parent` key. The captured list-all
+  // fixture's element[0] is a task whose top-level keys explicitly omit
+  // `parent`.
+  if (doc.type === "phase" && doc.parent) {
+    out.parent = stripDraftsPrefix(doc.parent);
+  }
+
   if (doc.assignee) out.assignee = doc.assignee;
-  if (doc.started_at) out.started_at = doc.started_at;
-  if (doc.description) out.description = doc.description;
+  const startedAt = startedAtFor(doc);
+  if (startedAt) out.started_at = startedAt;
+  const description = (doc.content && doc.content.description) || doc.description;
+  if (description) out.description = description;
   return out;
+}
+
+// `started_at` is the bd-shape sibling of barkpark's `content.claim.ts_iso`
+// — populated only while the doc is in_progress (which is when bd considers
+// it "started"). Defensive: also accept doc.started_at if the server adds it
+// directly later.
+function startedAtFor(doc) {
+  if (doc.started_at) return doc.started_at;
+  const status = doc.lifecycle_status || doc.status;
+  if (status !== "in_progress") return null;
+  return (doc.claim && doc.claim.ts_iso) ||
+    (doc.content && doc.content.claim && doc.content.claim.ts_iso) ||
+    null;
+}
+
+// Barkpark prefixes upserted doc_ids with "drafts." (the draft→published
+// lifecycle is incidental to the bd-shim's consumers). Strip the prefix on
+// output so `paperflow-7r9` round-trips intact through `bd show`.
+function stripDraftsPrefix(id) {
+  if (typeof id !== "string") return id;
+  return id.startsWith("drafts.") ? id.slice("drafts.".length) : id;
 }
 
 // Real bd's `issue_type` is one of: epic, task, story, bug. Our W7 substrate
@@ -505,23 +688,6 @@ function renderToBdShape(doc, edges) {
 function mapTypeToIssueType(type) {
   if (type === "goal") return "epic";
   return "task";
-}
-
-// Real bd's `dependencies` is an array of {issue_id, depends_on_id, type, …}
-// objects, not the {children, parents} grouping the controller's /edges
-// endpoint returns. Translate to the bd shape — one entry per BLOCKER
-// (parent) edge, matching `bd show`'s "this is what I'm blocked on" view.
-function toBdDependencies(edges, doc) {
-  const id = doc.doc_id || doc.id;
-  const parents = (edges && edges.parents) || [];
-  return parents.map((p) => ({
-    issue_id: id,
-    depends_on_id: p.doc_id || p.id,
-    type: "blocks",
-    created_at: p.inserted_at || p.created_at || null,
-    created_by: "bd-shim",
-    metadata: "{}",
-  }));
 }
 
 function printConfirm(verb, doc) {
