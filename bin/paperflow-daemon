@@ -65,6 +65,20 @@ const COMPACT_LINE_RATIO  = 10;         // compact when file > 10× live-state l
 const COMPACT_SIZE_BYTES  = 10 * 1024 * 1024; // or > 10 MB
 const CONTINUE_BIN        = path.join(__dirname, 'paperflow-continue');
 
+// ── W7c step 3 (w7-11 / paperflow-158): rail-proxy opt-in ─────────────
+// When PAPERFLOW_MIRROR_GOALS=1 AND PAPERFLOW_BARKPARK_URL is set, the
+// rail data-plane routes (/paperflow/goal-path, /paperflow/event/:id,
+// /paperflow/diff) proxy to barkpark's /v1/rail/* endpoints instead of
+// returning 410-Gone. The 410 path is preserved as the on-failure /
+// env-unset fallback — the daily-driver default never changes shape.
+//
+// Env-resolved at request time (not module load) so test scripts can flip
+// the env per-invocation without restarting the daemon process — the
+// test harness in tests/rail-proxy.sh relies on this.
+const RAIL_PROXY_TIMEOUT_MS = 3000;
+const RAIL_PROXY_TOKEN_ENV  = 'BARKPARK_MIRROR_TOKEN';
+const RAIL_PROXY_TOKEN_FALLBACK = 'barkpark-dev-token';
+
 // ── in-memory state ────────────────────────────────────────────────
 // sessions: session_id → { session_id, cmux_workspace, cmux_surface, tty,
 //                          pid, started_at, registered_at }
@@ -117,6 +131,78 @@ function errEnv(error, message, details) {
   const out = { ok: false, error, message };
   if (details) out.details = details;
   return out;
+}
+
+// ── W7c step 3: barkpark rail proxy ───────────────────────────────────
+// Resolves the per-request env (MIRROR + URL) and proxies a GET to
+// `<BARKPARK_URL>/v1/rail/<targetSubpath>` (e.g. "goal-path?goal=foo").
+// On any error — timeout, ECONNREFUSED, non-2xx, malformed URL — invokes
+// `fallback()` so callers can return the original 410 unchanged.
+//
+// Piping uses Node's stream pipe so we don't buffer the full body — for
+// large goal-path lists the daemon stays bounded in memory.
+function railProxyEnabled() {
+  return (process.env.PAPERFLOW_MIRROR_GOALS === '1' || process.env.PAPERFLOW_MIRROR_GOALS === 'true')
+      && !!process.env.PAPERFLOW_BARKPARK_URL;
+}
+
+function proxyToBarkpark(req, res, targetSubpath, fallback) {
+  const baseUrl = process.env.PAPERFLOW_BARKPARK_URL;
+  if (!baseUrl) return fallback();
+
+  let target;
+  try {
+    target = new URL('/v1/rail/' + targetSubpath, baseUrl);
+  } catch (e) {
+    logLine(`rail-proxy: bad URL composition base=${baseUrl} sub=${targetSubpath}: ${e.message}`);
+    return fallback();
+  }
+
+  const token = process.env[RAIL_PROXY_TOKEN_ENV] || RAIL_PROXY_TOKEN_FALLBACK;
+
+  const opts = {
+    method:   'GET',
+    hostname: target.hostname,
+    port:     target.port || (target.protocol === 'https:' ? 443 : 80),
+    path:     target.pathname + target.search,
+    headers:  {
+      'authorization': 'Bearer ' + token,
+      'accept':        'application/json'
+    },
+    timeout:  RAIL_PROXY_TIMEOUT_MS
+  };
+
+  let resolved = false;
+  const finishFallback = (reason) => {
+    if (resolved) return;
+    resolved = true;
+    logLine(`rail-proxy: falling back to 410 (${reason}) target=${target.href}`);
+    fallback();
+  };
+
+  const upstream = http.request(opts, upRes => {
+    if (resolved) return;
+    resolved = true;
+    // Pass through status + content-type; drop hop-by-hop headers Node
+    // would otherwise complain about (we only need the body shape).
+    const ct = upRes.headers['content-type'] || 'application/json';
+    res.writeHead(upRes.statusCode || 502, { 'Content-Type': ct });
+    upRes.pipe(res);
+    upRes.on('error', e => {
+      logLine(`rail-proxy: upstream stream error: ${e.message}`);
+      try { res.end(); } catch (_) { /* */ }
+    });
+  });
+
+  upstream.on('timeout', () => {
+    try { upstream.destroy(); } catch (_) { /* */ }
+    finishFallback('timeout');
+  });
+  upstream.on('error', err => {
+    finishFallback(err.code || err.message || 'error');
+  });
+
+  upstream.end();
 }
 
 // Classify a dispatch error as "the receiving surface is gone" vs. an
@@ -955,13 +1041,41 @@ const server = http.createServer((req, res) => {
   }
 
   // ── deferred-followup 410-Gone rows ──────────────────────────────
+  // W7c step 3 (w7-11 / paperflow-158): when the rail-proxy opt-in is
+  // set, the three rail data-plane paths PROXY to barkpark's
+  // /v1/rail/* surface instead of 410'ing. Daily-driver default (env
+  // unset) keeps the 410 contract verbatim — never changes shape.
+  // Other deferred paths (simplify/*, navigate, …) still 410.
   const deferred = isDeferred(pathname);
   if (deferred) {
-    return jsonRes(res, 410, {
+    const fallback410 = () => jsonRes(res, 410, {
       ok:           false,
       error:        'moved-out-of-paperflow-daemon',
       deferred_to:  deferred
     });
+
+    if (req.method === 'GET' && railProxyEnabled()) {
+      // Map the daemon path → barkpark rail sub-path. The event path is
+      // a prefix match (/paperflow/event/:id); keep the id segment intact.
+      if (pathname === '/paperflow/goal-path') {
+        return proxyToBarkpark(req, res, 'goal-path' + (url.search || ''), fallback410);
+      }
+      if (pathname === '/paperflow/diff') {
+        return proxyToBarkpark(req, res, 'diff' + (url.search || ''), fallback410);
+      }
+      // Event-by-id: /paperflow/event/<id> → /v1/rail/event/<id>. The
+      // /paperflow/event/active alias keeps its 410 — there's no barkpark
+      // counterpart yet (deferred to a follow-up under the same gate).
+      if (pathname.startsWith('/paperflow/event/') && pathname !== '/paperflow/event/active') {
+        const id = pathname.slice('/paperflow/event/'.length);
+        // nonceSafe-style guard — same charset rule the event sidecar honors.
+        if (/^[A-Za-z0-9._-]+$/.test(id)) {
+          return proxyToBarkpark(req, res, 'event/' + encodeURIComponent(id), fallback410);
+        }
+      }
+    }
+
+    return fallback410();
   }
 
   // ── static fallback ──────────────────────────────────────────────
