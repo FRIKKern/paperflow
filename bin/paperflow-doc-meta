@@ -9,6 +9,31 @@
 
 set -u
 
+# W7c step 1 (paperflow-4rk): dual-write goal/phase creation to barkpark
+# as documents (type=goal/phase, content.kind=goal/phase) so the Gate-C
+# goal-hub view has rows to render. Helper is sourced unconditionally —
+# its public functions self-no-op when PAPERFLOW_MIRROR_GOALS != 1 or
+# PAPERFLOW_BARKPARK_URL is unset, so the daily driver is unchanged.
+# Search path: prefer alongside this binary (paperflow checkout), fall
+# back to the installed lib/, then ~/.local/lib/paperflow.
+_DOC_META_DIR="$(cd "$(dirname "$0")" && pwd 2>/dev/null)"
+for _candidate in \
+    "$_DOC_META_DIR/../lib/barkpark-mirror.sh" \
+    "$HOME/.local/lib/paperflow/barkpark-mirror.sh" \
+    "$HOME/.claude/plugins/paperflow/lib/barkpark-mirror.sh"; do
+    if [ -r "$_candidate" ]; then
+        # shellcheck disable=SC1090
+        . "$_candidate"
+        break
+    fi
+done
+# If sourcing failed for any reason, stub the function so the caller path
+# below remains a hard no-op. Defensive — keeps the daily driver alive
+# even on a partial install.
+if ! command -v barkpark_mirror_goal >/dev/null 2>&1; then
+    barkpark_mirror_goal() { return 0; }
+fi
+
 MODE="auto"
 case "${1:-}" in
     "")              MODE="auto" ;;
@@ -153,6 +178,14 @@ if [ -z "$ACTIVE_GOAL_ID" ] && [ "$MODE" = "auto" ]; then
         ACTIVE_GOAL_ID="${RESULT%% *}"
         ACTIVE_GOAL_TITLE="${RESULT#* }"
         AUTO_CREATED=true
+
+        # W7c step 1: mirror to barkpark. Self-no-op unless
+        # PAPERFLOW_MIRROR_GOALS=1 + PAPERFLOW_BARKPARK_URL set. Failures
+        # log to ~/.paperflow/doc-meta-mirror.log and never block — bd
+        # creation above is authoritative (the W7c reversibility contract).
+        # Slug defaults to "session-<date>" so the mirror matches the
+        # label the bd-side carries (goal-session-<date>).
+        barkpark_mirror_goal "$ACTIVE_GOAL_ID" "$ACTIVE_GOAL_TITLE" "session-$DATE_STR" >/dev/null 2>&1 || true
     else
         emit_error "bd_init_failed"
     fi

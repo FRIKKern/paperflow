@@ -188,6 +188,16 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
    bd update $PHASE_REVIEW    --parent $GOAL_ID
    ```
 
+   **W7c step 1 — mirror each phase to barkpark.** Self-no-op unless `PAPERFLOW_MIRROR_GOALS=1` + `PAPERFLOW_BARKPARK_URL` are set; with both set, posts a `type=phase` document carrying `content.kind=phase`, `content.phase_name`, and `content.parent=$GOAL_ID` so the Gate-C goal-hub view can render the goal + its phase children. Failures land in `~/.paperflow/doc-meta-mirror.log` and never block the bd path (the W7c-is-reversible contract).
+
+   ```bash
+   paperflow-mirror-phase "$PHASE_PREFLIGHT" "pre-flight" "$GOAL_ID"
+   paperflow-mirror-phase "$PHASE_BUILD"     "build"      "$GOAL_ID"
+   paperflow-mirror-phase "$PHASE_REVIEW"    "review"     "$GOAL_ID"
+   ```
+
+   The companion goal-mirror is invoked one layer up by `bin/paperflow-doc-meta` after `auto_create_session_goal` lands the goal-task — the SKILL only owns the phase half.
+
 6. **Write the per-repo pointers** (single-line files):
 
    ```bash

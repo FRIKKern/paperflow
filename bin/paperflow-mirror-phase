@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# paperflow-mirror-phase — W7c step 1 (paperflow-4rk) sibling of the
+# goal-mirror seam in bin/paperflow-doc-meta. Called from the goal SKILL
+# right after each `bd update <phase-id> --parent <goal-id>` for the
+# three default phases, env-conditional on PAPERFLOW_MIRROR_GOALS=1.
+#
+# Why a sibling helper and not folded into doc-meta:
+#   The goal SKILL is the only thing that creates phase-tasks (doc-meta
+#   auto-creates a session-Goal + 3 phases, but the user-driven path goes
+#   through the SKILL's three explicit `bd create` calls). Teaching the
+#   SKILL to call doc-meta for phases would invert the relationship
+#   (doc-meta-emits-JSON is read by skills; it shouldn't be commanded to
+#   mutate). One file, one responsibility, called from one place.
+#
+# Usage:
+#   paperflow-mirror-phase <phase-id> <phase-name> <parent-goal-id> [<title>]
+#
+# Exit 0 always — failures land in ~/.paperflow/doc-meta-mirror.log
+# (shared with the goal-mirror) and never block the SKILL.
+#
+# Daily-driver guarantee: when PAPERFLOW_MIRROR_GOALS is unset (the
+# default), the helper exits 0 without touching the network. Safe to wire
+# unconditionally into the SKILL.
+
+set -u
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: paperflow-mirror-phase <phase-id> <phase-name> <parent-goal-id> [<title>]
+
+  phase-id        bd-side id of the phase-task (e.g. paperflow-vmb)
+  phase-name      pre-flight | build | review | custom-name
+  parent-goal-id  bd-side id of the parent Goal (paperflow-vma)
+  title           optional UI title; defaults to phase-name
+
+env:
+  PAPERFLOW_MIRROR_GOALS=1   gate the mirror (default 0 = no-op)
+  PAPERFLOW_BARKPARK_URL     barkpark base URL (e.g. http://localhost:4000)
+  BARKPARK_MIRROR_TOKEN      auth token (default barkpark-dev-token)
+  BARKPARK_MIRROR_DATASET    dataset string (default production)
+USAGE
+}
+
+if [ "$#" -lt 3 ]; then
+    usage
+    exit 1
+fi
+
+PHASE_ID="$1"
+PHASE_NAME="$2"
+PARENT_GOAL_ID="$3"
+TITLE="${4:-$PHASE_NAME}"
+
+# Locate the mirror lib alongside this binary (paperflow checkout) or in
+# any of the installed locations. Same probe order as bin/paperflow-doc-meta.
+DIR="$(cd "$(dirname "$0")" && pwd 2>/dev/null)"
+for cand in \
+    "$DIR/../lib/barkpark-mirror.sh" \
+    "$HOME/.local/lib/paperflow/barkpark-mirror.sh" \
+    "$HOME/.claude/plugins/paperflow/lib/barkpark-mirror.sh"; do
+    if [ -r "$cand" ]; then
+        # shellcheck disable=SC1090
+        . "$cand"
+        break
+    fi
+done
+
+if ! command -v barkpark_mirror_phase >/dev/null 2>&1; then
+    # No mirror lib available — silent no-op (preserve daily-driver path).
+    exit 0
+fi
+
+barkpark_mirror_phase "$PHASE_ID" "$PHASE_NAME" "$PARENT_GOAL_ID" "$TITLE" >/dev/null 2>&1 || true
+exit 0
