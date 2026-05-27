@@ -478,6 +478,40 @@ if [ "$MODE" = "--ensure-tasks" ]; then
             "bd=$BD_PATH ; bd-shim=$SHIM_PATH"
     fi
 
+    # (g) gate_e_recent_run — INFORMATIONAL probe for the w7-15 Gate-E
+    # shadow lifecycle test (tests/gate-e-shadow.sh). Looks for any
+    # ~/.paperflow/gate-e-pass-*.flag whose mtime is within the last 24h.
+    # Pass when a fresh flag exists; warn otherwise. Per W7d brief: this
+    # check is OPTIONAL — failing it does NOT block --gate-for-flip (the
+    # orphan check is the real gate). To keep that contract we record a
+    # `warn` in et_emit_row (which would bump ET_WORST under --gate-for-flip),
+    # then explicitly unset the bump for the strict path below by tracking
+    # the warn separately and folding it back into ET_WORST only when not
+    # under --gate-for-flip.
+    GE_FLAG_RECENT=""
+    if [ -d "$HOME/.paperflow" ]; then
+        GE_FLAG_RECENT="$(find "$HOME/.paperflow" -maxdepth 1 -name 'gate-e-pass-*.flag' -type f -mtime -1 2>/dev/null | head -n 1)"
+    fi
+    # We emit through et_emit_row to get consistent JSON shape, but capture
+    # the worst BEFORE this row so we can roll back the warn-bump under
+    # --gate-for-flip. This preserves the "optional check" semantics from
+    # the brief without changing et_emit_row's signature.
+    ET_WORST_BEFORE_GE="$ET_WORST"
+    if [ -n "$GE_FLAG_RECENT" ]; then
+        et_emit_row "gate_e_recent_run" "pass" \
+            "fresh gate-e pass flag: $(basename "$GE_FLAG_RECENT")"
+    else
+        et_emit_row "gate_e_recent_run" "warn" \
+            "no gate-e-pass-*.flag within 24h (informational — does not block --gate-for-flip)" \
+            "bash $REPO/tests/gate-e-shadow.sh"
+    fi
+    # Roll back the warn-bump iff this check warned AND we're in
+    # --gate-for-flip — brief says the orphan check is the real gate,
+    # gate_e is informational only.
+    if [ "$GATE_FOR_FLIP" = "1" ] && [ -z "$GE_FLAG_RECENT" ]; then
+        ET_WORST="$ET_WORST_BEFORE_GE"
+    fi
+
     # Build the ensure_tasks object, keyed by check name, preserving order.
     rows_arr="$(printf '%s' "$ET_ROWS_JSONL" | jq -cs '. // []' 2>/dev/null || printf '[]')"
     et_obj="$(printf '%s' "$rows_arr" | jq 'reduce .[] as $r ({}; .[$r.check] = $r)' 2>/dev/null || printf '{}')"
