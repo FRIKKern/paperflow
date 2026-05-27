@@ -34,7 +34,8 @@
 # Public:
 #   barkpark_mirror_goal  <goal_id> <title> [<slug>]
 #   barkpark_mirror_phase <phase_id> <phase_name> <parent_goal_id> [<title>]
-# Both return 0 always — caller must not branch on exit code.
+#   barkpark_mirror_task  <task_id> <title> <parent_phase_id> [<priority>] [<lifecycle_status>] [<description>]
+# All three return 0 always — caller must not branch on exit code.
 #
 #   barkpark_doc_exists   <kind> <doc_id>
 #     Existence + kind probe for the namespace-validation path used by
@@ -183,6 +184,61 @@ barkpark_mirror_phase() {
     case "$out" in
         *'"transactionId"'*) _barkpark_mirror_log "ok: phase $phase_id mirrored ($phase_name → $parent_id)" ;;
         *)                   _barkpark_mirror_log "warn: phase mirror returned err id=$phase_id resp=$out" ;;
+    esac
+    return 0
+}
+
+# barkpark_mirror_task <task_id> <title> <parent_phase_id> [<priority>] [<lifecycle_status>] [<description>]
+#   Same fire-and-forget contract as goal/phase. parent_phase_id MAY be
+#   empty for orphan tasks (rows without a phase- label) — the importer
+#   path emits a warn log entry rather than dropping them; barkpark accepts
+#   parent_id="" and the rows can be re-parented by a later pass.
+barkpark_mirror_task() {
+    local task_id="$1" title="$2" parent_id="$3"
+    local priority="${4:-2}" lifecycle="${5:-open}" description="${6:-}"
+    [ -n "$task_id" ] || { _barkpark_mirror_log "skip: missing task_id"; return 0; }
+    _barkpark_mirror_enabled || return 0
+
+    local payload
+    payload="$(jq -nc \
+        --arg id          "$task_id" \
+        --arg title       "$title" \
+        --arg parent      "$parent_id" \
+        --arg lifecycle   "$lifecycle" \
+        --arg description "$description" \
+        --argjson priority "$priority" \
+        '{
+           mutations: [
+             { createIfNotExists: {
+                 _type: "task",
+                 _id: $id,
+                 doc_id: $id,
+                 title: $title,
+                 content: {
+                   kind: "task",
+                   parent_id: $parent,
+                   lifecycle_status: $lifecycle,
+                   priority: $priority,
+                   description: $description
+                 }
+             }}
+           ]
+         }')" || { _barkpark_mirror_log "skip: jq failed for task $task_id"; return 0; }
+
+    local out rc
+    out="$(curl -sS --max-time 3 \
+        -X POST "$PAPERFLOW_BARKPARK_URL/v1/data/mutate/$BARKPARK_MIRROR_DATASET" \
+        -H "Authorization: Bearer $BARKPARK_MIRROR_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$payload" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _barkpark_mirror_log "warn: task mirror curl failed rc=$rc id=$task_id err=$out"
+        return 0
+    fi
+    case "$out" in
+        *'"transactionId"'*) _barkpark_mirror_log "ok: task $task_id mirrored (→ $parent_id)" ;;
+        *)                   _barkpark_mirror_log "warn: task mirror returned err id=$task_id resp=$out" ;;
     esac
     return 0
 }

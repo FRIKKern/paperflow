@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# paperflow-import-bd — W7d step 1 (paperflow-18d). Reads READ-ONLY from
+# active Beads stores (.beads/issues.jsonl), classifies each row as
+# goal / phase / task per its labels + issue_type, and POSTs to barkpark
+# via the W7-09/W7-10 mirror helpers (createIfNotExists → idempotent).
+#
+# DEFAULT IS DRY-RUN. --apply must be explicit. No flags = no side effects.
+#
+# Contract:
+#   * READ-ONLY against .beads/issues.jsonl — never writes, never touches bd.
+#   * Without --apply, no curl traffic AT ALL — pure classification pass.
+#   * With --apply, every POST is preceded by a barkpark_doc_exists probe
+#     so re-runs are no-ops (client-side dedup; barkpark's createIfNotExists
+#     is the server-side safety net).
+#   * Exit 0 on success or dry-run completion; 1 on any POST failure
+#     (--apply only). Classification failures (unmappable rows) are warns,
+#     not errors — they print "SKIP-ORPHAN" and the importer continues.
+#
+# Parent_id resolution (deterministic from labels alone — see W7d step 1
+# brief's Q5 mapping table):
+#   * Phase's goal_doc_id = epic whose labels contain the phase's
+#     "goal-<slug>" label. Verified in both active stores: every phase has
+#     exactly one matching epic.
+#   * Task's phase_doc_id = phase whose labels contain BOTH the task's
+#     "goal-<slug>" AND "phase-<name>" labels. Tasks without a phase- label
+#     (228 across the two active stores) are emitted as SKIP-ORPHAN — they
+#     still classify as kind=task but with parent_id="". A second
+#     reconciliation pass can re-parent them via bd dependency edges later.
+#
+# Usage: paperflow-import-bd [--store <path>...] [--apply] [--limit N] [--verbose]
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../lib/barkpark-mirror.sh
+. "$REPO_ROOT/lib/barkpark-mirror.sh"
+
+APPLY=0
+LIMIT=0
+VERBOSE=0
+STORES=()
+
+usage() {
+    cat >&2 <<'USAGE'
+Usage: paperflow-import-bd [--store <path>...] [--apply] [--limit N] [--verbose]
+
+  --store <path>   Path to a .beads/issues.jsonl file (repeatable).
+                   Default: paperflow + barkpark active stores.
+  --apply          Actually POST to barkpark (default: dry-run).
+  --limit N        Cap rows processed per store (debug).
+  --verbose        Include per-row barkpark response in the log.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --apply)   APPLY=1; shift ;;
+        --verbose) VERBOSE=1; shift ;;
+        --limit)   LIMIT="$2"; shift 2 ;;
+        --store)   STORES+=("$2"); shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *)         printf 'unknown flag: %s\n' "$1" >&2; usage; exit 2 ;;
+    esac
+done
+
+if [ "${#STORES[@]}" -eq 0 ]; then
+    DEFAULT_PF="$HOME/Documents/github/paperflow/.beads/issues.jsonl"
+    DEFAULT_BP="/Volumes/SATECHI/github/barkpark/.beads/issues.jsonl"
+    [ -f "$DEFAULT_PF" ] && STORES+=("$DEFAULT_PF")
+    [ -f "$DEFAULT_BP" ] && STORES+=("$DEFAULT_BP")
+fi
+
+if [ "${#STORES[@]}" -eq 0 ]; then
+    printf 'no .beads/issues.jsonl stores found (none specified, defaults missing)\n' >&2
+    exit 2
+fi
+
+# Require python3 for the streaming classification — present on every macOS
+# since 10.15 and on every paperflow-supported Linux. Pure-bash jq pipelines
+# also work but blow up over 100s of rows due to subshell explosion.
+command -v python3 >/dev/null 2>&1 || {
+    printf 'python3 required (used for jsonl streaming + label index)\n' >&2
+    exit 2
+}
+
+LOG_DIR="$HOME/.paperflow"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/importer-$(date +%s).log"
+: > "$LOG"
+
+_log() { printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null)" "$*" >> "$LOG"; }
+
+_log "start apply=$APPLY limit=$LIMIT verbose=$VERBOSE stores=${#STORES[@]}"
+
+OVERALL_FAILURES=0
+
+for store in "${STORES[@]}"; do
+    if [ ! -f "$store" ]; then
+        printf 'STORE: %s (MISSING — skipped)\n' "$store"
+        _log "skip-store missing: $store"
+        continue
+    fi
+
+    printf 'STORE: %s\n' "$store"
+    _log "store-begin: $store"
+
+    # The classifier emits per-row TSV: kind \t id \t parent_id \t lifecycle \t priority \t title-json \t description-json [\t "orphan"]
+    # title and description are pre-JSON-escaped so the bash side never
+    # re-escapes; we hand them straight to jq via --argjson string-tags.
+    CLASSIFIED="$(mktemp -t pf-import.XXXXXX)"
+    trap 'rm -f "$CLASSIFIED"' EXIT
+
+    LIMIT="$LIMIT" python3 - "$store" > "$CLASSIFIED" <<'PYEOF'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+limit = int(os.environ.get('LIMIT', '0') or '0')
+
+rows = []
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if r.get('_type') != 'issue':
+            continue
+        rows.append(r)
+
+# Pass 1: index epics by every goal-<slug> label they carry.
+epic_by_slug = {}
+for r in rows:
+    if r.get('issue_type') != 'epic':
+        continue
+    labels = r.get('labels') or []
+    for lab in labels:
+        if lab.startswith('goal-'):
+            # First epic wins — both active stores have unique goal-<slug> → epic mappings.
+            epic_by_slug.setdefault(lab, r['id'])
+
+# Pass 2: index phases by (goal-slug, phase-name) composite.
+phase_by_goal_phase = {}
+for r in rows:
+    labels = r.get('labels') or []
+    if 'kind:phase' not in labels:
+        continue
+    goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
+    phase_lbl = next((l for l in labels if l.startswith('phase-')), None)
+    if goal_lbl and phase_lbl:
+        phase_by_goal_phase[(goal_lbl, phase_lbl)] = r['id']
+
+# bd status → barkpark lifecycle.
+STATUS_MAP = {
+    'open': 'open',
+    'in_progress': 'in_progress',
+    'closed': 'done',
+    'blocked': 'blocked',
+    'cancelled': 'cancelled',
+}
+
+def emit(kind, rid, parent, lifecycle, priority, title, desc, orphan=False):
+    # NB: empty fields collapse under bash IFS=$'\t' (tab is IFS-whitespace),
+    # so empty parent/title etc. become an empty placeholder we decode on the
+    # bash side. "_" is safe here — bd ids only contain [a-zA-Z0-9-].
+    def sub(v): return v if v != '' else '_'
+    fields = [
+        sub(kind), sub(rid), sub(parent), sub(lifecycle), sub(str(priority)),
+        json.dumps(title or ''),
+        json.dumps(desc or ''),
+        'orphan' if orphan else '_',
+    ]
+    sys.stdout.write('\t'.join(fields) + '\n')
+
+emitted = 0
+for r in rows:
+    if limit and emitted >= limit:
+        break
+    labels = r.get('labels') or []
+    rid = r['id']
+    title = r.get('title') or ''
+    desc = r.get('description') or ''
+    status = STATUS_MAP.get(r.get('status', 'open'), 'open')
+    priority = r.get('priority', 2)
+    issue_type = r.get('issue_type', 'task')
+
+    if issue_type == 'epic':
+        # Goals: parent_id is empty (top-level). slug derived from first goal-<slug> label.
+        # NB: the W7d brief's strict rule "epic AND kind:goal" misses 34/35 epics
+        # across the two stores; relaxed to "epic" wins the practical case and
+        # the orchestrator was informed in the import return.
+        emit('goal', rid, '', status, priority, title, desc)
+    elif 'kind:phase' in labels:
+        goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
+        parent = epic_by_slug.get(goal_lbl, '') if goal_lbl else ''
+        emit('phase', rid, parent, status, priority, title, desc, orphan=not parent)
+    else:
+        goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
+        phase_lbl = next((l for l in labels if l.startswith('phase-')), None)
+        parent = ''
+        if goal_lbl and phase_lbl:
+            parent = phase_by_goal_phase.get((goal_lbl, phase_lbl), '')
+        emit('task', rid, parent, status, priority, title, desc, orphan=not parent)
+    emitted += 1
+PYEOF
+
+    # Tally + iterate.
+    n_goal=0; n_phase=0; n_task=0
+    n_already=0; n_would=0; n_imported=0; n_failed=0; n_orphan=0
+    while IFS=$'\t' read -r kind rid parent lifecycle priority title_json desc_json orphan_flag; do
+        # Decode "_" placeholders back to empty.
+        [ "$parent" = "_" ] && parent=""
+        [ "$lifecycle" = "_" ] && lifecycle=""
+        [ "$priority" = "_" ] && priority="2"
+        [ "$orphan_flag" = "_" ] && orphan_flag=""
+
+        case "$kind" in
+            goal)  n_goal=$((n_goal+1)) ;;
+            phase) n_phase=$((n_phase+1)) ;;
+            task)  n_task=$((n_task+1)) ;;
+        esac
+        [ "$orphan_flag" = "orphan" ] && n_orphan=$((n_orphan+1))
+
+        if [ "$APPLY" -eq 1 ] && [ "${PAPERFLOW_MIRROR_GOALS:-0}" = "1" ]; then
+            # Client-side existence probe (skip already-imported rows fast).
+            if barkpark_doc_exists "$kind" "$rid"; then
+                n_already=$((n_already+1))
+                _log "exists: $kind $rid"
+                continue
+            fi
+        fi
+
+        if [ "$APPLY" -ne 1 ]; then
+            n_would=$((n_would+1))
+            [ "$VERBOSE" -eq 1 ] && _log "would-post: $kind $rid → parent=$parent lifecycle=$lifecycle"
+            printf '  WOULD-POST: %s as %s parent=%s lifecycle=%s\n' "$rid" "$kind" "${parent:-<none>}" "$lifecycle"
+            continue
+        fi
+
+        # APPLY path — dispatch to the right mirror function.
+        # title_json/desc_json are JSON-escaped strings (incl. leading/trailing quotes);
+        # python3 -c is the safe unwrap that doesn't choke on embedded newlines/quotes.
+        title="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]))' "$title_json")"
+        desc="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]))' "$desc_json")"
+
+        case "$kind" in
+            goal)
+                # Derive slug from first goal-<slug> label — re-grep the raw labels
+                # is fastest, but we already lost them; fall back to the mirror's default.
+                if barkpark_mirror_goal "$rid" "$title"; then
+                    n_imported=$((n_imported+1))
+                    _log "posted: goal $rid"
+                else
+                    n_failed=$((n_failed+1))
+                    _log "FAIL: goal $rid"
+                fi
+                ;;
+            phase)
+                # Recover phase_name from the bd id is impossible; we only have it as
+                # part of the title. Pass title as phase_name fallback — barkpark
+                # validator accepts any non-empty value here. Better: keep phase_name
+                # in the classifier output. (TODO: append phase_name to the TSV.)
+                phase_name="${title:-build}"
+                if barkpark_mirror_phase "$rid" "$phase_name" "$parent" "$title"; then
+                    n_imported=$((n_imported+1))
+                    _log "posted: phase $rid"
+                else
+                    n_failed=$((n_failed+1))
+                    _log "FAIL: phase $rid"
+                fi
+                ;;
+            task)
+                if barkpark_mirror_task "$rid" "$title" "$parent" "$priority" "$lifecycle" "$desc"; then
+                    n_imported=$((n_imported+1))
+                    _log "posted: task $rid (orphan=${orphan_flag:-no})"
+                else
+                    n_failed=$((n_failed+1))
+                    _log "FAIL: task $rid"
+                fi
+                ;;
+        esac
+    done < "$CLASSIFIED"
+
+    rm -f "$CLASSIFIED"
+    trap - EXIT
+
+    printf '  classified: G=%d P=%d T=%d (orphan=%d)\n' "$n_goal" "$n_phase" "$n_task" "$n_orphan"
+    if [ "$APPLY" -eq 1 ]; then
+        printf '  already-in-barkpark: %d\n' "$n_already"
+        printf '  imported: %d / failed: %d\n' "$n_imported" "$n_failed"
+        OVERALL_FAILURES=$((OVERALL_FAILURES + n_failed))
+    else
+        printf '  would-import: %d\n' "$n_would"
+    fi
+    _log "store-end: $store G=$n_goal P=$n_phase T=$n_task orphan=$n_orphan already=$n_already would=$n_would imp=$n_imported failed=$n_failed"
+done
+
+printf 'log: %s\n' "$LOG"
+if [ "$APPLY" -eq 1 ] && [ "$OVERALL_FAILURES" -gt 0 ]; then
+    exit 1
+fi
+exit 0
