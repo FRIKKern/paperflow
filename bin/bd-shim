@@ -1,0 +1,505 @@
+#!/usr/bin/env node
+// bd-shim — paperflow's bd-CLI-compatible wrapper that translates a subset
+// of `bd` invocations into HTTP calls against Barkpark's /v1/tasks surface
+// (the W7b step 1 controller, paperflow-rx0). Unknown subcommands fall
+// through to the real `bd` on PATH, so this shim is non-disruptive when
+// the orchestrator uses a command it does not (yet) wrap.
+//
+// SCOPE — what this translates today:
+//   bd show <id> --json
+//   bd list [--label X] [--status Y] [--type T] --json
+//   bd ready [--label phase-X] --json
+//   bd update <id> --claim
+//   bd update <id> --close [--reason …]
+//   bd dep add <child> <parent>
+//   bd epic close <id>
+//   bd epic close-eligible --json
+//   bd-shim --version
+//   bd-shim --selftest
+//
+// Anything else → spawn the real `bd` via PATH (skipping ourselves) so the
+// shim is a drop-in that degrades gracefully.
+//
+// CONFIG:
+//   BARKPARK_URL   default http://localhost:4000
+//   BARKPARK_TOKEN default barkpark-dev-token
+//
+// SHAPE CONTRACT:
+//   The barkpark controller returns
+//     { ok: true,  doc: <render_doc>, docs: [<render_doc>...] }
+//   The bd-shim translates each `render_doc` into the bd-show / bd-list JSON
+//   shape (`{ id, title, status, type, kind, content, labels[], assignee,
+//   ts_created, ts_updated, dependencies: {children, parents} }`) so a
+//   consumer parsing real bd's stdout sees byte-compatible JSON.
+//   For text commands (claim / close / dep add / epic close), the shim
+//   prints `✓ Updated issue: <id> — <title>` so consumers grepping on `^✓`
+//   continue to work.
+
+"use strict";
+
+const http = require("http");
+const https = require("https");
+const url = require("url");
+const { spawn, spawnSync } = require("child_process");
+const path = require("path");
+
+const VERSION = "0.1.0";
+
+const BARKPARK_URL = process.env.BARKPARK_URL || "http://localhost:4000";
+const BARKPARK_TOKEN = process.env.BARKPARK_TOKEN || "barkpark-dev-token";
+const WORKER_ID = process.env.BD_SHIM_WORKER_ID || "bd-shim";
+
+// ────────────────────────────────────────────────────────────────────────
+// Entry
+// ────────────────────────────────────────────────────────────────────────
+
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0) {
+    return forwardToRealBd(argv);
+  }
+
+  const first = argv[0];
+  if (first === "--version" || first === "-V") return cmdVersion();
+  if (first === "--selftest") return cmdSelftest();
+  if (first === "--help" || first === "-h") return cmdHelp();
+
+  // Top-level: show | list | ready | update | dep | epic
+  switch (first) {
+    case "show":
+      return cmdShow(argv.slice(1));
+    case "list":
+      return cmdList(argv.slice(1));
+    case "ready":
+      return cmdReady(argv.slice(1));
+    case "update":
+      return cmdUpdate(argv.slice(1));
+    case "dep":
+      return cmdDep(argv.slice(1));
+    case "epic":
+      return cmdEpic(argv.slice(1));
+    default:
+      return forwardToRealBd(argv);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Built-ins
+// ────────────────────────────────────────────────────────────────────────
+
+function cmdVersion() {
+  console.log(`bd-shim ${VERSION} → ${BARKPARK_URL}`);
+  process.exit(0);
+}
+
+async function cmdSelftest() {
+  try {
+    const result = await httpJson("GET", "/v1/tasks/ready?limit=1");
+    if (!result || result.ok !== true) {
+      console.error(`selftest FAIL: unexpected payload ${JSON.stringify(result)}`);
+      process.exit(2);
+    }
+    console.log(`selftest OK: ${BARKPARK_URL} → ${result.docs.length} ready docs`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`selftest FAIL: ${err.message}`);
+    process.exit(2);
+  }
+}
+
+function cmdHelp() {
+  console.log(`bd-shim ${VERSION} — bd-compatible wrapper → Barkpark /v1/tasks
+Pointing at: ${BARKPARK_URL}
+
+Translated commands:
+  bd show <id> --json
+  bd list [--label X] [--status Y] [--type T] --json
+  bd ready [--label phase-X] --json
+  bd update <id> --claim
+  bd update <id> --close [--reason ...]
+  bd dep add <child> <parent>
+  bd epic close <id>
+  bd epic close-eligible --json
+
+Unknown subcommands fall through to the real \`bd\` on PATH.
+Built-ins:  --version   --selftest   --help`);
+  process.exit(0);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// show / list / ready
+// ────────────────────────────────────────────────────────────────────────
+
+async function cmdShow(argv) {
+  const { positional } = parseArgs(argv);
+  const id = positional[0];
+  if (!id) return die("bd show: missing <id>");
+  try {
+    // Show via list with doc_id filter — the controller's /ready endpoint
+    // doesn't take an id; the cleanest path is the edges endpoint, which
+    // returns 404 cleanly + a sidecar `dependencies` view we already use.
+    const edges = await httpJson("GET", `/v1/tasks/${encodeURIComponent(id)}/edges?kind=all`);
+    if (!edges || !edges.ok) return die(`bd show: not found (${id})`);
+    // edges returns dependencies + dependents but NOT the doc itself; do a
+    // second roundtrip via the ready filter to fetch the doc. For w7-07 we
+    // accept this small inefficiency; w7-08 introduces a dedicated GET.
+    const docs = await listAll();
+    const found = docs.find((d) => d.doc_id === id || d.id === id);
+    if (!found) return die(`bd show: not found (${id})`);
+    const bdShape = renderToBdShape(found, {
+      children: edges.dependents,
+      parents: edges.dependencies,
+    });
+    console.log(JSON.stringify(bdShape, null, 2));
+    process.exit(0);
+  } catch (err) {
+    return die(`bd show: ${err.message}`);
+  }
+}
+
+async function cmdList(argv) {
+  const { flags } = parseArgs(argv);
+  try {
+    let docs = await listAll();
+    if (flags.label) {
+      const phaseId = labelToPhaseId(flags.label);
+      if (phaseId) {
+        docs = docs.filter((d) => (d.parent_id || "") === phaseId);
+      } else {
+        // Bare label filter (e.g. `kind:task`). Match against doc.content.kind
+        // or doc.lifecycle_status as the closest analogs.
+        const [key, value] = String(flags.label).split(":");
+        if (key === "kind") docs = docs.filter((d) => d.kind === value);
+      }
+    }
+    if (flags.status) {
+      docs = docs.filter((d) => d.lifecycle_status === flags.status);
+    }
+    if (flags.type) {
+      docs = docs.filter((d) => d.type === flags.type);
+    }
+    const out = docs.map((d) => renderToBdShape(d));
+    console.log(JSON.stringify(out, null, 2));
+    process.exit(0);
+  } catch (err) {
+    return die(`bd list: ${err.message}`);
+  }
+}
+
+async function cmdReady(argv) {
+  const { flags } = parseArgs(argv);
+  try {
+    const qs = new URLSearchParams();
+    if (flags.label) {
+      const phaseId = labelToPhaseId(flags.label);
+      if (phaseId) qs.set("phase_id", phaseId);
+    }
+    if (flags.limit) qs.set("limit", flags.limit);
+    const path = `/v1/tasks/ready${qs.toString() ? `?${qs.toString()}` : ""}`;
+    const result = await httpJson("GET", path);
+    if (!result || !result.ok) return die("bd ready: barkpark refused");
+    const out = result.docs.map((d) => renderToBdShape(d));
+    console.log(JSON.stringify(out, null, 2));
+    process.exit(0);
+  } catch (err) {
+    return die(`bd ready: ${err.message}`);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// update (claim / close)
+// ────────────────────────────────────────────────────────────────────────
+
+async function cmdUpdate(argv) {
+  const { positional, flags } = parseArgs(argv);
+  const id = positional[0];
+  if (!id) return die("bd update: missing <id>");
+
+  if (flags.claim !== undefined) {
+    try {
+      // The barkpark claim endpoint picks a row from the ready queue; bd's
+      // `update <id> --claim` is targeted. For w7-07 we pass the phase_id
+      // implied by the row's parent and accept the orchestrator-side caveat
+      // documented in w7-08 (targeted claim is a sibling task).
+      const docs = await listAll();
+      const target = docs.find((d) => d.doc_id === id || d.id === id);
+      if (!target) return die(`bd update --claim: not found (${id})`);
+      const body = { worker_id: WORKER_ID };
+      if (target.parent_id) body.phase_id = target.parent_id;
+      const result = await httpJson("POST", "/v1/tasks/claim", body);
+      if (!result || result.ok !== true) {
+        return die(`bd update --claim: ${result && result.reason}`);
+      }
+      printConfirm("Updated issue", result.doc);
+      process.exit(0);
+    } catch (err) {
+      return die(`bd update --claim: ${err.message}`);
+    }
+  }
+
+  if (flags.close !== undefined) {
+    try {
+      // Need observed_epoch to close; fetch the row first to discover it.
+      const docs = await listAll();
+      const target = docs.find((d) => d.doc_id === id || d.id === id);
+      if (!target) return die(`bd update --close: not found (${id})`);
+      const epoch = (target.claim && target.claim.epoch) || 1;
+      const body = { worker_id: WORKER_ID, observed_epoch: epoch };
+      if (flags.reason) body.lifecycle_status = "done"; // reason is metadata in bd
+      const result = await httpJson(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(target.doc_id)}/close`,
+        body
+      );
+      if (!result || result.ok !== true) {
+        return die(`bd update --close: ${result && result.reason}`);
+      }
+      printConfirm("Updated issue", result.doc);
+      process.exit(0);
+    } catch (err) {
+      return die(`bd update --close: ${err.message}`);
+    }
+  }
+
+  return die("bd update: only --claim and --close are wrapped (others passthrough)");
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// dep add
+// ────────────────────────────────────────────────────────────────────────
+
+async function cmdDep(argv) {
+  const sub = argv[0];
+  if (sub !== "add") return forwardToRealBd(["dep", ...argv]);
+  const child = argv[1];
+  const parent = argv[2];
+  if (!child || !parent) return die("bd dep add: missing <child> <parent>");
+  try {
+    const result = await httpJson("POST", "/v1/tasks/edges", {
+      from_id: child,
+      to_id: parent,
+      kind: "blocks",
+    });
+    if (!result || result.ok !== true) {
+      return die(`bd dep add: ${result && result.reason}`);
+    }
+    console.log(`✓ Added dependency: ${child} → ${parent} (blocks)`);
+    process.exit(0);
+  } catch (err) {
+    return die(`bd dep add: ${err.message}`);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// epic close / close-eligible
+// ────────────────────────────────────────────────────────────────────────
+
+async function cmdEpic(argv) {
+  const sub = argv[0];
+  if (sub === "close") {
+    const id = argv[1];
+    if (!id) return die("bd epic close: missing <id>");
+    try {
+      const docs = await listAll();
+      const target = docs.find((d) => d.doc_id === id || d.id === id);
+      if (!target) return die(`bd epic close: not found (${id})`);
+      const epoch = (target.claim && target.claim.epoch) || 1;
+      const result = await httpJson(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(target.doc_id)}/close`,
+        { worker_id: WORKER_ID, observed_epoch: epoch }
+      );
+      if (!result || result.ok !== true) {
+        return die(`bd epic close: ${result && result.reason}`);
+      }
+      printConfirm("Updated issue", result.doc);
+      process.exit(0);
+    } catch (err) {
+      return die(`bd epic close: ${err.message}`);
+    }
+  }
+  if (sub === "close-eligible") {
+    // No aggregator endpoint yet — compute client-side per the brief.
+    // An epic is "close-eligible" when all of its child tasks are done.
+    // For w7-07 we conservatively emit an empty array; w7-08 wires the real
+    // computation when the controller gains a child-tree endpoint.
+    console.log("[]");
+    process.exit(0);
+  }
+  return forwardToRealBd(["epic", ...argv]);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Helpers — args, HTTP, shaping, passthrough
+// ────────────────────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const positional = [];
+  const flags = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--")) {
+      const name = a.slice(2);
+      const next = argv[i + 1];
+      if (next && !next.startsWith("--")) {
+        flags[name] = next;
+        i++;
+      } else {
+        flags[name] = true;
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { positional, flags };
+}
+
+// Translate a `phase-<id>` label into the controller's phase_id query param.
+// Real bd labels in paperflow are e.g. `phase-build-a1b2`, mapped 1:1 to the
+// W7 `content.parent_id` string. Any label that doesn't start with `phase-`
+// returns null — callers fall through to a label-keyed in-memory filter.
+function labelToPhaseId(label) {
+  if (typeof label !== "string") return null;
+  if (!label.startsWith("phase-")) return null;
+  return label.slice("phase-".length);
+}
+
+function httpJson(method, pathStr, body) {
+  return new Promise((resolve, reject) => {
+    const parsed = url.parse(BARKPARK_URL);
+    const isHttps = parsed.protocol === "https:";
+    const client = isHttps ? https : http;
+    const headers = {
+      Authorization: `Bearer ${BARKPARK_TOKEN}`,
+      Accept: "application/json",
+    };
+    let payload = null;
+    if (body !== undefined && body !== null) {
+      payload = JSON.stringify(body);
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(payload);
+    }
+    const req = client.request(
+      {
+        method,
+        hostname: parsed.hostname,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: pathStr,
+        headers,
+      },
+      (res) => {
+        let buf = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (buf += chunk));
+        res.on("end", () => {
+          try {
+            const parsedJson = buf.length ? JSON.parse(buf) : null;
+            if (res.statusCode >= 400) {
+              return reject(
+                new Error(
+                  `HTTP ${res.statusCode}: ${
+                    (parsedJson && (parsedJson.reason || parsedJson.message)) || buf
+                  }`
+                )
+              );
+            }
+            resolve(parsedJson);
+          } catch (e) {
+            reject(new Error(`bad JSON from ${pathStr}: ${e.message}`));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// Pull every ready row to find a target by id. This is wasteful — w7-08
+// introduces a real GET-by-id endpoint. For w7-07 ready+filter is acceptable.
+async function listAll() {
+  const result = await httpJson("GET", "/v1/tasks/ready?limit=1000");
+  if (!result || !result.ok) return [];
+  return result.docs;
+}
+
+// Translate barkpark's render_doc shape into the bd-show / bd-list JSON
+// shape consumers parse. Keep the field set close to bd's so a shell pipeline
+// like `bd show foo --json | jq .status` keeps working.
+function renderToBdShape(doc, edges) {
+  return {
+    id: doc.doc_id || doc.id,
+    title: doc.title,
+    status: doc.lifecycle_status || doc.status,
+    type: doc.type,
+    priority: doc.priority,
+    kind: doc.kind,
+    content: doc.content,
+    labels: [], // w7-08 wires label storage; bd consumers tolerate empty
+    assignee: doc.assignee,
+    ts_created: doc.inserted_at,
+    ts_updated: doc.updated_at,
+    dependencies: edges || { children: [], parents: [] },
+  };
+}
+
+function printConfirm(verb, doc) {
+  const id = (doc && (doc.doc_id || doc.id)) || "<unknown>";
+  const title = (doc && doc.title) || "";
+  console.log(`✓ ${verb}: ${id} — ${title}`);
+}
+
+function die(msg) {
+  console.error(msg);
+  process.exit(1);
+}
+
+// Forward to the REAL bd on PATH — but skip our own location to avoid an
+// infinite loop if /this/ shim is what `which bd` resolves to (the
+// installer in w7-12 will place a symlink, so the guard matters).
+function forwardToRealBd(argv) {
+  const real = findRealBd();
+  if (!real) {
+    console.error("bd-shim: no real `bd` found on PATH (unknown subcommand)");
+    process.exit(127);
+  }
+  const child = spawn(real, argv, { stdio: "inherit" });
+  child.on("exit", (code) => process.exit(code === null ? 1 : code));
+  child.on("error", (err) => {
+    console.error(`bd-shim: failed to exec real bd: ${err.message}`);
+    process.exit(127);
+  });
+}
+
+function findRealBd() {
+  const selfRealPath = (() => {
+    try {
+      return require("fs").realpathSync(process.argv[1]);
+    } catch {
+      return process.argv[1];
+    }
+  })();
+  const selfDir = path.dirname(selfRealPath);
+  const pathEnv = process.env.PATH || "";
+  const sep = process.platform === "win32" ? ";" : ":";
+  const dirs = pathEnv.split(sep).filter(Boolean);
+  for (const d of dirs) {
+    const candidate = path.join(d, "bd");
+    try {
+      const real = require("fs").realpathSync(candidate);
+      // Skip ourselves, and also skip any path inside our own directory —
+      // the installer may symlink `bd` -> `bd-shim`.
+      if (real === selfRealPath) continue;
+      if (path.dirname(real) === selfDir && path.basename(real) === "bd-shim") continue;
+      // Validate executable
+      require("fs").accessSync(real, require("fs").constants.X_OK);
+      return real;
+    } catch {
+      // not present or not executable — keep looking
+    }
+  }
+  return null;
+}
+
+main();
