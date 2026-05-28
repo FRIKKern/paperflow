@@ -114,14 +114,52 @@ else
         red "FAIL [repoint/dock-daemon]: selector not wired"; FAIL=$((FAIL + 1))
     fi
 
-    # 2c. claim-files repointed against shim+barkpark — `check` on a path
-    # with no claims returns {ok:true,conflicts:[]}.
-    cf_out=$("$CLAIM" check /tmp/w712-repoint-probe.txt 2>&1)
-    cf_rc=$?
-    if [ "$cf_rc" -eq 0 ] && printf '%s' "$cf_out" | grep -q '"ok":true'; then
-        green "PASS [repoint/claim-files]"; PASS=$((PASS + 1))
+    # 2c. claim-files repointed against shim+barkpark — FULL round-trip (tt5).
+    # Previously this only ran `check` on an empty path (which can't fail —
+    # an empty result set is the no-conflict case regardless of whether the
+    # file-claim label filter actually works). tt5 closes that gap: the shim
+    # now translates `--add-label` / `--remove-label` (→ POST /labels) and
+    # `list --label file-claim:X` (→ GET ?label=), so we exercise the whole
+    # claim → check(conflict) → release → check(clean) lifecycle against a
+    # real seeded task. This is the case that FAILED before tt5 (no
+    # --add-label path; arbitrary labels fell through unfiltered).
+    #
+    # Discover a task to claim against (any seeded task row). If barkpark has
+    # no tasks at all we can't exercise the round-trip — SKIP that sub-check
+    # rather than fail (a fresh/empty barkpark isn't a regression in the shim).
+    cf_probe="/tmp/tt5-repoint-claim-$$.ex"
+    cf_task="$("$SHIM" list --type task --json 2>/dev/null \
+                | jq -r '[.[] | select(.issue_type=="task")][0].id // empty')"
+    if [ -z "$cf_task" ]; then
+        yellow "SKIP [repoint/claim-files]: no seeded task to claim against"
+        SKIP=$((SKIP + 1))
     else
-        red "FAIL [repoint/claim-files]: rc=$cf_rc out=[$cf_out]"; FAIL=$((FAIL + 1))
+        cf_ok=1
+        # check before — no claim yet → ok:true, conflicts:[]
+        cf_before=$("$CLAIM" check "$cf_probe" 2>&1); cf_before_rc=$?
+        [ "$cf_before_rc" -eq 0 ] && printf '%s' "$cf_before" | grep -q '"conflicts":\[\]' || cf_ok=0
+
+        # claim the file on the discovered task → ok:true
+        cf_claim=$("$CLAIM" claim "$cf_task" "$cf_probe" 2>&1); cf_claim_rc=$?
+        [ "$cf_claim_rc" -eq 0 ] && printf '%s' "$cf_claim" | grep -q '"ok":true' || cf_ok=0
+
+        # check after claim — the holder must surface as a conflict, rc=2.
+        # This is the assertion the list --label file-claim:X filter powers.
+        cf_after=$("$CLAIM" check "$cf_probe" 2>&1); cf_after_rc=$?
+        [ "$cf_after_rc" -eq 2 ] && printf '%s' "$cf_after" | grep -q "$cf_task" || cf_ok=0
+
+        # release the task → claim drops, check is clean again.
+        "$CLAIM" release "$cf_task" >/dev/null 2>&1
+        cf_clean=$("$CLAIM" check "$cf_probe" 2>&1); cf_clean_rc=$?
+        [ "$cf_clean_rc" -eq 0 ] && printf '%s' "$cf_clean" | grep -q '"conflicts":\[\]' || cf_ok=0
+
+        if [ "$cf_ok" -eq 1 ]; then
+            green "PASS [repoint/claim-files] (claim→check→release round-trip)"
+            PASS=$((PASS + 1))
+        else
+            red "FAIL [repoint/claim-files]: before=[$cf_before] claim=[$cf_claim] after(rc=$cf_after_rc)=[$cf_after] clean=[$cf_clean]"
+            FAIL=$((FAIL + 1))
+        fi
     fi
 
     # 2d. goal-merge repointed — invoke with no args; usage exits 1 BEFORE

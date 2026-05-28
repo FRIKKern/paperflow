@@ -11,11 +11,17 @@
 //   bd ready [--label phase-X] --json
 //   bd update <id> --claim
 //   bd update <id> --close [--reason …]
+//   bd update <id> --add-label <label> [--remove-label <label>]   (tt5)
 //   bd dep add <child> <parent>
 //   bd epic close <id>
 //   bd epic close-eligible --json
 //   bd-shim --version
 //   bd-shim --selftest
+//
+// tt5: `--label <X>` on `bd list` now maps to the controller's `?label=`
+// EXACT content.labels filter for any label that isn't phase-/kind: — this is
+// what makes `bd list --label file-claim:<path>` (paperflow-claim-files) find
+// the real holders instead of the whole task set.
 //
 // Anything else → spawn the real `bd` via PATH (skipping ourselves) so the
 // shim is a drop-in that degrades gracefully.
@@ -117,6 +123,7 @@ Translated commands:
   bd ready [--label phase-X] --json
   bd update <id> --claim
   bd update <id> --close [--reason ...]
+  bd update <id> --add-label <label> [--remove-label <label>]
   bd dep add <child> <parent>
   bd epic close <id>
   bd epic close-eligible --json
@@ -226,10 +233,15 @@ async function cmdList(argv) {
     // saw the ready slice — no in-progress, no done, no phases, no goals).
     const qs = new URLSearchParams();
 
-    // --label phase-<id>: maps to controller's phase_id query
-    // --label kind:<k>:  maps to controller's kind query
-    // --label goal-<slug>: no upstream filter — fall through (real bd filters
-    //   on the label-string set; our shim returns the unfiltered set here).
+    // --label phase-<id>:        maps to controller's phase_id query
+    // --label kind:<k>:          maps to controller's kind query
+    // --label <anything-else>:   maps to controller's `label=` EXACT filter
+    //   (tt5). This covers `file-claim:<path>` (paperflow-claim-files' file
+    //   ownership labels) AND arbitrary tags like `goal-<slug>` — previously
+    //   goal-/file-claim labels fell through unfiltered, which made
+    //   `bd list --label file-claim:X` return the whole task set instead of
+    //   only the holders. The controller's `?label=` runs a JSONB
+    //   content.labels containment, the honest server-side filter.
     const labels = collectFlag(flags, "label");
     for (const label of labels) {
       const phaseId = labelToPhaseId(label);
@@ -238,7 +250,15 @@ async function cmdList(argv) {
         continue;
       }
       const [k, v] = String(label).split(":");
-      if (k === "kind" && v) qs.set("kind", v);
+      if (k === "kind" && v) {
+        qs.set("kind", v);
+        continue;
+      }
+      // tt5: arbitrary label → exact content.labels filter. URLSearchParams
+      // single-key set is fine — claim-files queries one file-claim label per
+      // `bd list` call. (Last-write-wins if multiple non-phase/non-kind labels
+      // are passed; real bd ANDs them, but no current caller does that here.)
+      qs.set("label", label);
     }
     if (flags.status) qs.set("lifecycle_status", flags.status);
     if (flags.type) qs.set("type", flags.type);
@@ -342,7 +362,42 @@ async function cmdUpdate(argv) {
     }
   }
 
-  return die("bd update: only --claim and --close are wrapped (others passthrough)");
+  // tt5: --add-label / --remove-label → POST /v1/tasks/<id>/labels.
+  // Backs paperflow-claim-files: `claim` adds `file-claim:<path>` labels,
+  // `release` removes them. Both flags may co-occur and may repeat; collect
+  // each into an array and send one POST with {add, remove}.
+  const addLabels = collectFlag(flags, "add-label");
+  const removeLabels = collectFlag(flags, "remove-label");
+  if (addLabels.length || removeLabels.length) {
+    try {
+      const body = {};
+      if (addLabels.length) body.add = addLabels;
+      if (removeLabels.length) body.remove = removeLabels;
+      // Resolve the bare id to the persisted doc_id (barkpark prefixes
+      // upserted ids with "drafts."). Mirror cmdShow's candidate walk so
+      // `bd update <bare-id> --add-label` lands on the real row.
+      const resolvedId = await resolveDocId(id);
+      const result = await httpJson(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(resolvedId)}/labels`,
+        body
+      );
+      if (!result || result.ok !== true) {
+        return die(`bd update --add-label/--remove-label: ${result && result.reason}`);
+      }
+      // Real bd prints `✓ Updated issue: <id> — <title>` on a label change;
+      // paperflow-claim-files discards stdout (>/dev/null) but other
+      // consumers grep on `^✓ Updated issue`. Keep the confirmation.
+      printConfirm("Updated issue", result.doc);
+      process.exit(0);
+    } catch (err) {
+      return die(`bd update --add-label/--remove-label: ${err.message}`);
+    }
+  }
+
+  return die(
+    "bd update: only --claim, --close, --add-label, --remove-label are wrapped (others passthrough)"
+  );
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -671,6 +726,24 @@ function startedAtFor(doc) {
     null;
 }
 
+// Resolve a bare id to the persisted doc_id barkpark actually stored. Upserts
+// prefix ids with "drafts."; consumers pass the bare paperflow-* id. Probe the
+// bare id first, fall back to the "drafts." form (mirrors cmdShow's candidate
+// walk). Returns the form that resolves, or the original id if neither does
+// (so the caller's POST surfaces a clean 404 instead of guessing).
+async function resolveDocId(id) {
+  const candidates = id.startsWith("drafts.") ? [id] : [id, `drafts.${id}`];
+  for (const candidate of candidates) {
+    try {
+      const res = await httpJson("GET", `/v1/tasks/${encodeURIComponent(candidate)}`);
+      if (res && res.ok) return candidate;
+    } catch (_) {
+      /* try next candidate */
+    }
+  }
+  return id;
+}
+
 // Barkpark prefixes upserted doc_ids with "drafts." (the draft→published
 // lifecycle is incidental to the bd-shim's consumers). Strip the prefix on
 // output so `paperflow-7r9` round-trips intact through `bd show`.
@@ -691,7 +764,10 @@ function mapTypeToIssueType(type) {
 }
 
 function printConfirm(verb, doc) {
-  const id = (doc && (doc.doc_id || doc.id)) || "<unknown>";
+  // Strip the "drafts." persistence prefix so the confirmation prints the
+  // bare paperflow-* id (matches real bd's `✓ Updated issue: <id>` and the
+  // ids the show/list shapes already emit).
+  const id = stripDraftsPrefix((doc && (doc.doc_id || doc.id)) || "<unknown>");
   const title = (doc && doc.title) || "";
   console.log(`✓ ${verb}: ${id} — ${title}`);
 }
