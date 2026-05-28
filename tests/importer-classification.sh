@@ -55,20 +55,45 @@ else
     fail=1
 fi
 
-# 4. Orphan task classified as task with empty parent (NOT dropped).
-if printf '%s\n' "$out" | grep -q 'WOULD-POST: bd-test-orphan as task parent=<none>'; then
-    green "PASS: orphan task emitted with empty parent (not dropped)"
+# 4. Orphan task (only a goal- label, no phase- label, no dep edge) is now
+#    tier-2 parented to the synthetic imported-unparented phase (NOT dropped,
+#    NOT left rootless). The synthetic phase id derives from the store prefix
+#    "bd" → "bd-imported-unparented-phase".
+if printf '%s\n' "$out" | grep -q 'WOULD-POST: bd-test-orphan as task parent=bd-imported-unparented-phase'; then
+    green "PASS: orphan task tier-2 parented to synthetic phase (not dropped, not rootless)"
 else
-    red "FAIL: orphan task either dropped or mis-classified"
+    red "FAIL: orphan task not parented to synthetic phase"
+    printf '%s\n' "$out" | grep 'bd-test-orphan' || true
     fail=1
 fi
 
-# 5. Classification summary shows G=1 P=1 T=2 orphan=1.
-if printf '%s\n' "$out" | grep -q 'classified: G=1 P=1 T=2 (orphan=1)'; then
-    green "PASS: classification summary correct"
+# 5. Synthetic goal + phase emitted lazily because a rootless task exists.
+if printf '%s\n' "$out" | grep -q 'WOULD-POST: bd-imported-legacy-goal as goal parent=<none>' \
+   && printf '%s\n' "$out" | grep -q 'WOULD-POST: bd-imported-unparented-phase as phase parent=bd-imported-legacy-goal'; then
+    green "PASS: synthetic imported-legacy goal + unparented phase emitted"
+else
+    red "FAIL: synthetic goal/phase not emitted"
+    printf '%s\n' "$out" | grep -E 'imported-legacy|imported-unparented' || true
+    fail=1
+fi
+
+# 6. Classification summary: real G=1 P=1 + synthetic G+P = G=2 P=2;
+#    real T=2 + synthetic-parented orphan counted under T (the orphan is one
+#    of the 2 tasks). orphan (still rootless) must be 0.
+if printf '%s\n' "$out" | grep -q 'classified: G=2 P=2 T=2 (orphan=0)'; then
+    green "PASS: classification summary correct (synthetic G+P added, orphan=0)"
 else
     red "FAIL: classification summary wrong"
-    printf '%s\n' "$out" | grep -E 'classified|would-import' || true
+    printf '%s\n' "$out" | grep -E 'classified|recovered|synthetic|would-import' || true
+    fail=1
+fi
+
+# 7. Tier-2 count: exactly 1 task parented-to-synthetic.
+if printf '%s\n' "$out" | grep -q 'parented-to-synthetic: 1'; then
+    green "PASS: parented-to-synthetic count = 1"
+else
+    red "FAIL: parented-to-synthetic count wrong"
+    printf '%s\n' "$out" | grep 'parented-to-synthetic' || true
     fail=1
 fi
 

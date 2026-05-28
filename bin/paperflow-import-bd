@@ -16,16 +16,26 @@
 #     (--apply only). Classification failures (unmappable rows) are warns,
 #     not errors — they print "SKIP-ORPHAN" and the importer continues.
 #
-# Parent_id resolution (deterministic from labels alone — see W7d step 1
-# brief's Q5 mapping table):
-#   * Phase's goal_doc_id = epic whose labels contain the phase's
-#     "goal-<slug>" label. Verified in both active stores: every phase has
-#     exactly one matching epic.
-#   * Task's phase_doc_id = phase whose labels contain BOTH the task's
-#     "goal-<slug>" AND "phase-<name>" labels. Tasks without a phase- label
-#     (228 across the two active stores) are emitted as SKIP-ORPHAN — they
-#     still classify as kind=task but with parent_id="". A second
-#     reconciliation pass can re-parent them via bd dependency edges later.
+# Parent_id resolution (deterministic — see W7d step 1 brief's Q5 mapping
+# table). Three escalating tiers, applied in order; first hit wins:
+#   * Label tier (primary): Phase's goal_doc_id = epic whose labels contain
+#     the phase's "goal-<slug>" label. Task's phase_doc_id = phase whose
+#     labels contain BOTH the task's "goal-<slug>" AND "phase-<name>" labels.
+#   * Tier-1 (dep-edge inference, paperflow-gmb): for tasks still rootless
+#     after the label tier, walk the row's `dependencies` array and adopt the
+#     first edge whose `depends_on_id` is a KNOWN phase id. Both the W7
+#     materialization convention (type:"blocks") and the older bd
+#     parent-child convention (type:"parent-child") are honored, blocks
+#     first. Edges to a known goal id are NOT adopted (goals aren't valid
+#     task parents — tasks parent to phases); such tasks fall to tier-2.
+#     Recovers ~99 barkpark orphans (66 via blocks + 33 via parent-child).
+#   * Tier-2 (synthetic imported-legacy, paperflow-gmb): tasks STILL rootless
+#     are parented to a lazily-created synthetic phase
+#     "<prefix>-imported-unparented-phase" (phase_name="imported-unparented")
+#     which itself parents to a synthetic goal "<prefix>-imported-legacy-goal"
+#     (goal_slug="imported-legacy"). One synthetic goal+phase per store,
+#     created only when a rootless remainder exists. Keeps legacy cruft out of
+#     real goals while leaving the orphan (parent_id="") count at ~0.
 #
 # Usage: paperflow-import-bd [--store <path>...] [--apply] [--limit N] [--verbose]
 
@@ -104,9 +114,16 @@ for store in "${STORES[@]}"; do
     printf 'STORE: %s\n' "$store"
     _log "store-begin: $store"
 
-    # The classifier emits per-row TSV: kind \t id \t parent_id \t lifecycle \t priority \t title-json \t description-json [\t "orphan"]
+    # The classifier emits per-row TSV (8 + 2 fields):
+    #   kind \t id \t parent_id \t lifecycle \t priority \t title-json \t
+    #   description-json \t orphan-flag \t goal_slug \t phase_name \t resolution
     # title and description are pre-JSON-escaped so the bash side never
     # re-escapes; we hand them straight to jq via --argjson string-tags.
+    # goal_slug carries the goal-<slug> stripped from labels (soft-spot #2);
+    # phase_name carries the phase-<name> stripped from labels (soft-spot #1).
+    # resolution is one of: label | dep-edge | synthetic | _ (none).
+    # Synthetic goal+phase rows are emitted ahead of their children when any
+    # rootless remainder exists for the store.
     CLASSIFIED="$(mktemp -t pf-import.XXXXXX)"
     trap 'rm -f "$CLASSIFIED"' EXIT
 
@@ -143,16 +160,54 @@ for r in rows:
             # First epic wins — both active stores have unique goal-<slug> → epic mappings.
             epic_by_slug.setdefault(lab, r['id'])
 
-# Pass 2: index phases by (goal-slug, phase-name) composite.
+# Pass 2: index phases by (goal-slug, phase-name) composite, AND a flat set of
+# every known phase id (used by tier-1 dep-edge inference) and goal id set.
 phase_by_goal_phase = {}
+phase_ids = set()
+goal_ids = set()
 for r in rows:
     labels = r.get('labels') or []
+    if r.get('issue_type') == 'epic':
+        goal_ids.add(r['id'])
     if 'kind:phase' not in labels:
         continue
+    phase_ids.add(r['id'])
     goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
     phase_lbl = next((l for l in labels if l.startswith('phase-')), None)
     if goal_lbl and phase_lbl:
         phase_by_goal_phase[(goal_lbl, phase_lbl)] = r['id']
+
+# Tier-1 helper: first dependency edge whose depends_on_id is a known phase.
+# bd records two edge conventions — type:"blocks" (the W7 task-materialization
+# convention) and the older type:"parent-child". Both, when pointing at a
+# phase, encode "this task belongs under that phase". Blocks is checked first
+# (the documented W7 convention); parent-child is the legacy fallback.
+def dep_edge_phase(r):
+    deps = r.get('dependencies') or []
+    for want in ('blocks', 'parent-child'):
+        for d in deps:
+            if d.get('type') != want:
+                continue
+            target = d.get('depends_on_id')
+            if target in phase_ids:
+                return target
+    return ''
+
+# Store prefix for the synthetic id scheme — bd ids are "<prefix>-<suffix>";
+# the prefix is stable per store (paperflow-* / barkpark-*). The synthetic
+# goal/phase ids are deterministic so re-runs (and createIfNotExists) dedup.
+def store_prefix():
+    for r in rows:
+        rid = r.get('id') or ''
+        if '-' in rid:
+            return rid.split('-', 1)[0]
+    return 'pf'
+
+PREFIX = store_prefix()
+SYNTH_GOAL_ID = '%s-imported-legacy-goal' % PREFIX
+SYNTH_PHASE_ID = '%s-imported-unparented-phase' % PREFIX
+SYNTH_GOAL_SLUG = 'imported-legacy'
+SYNTH_PHASE_NAME = 'imported-unparented'
 
 # bd status → barkpark lifecycle.
 STATUS_MAP = {
@@ -163,7 +218,10 @@ STATUS_MAP = {
     'cancelled': 'cancelled',
 }
 
-def emit(kind, rid, parent, lifecycle, priority, title, desc, orphan=False):
+OUT = []  # buffer so synthetic goal/phase can be flushed ahead of children
+
+def emit(kind, rid, parent, lifecycle, priority, title, desc,
+         orphan=False, goal_slug='', phase_name='', resolution=''):
     # NB: empty fields collapse under bash IFS=$'\t' (tab is IFS-whitespace),
     # so empty parent/title etc. become an empty placeholder we decode on the
     # bash side. "_" is safe here — bd ids only contain [a-zA-Z0-9-].
@@ -173,9 +231,16 @@ def emit(kind, rid, parent, lifecycle, priority, title, desc, orphan=False):
         json.dumps(title or ''),
         json.dumps(desc or ''),
         'orphan' if orphan else '_',
+        sub(goal_slug),
+        sub(phase_name),
+        sub(resolution),
     ]
-    sys.stdout.write('\t'.join(fields) + '\n')
+    OUT.append('\t'.join(fields))
 
+# First pass over rows: classify goals/phases/label-resolved + tier-1 tasks.
+# Tasks still rootless are buffered and resolved in tier-2 after this loop so
+# the synthetic goal/phase can be created lazily and emitted before them.
+rootless = []  # (rid, lifecycle, priority, title, desc)
 emitted = 0
 for r in rows:
     if limit and emitted >= limit:
@@ -187,43 +252,99 @@ for r in rows:
     status = STATUS_MAP.get(r.get('status', 'open'), 'open')
     priority = r.get('priority', 2)
     issue_type = r.get('issue_type', 'task')
+    goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
+    phase_lbl = next((l for l in labels if l.startswith('phase-')), None)
+    goal_slug = goal_lbl[len('goal-'):] if goal_lbl else ''
+    phase_name = phase_lbl[len('phase-'):] if phase_lbl else ''
 
     if issue_type == 'epic':
-        # Goals: parent_id is empty (top-level). slug derived from first goal-<slug> label.
+        # Goals: parent_id is empty (top-level). slug = first goal-<slug> label
+        # (soft-spot #2 — pass it explicitly so the mirror keeps the real slug).
         # NB: the W7d brief's strict rule "epic AND kind:goal" misses 34/35 epics
         # across the two stores; relaxed to "epic" wins the practical case and
         # the orchestrator was informed in the import return.
-        emit('goal', rid, '', status, priority, title, desc)
+        emit('goal', rid, '', status, priority, title, desc,
+             goal_slug=goal_slug, resolution='label')
     elif 'kind:phase' in labels:
-        goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
         parent = epic_by_slug.get(goal_lbl, '') if goal_lbl else ''
-        emit('phase', rid, parent, status, priority, title, desc, orphan=not parent)
+        # phase_name carried for soft-spot #1 (mirror_phase wants the real name).
+        emit('phase', rid, parent, status, priority, title, desc,
+             orphan=not parent, goal_slug=goal_slug, phase_name=phase_name,
+             resolution='label' if parent else '')
     else:
-        goal_lbl = next((l for l in labels if l.startswith('goal-')), None)
-        phase_lbl = next((l for l in labels if l.startswith('phase-')), None)
+        # Label tier.
         parent = ''
         if goal_lbl and phase_lbl:
             parent = phase_by_goal_phase.get((goal_lbl, phase_lbl), '')
-        emit('task', rid, parent, status, priority, title, desc, orphan=not parent)
+        if parent:
+            emit('task', rid, parent, status, priority, title, desc,
+                 goal_slug=goal_slug, phase_name=phase_name, resolution='label')
+        else:
+            # Tier-1: dep-edge to a known phase.
+            dep_parent = dep_edge_phase(r)
+            if dep_parent:
+                emit('task', rid, dep_parent, status, priority, title, desc,
+                     goal_slug=goal_slug, phase_name=phase_name,
+                     resolution='dep-edge')
+            else:
+                # Defer to tier-2.
+                rootless.append((rid, status, priority, title, desc,
+                                 goal_slug, phase_name))
     emitted += 1
+
+# Tier-2: synthetic imported-legacy goal + phase for the rootless remainder.
+# Lazily created only when at least one rootless task exists. The synthetic
+# goal is a NEW clean bucket (NOT an existing real goal) — this keeps legacy
+# cruft out of real goals like "w7-retire-beads"; a reviewer sees one obvious
+# "imported-legacy" bucket instead of mis-parented tasks scattered through
+# real goals. createIfNotExists + deterministic ids make re-runs idempotent.
+if rootless:
+    emit('goal', SYNTH_GOAL_ID, '', 'open', 2,
+         'Imported legacy tasks (%s)' % PREFIX,
+         'Synthetic catch-all goal for pre-convention rootless tasks recovered '
+         'by paperflow-import-bd tier-2. Not a real paperflow Goal.',
+         goal_slug=SYNTH_GOAL_SLUG, resolution='synthetic')
+    emit('phase', SYNTH_PHASE_ID, SYNTH_GOAL_ID, 'open', 2,
+         'Imported unparented tasks (%s)' % PREFIX,
+         'Synthetic phase holding rootless tasks with no recoverable parent.',
+         goal_slug=SYNTH_GOAL_SLUG, phase_name=SYNTH_PHASE_NAME,
+         resolution='synthetic')
+    for (rid, status, priority, title, desc, goal_slug, phase_name) in rootless:
+        emit('task', rid, SYNTH_PHASE_ID, status, priority, title, desc,
+             goal_slug=goal_slug, phase_name=phase_name, resolution='synthetic')
+
+sys.stdout.write('\n'.join(OUT) + ('\n' if OUT else ''))
 PYEOF
 
     # Tally + iterate.
     n_goal=0; n_phase=0; n_task=0
     n_already=0; n_would=0; n_imported=0; n_failed=0; n_orphan=0
-    while IFS=$'\t' read -r kind rid parent lifecycle priority title_json desc_json orphan_flag; do
+    n_dep_edge=0; n_synthetic=0
+    while IFS=$'\t' read -r kind rid parent lifecycle priority title_json desc_json orphan_flag goal_slug phase_name resolution; do
         # Decode "_" placeholders back to empty.
         [ "$parent" = "_" ] && parent=""
         [ "$lifecycle" = "_" ] && lifecycle=""
         [ "$priority" = "_" ] && priority="2"
         [ "$orphan_flag" = "_" ] && orphan_flag=""
+        [ "$goal_slug" = "_" ] && goal_slug=""
+        [ "$phase_name" = "_" ] && phase_name=""
+        [ "$resolution" = "_" ] && resolution=""
 
         case "$kind" in
             goal)  n_goal=$((n_goal+1)) ;;
             phase) n_phase=$((n_phase+1)) ;;
             task)  n_task=$((n_task+1)) ;;
         esac
-        [ "$orphan_flag" = "orphan" ] && n_orphan=$((n_orphan+1))
+        # A task is a "still-rootless orphan" only if parent is empty after all
+        # tiers. dep-edge / synthetic resolutions are tracked separately so the
+        # summary can show the recovery breakdown.
+        if [ "$kind" = "task" ]; then
+            case "$resolution" in
+                dep-edge)  n_dep_edge=$((n_dep_edge+1)) ;;
+                synthetic) n_synthetic=$((n_synthetic+1)) ;;
+            esac
+        fi
+        [ -z "$parent" ] && [ "$kind" = "task" ] && n_orphan=$((n_orphan+1))
 
         if [ "$APPLY" -eq 1 ] && [ "${PAPERFLOW_MIRROR_GOALS:-0}" = "1" ]; then
             # Client-side existence probe (skip already-imported rows fast).
@@ -236,8 +357,8 @@ PYEOF
 
         if [ "$APPLY" -ne 1 ]; then
             n_would=$((n_would+1))
-            [ "$VERBOSE" -eq 1 ] && _log "would-post: $kind $rid → parent=$parent lifecycle=$lifecycle"
-            printf '  WOULD-POST: %s as %s parent=%s lifecycle=%s\n' "$rid" "$kind" "${parent:-<none>}" "$lifecycle"
+            [ "$VERBOSE" -eq 1 ] && _log "would-post: $kind $rid → parent=$parent lifecycle=$lifecycle resolution=${resolution:-<none>}"
+            printf '  WOULD-POST: %s as %s parent=%s lifecycle=%s via=%s\n' "$rid" "$kind" "${parent:-<none>}" "$lifecycle" "${resolution:-<none>}"
             continue
         fi
 
@@ -249,25 +370,26 @@ PYEOF
 
         case "$kind" in
             goal)
-                # Derive slug from first goal-<slug> label — re-grep the raw labels
-                # is fastest, but we already lost them; fall back to the mirror's default.
-                if barkpark_mirror_goal "$rid" "$title"; then
+                # Soft-spot #2: pass the goal-<slug> stripped from labels (carried
+                # in the TSV) so the mirror keeps the REAL slug ("w7-retire-beads")
+                # instead of the id-suffix-derived default ("7r9"). Empty falls
+                # back to the mirror's _barkpark_mirror_default_slug.
+                if barkpark_mirror_goal "$rid" "$title" "$goal_slug"; then
                     n_imported=$((n_imported+1))
-                    _log "posted: goal $rid"
+                    _log "posted: goal $rid (slug=${goal_slug:-<derived>})"
                 else
                     n_failed=$((n_failed+1))
                     _log "FAIL: goal $rid"
                 fi
                 ;;
             phase)
-                # Recover phase_name from the bd id is impossible; we only have it as
-                # part of the title. Pass title as phase_name fallback — barkpark
-                # validator accepts any non-empty value here. Better: keep phase_name
-                # in the classifier output. (TODO: append phase_name to the TSV.)
-                phase_name="${title:-build}"
+                # Soft-spot #1: pass the phase-<name> stripped from labels (carried
+                # in the TSV) as phase_name, not the title. Fall back to "build"
+                # only when the row carried no phase- label at all (rare).
+                phase_name="${phase_name:-build}"
                 if barkpark_mirror_phase "$rid" "$phase_name" "$parent" "$title"; then
                     n_imported=$((n_imported+1))
-                    _log "posted: phase $rid"
+                    _log "posted: phase $rid (name=$phase_name)"
                 else
                     n_failed=$((n_failed+1))
                     _log "FAIL: phase $rid"
@@ -289,6 +411,9 @@ PYEOF
     trap - EXIT
 
     printf '  classified: G=%d P=%d T=%d (orphan=%d)\n' "$n_goal" "$n_phase" "$n_task" "$n_orphan"
+    printf '  recovered-via-dep-edge: %d\n' "$n_dep_edge"
+    printf '  parented-to-synthetic: %d\n' "$n_synthetic"
+    printf '  orphan (still rootless): %d\n' "$n_orphan"
     if [ "$APPLY" -eq 1 ]; then
         printf '  already-in-barkpark: %d\n' "$n_already"
         printf '  imported: %d / failed: %d\n' "$n_imported" "$n_failed"
@@ -296,7 +421,7 @@ PYEOF
     else
         printf '  would-import: %d\n' "$n_would"
     fi
-    _log "store-end: $store G=$n_goal P=$n_phase T=$n_task orphan=$n_orphan already=$n_already would=$n_would imp=$n_imported failed=$n_failed"
+    _log "store-end: $store G=$n_goal P=$n_phase T=$n_task orphan=$n_orphan dep_edge=$n_dep_edge synthetic=$n_synthetic already=$n_already would=$n_would imp=$n_imported failed=$n_failed"
 done
 
 printf 'log: %s\n' "$LOG"
