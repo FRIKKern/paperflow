@@ -68,6 +68,10 @@ Pointer files hold bd-id strings (e.g. `paperflow-7r9`). Under the W7c dual-writ
 
 For multi-axis outcomes spanning more than one Goal, apply an optional `umbrella-<slug>` label — `/paperflow:resume` groups Goals by umbrella when one is present.
 
+### Task topology
+
+After W7 retires Beads, tasks live as documents inside a **dataset, inside a project, inside a workspace** — the Barkpark tenancy substrate, reused end-to-end. Per-repo isolation becomes per-project; per-checkout isolation becomes per-dataset. One global Postgres task-store, no federation. Task IDs are `doc_id`s, globally unique. Decided in W7 plan Q1, recorded permanently in [`docs/decisions/2026-05-28-task-topology.md`](./docs/decisions/2026-05-28-task-topology.md).
+
 ---
 
 ## Beads
