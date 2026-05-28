@@ -76,7 +76,7 @@ After W7 retires Beads, tasks live as documents inside a **dataset, inside a pro
 
 ## Beads
 
-paperflow uses Beads (`bd`) as the single source of truth for goals, phases, tasks, and events. No JSON sidecars, no parallel state. The DB lives at `~/.beads/beads.db` (default Beads location); paperflow does not bundle, redistribute, or modify Beads.
+paperflow uses Beads (`bd`) as its task model and CLI surface for goals, phases, tasks, and events — the conceptual ground truth the orchestrator reasons about. The *runtime* store flipped in Wave 7: tasks now live as documents in Barkpark's Postgres substrate (see [Task topology](#task-topology) above and the W7c pointer-namespace note), reached through the `bd-shim` bd-compatible wrapper; the local Beads/Dolt store at `~/.beads/beads.db` remains the rollback target. The flip is recorded permanently in [`docs/decisions/2026-05-28-task-topology.md`](./docs/decisions/2026-05-28-task-topology.md). paperflow does not bundle, redistribute, or modify Beads itself.
 
 ### Per-repo init
 

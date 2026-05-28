@@ -51,7 +51,7 @@ flowchart LR
     S -->|writes events| BD
 ```
 
-One Claude Code instance coordinates; every non-trivial step is delegated to a subagent (hard 30 LOC / 50 line / 500 token thresholds, audited by `Subagent-Run:` commit trailers in `/paperflow:review`). Beads is the only persistent state.
+One Claude Code instance coordinates; every non-trivial step is delegated to a subagent (hard 30 LOC / 50 line / 500 token thresholds, audited by `Subagent-Run:` commit trailers in `/paperflow:review`). Beads is paperflow's task model and CLI surface; as of Wave 7, tasks live as documents in Barkpark's Postgres substrate, reached through a bd-compatible shim (`bd-shim`), with the local Beads/Dolt store as the rollback target. See `barkpark/docs/SETUP-WITH-PAPERFLOW.md`.
 
 ---
 

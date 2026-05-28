@@ -6,7 +6,7 @@ When something is complicated, lead with a diagram and concrete details. Don't u
 
 paperflow runs in **one Claude Code instance** — the orchestrator. That single instance creates Goals, designs the task graph, dispatches subagents to do focused work, claims Tasks atomically in Beads while a subagent runs, closes them on verification, and routes browser button clicks back into its own session via the bridge. The orchestrator's job is *context*: knowing the active Goal, the active Phase within it, the currently claimed Task, the dependency graph above and below it, and the ground truth in Beads.
 
-The orchestrator never does long-form work itself — it delegates. `/paperflow:plan`, `/paperflow:build`, `/paperflow:review` all spawn subagents for the actual writing, coding, reviewing. The orchestrator reads the next ready Task within the active phase, claims it in Beads, hands a focused prompt to a subagent with the Task ID and goal+phase context in scope, waits for verified output, then closes the Task. When the active phase empties, the orchestrator advances to the next phase. The bridge is the only inbound channel; subagent fan-out is the only outbound channel; Beads is the only persistent state.
+The orchestrator never does long-form work itself — it delegates. `/paperflow:plan`, `/paperflow:build`, `/paperflow:review` all spawn subagents for the actual writing, coding, reviewing. The orchestrator reads the next ready Task within the active phase, claims it in Beads, hands a focused prompt to a subagent with the Task ID and goal+phase context in scope, waits for verified output, then closes the Task. When the active phase empties, the orchestrator advances to the next phase. The bridge is the only inbound channel; subagent fan-out is the only outbound channel. Beads is paperflow's task model and CLI surface; as of Wave 7, tasks live as documents in Barkpark's Postgres substrate, reached through a bd-compatible shim (`bd-shim`), with the local Beads/Dolt store as the rollback target.
 
 # Goals + Phases + Tasks
 
@@ -23,7 +23,7 @@ Two pointer files in `<repo>/.paperflow/` track what's active in this checkout:
     <repo>/.paperflow/active-goal     # one line: bd-a1b2
     <repo>/.paperflow/active-phase    # one line: bd-a1b2.2
 
-Lookup walks up from cwd to the nearest `.paperflow/`. When neither file exists anywhere up to `/`, there's no active goal/phase — paperflow falls back to whatever-Goal-is-newest behaviour. Both pointers are written by `/paperflow:goal` (on Goal creation) and `/paperflow:resume` (on switch).
+Lookup walks up from cwd to the nearest `.paperflow/`. When neither file exists anywhere up to `/`, there's no active goal/phase — `paperflow-active-scope --read` returns empty (exit 1); there is no fallback to a newest Goal. Both pointers are written by `/paperflow:goal` (on Goal creation) and `/paperflow:resume` (on switch).
 
 Under the hood paperflow uses Beads' native `--type epic` for Goal-tasks
 and `bd epic close-eligible` to auto-close completed Goals at phase-empty.
