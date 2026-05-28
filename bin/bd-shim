@@ -6,11 +6,14 @@
 // the orchestrator uses a command it does not (yet) wrap.
 //
 // SCOPE — what this translates today:
+//   bd create "<title>" [--type epic|task] [--label X]* [--description D]
+//                        [--priority N] [--parent <id>]               (#2)
 //   bd show <id> --json
 //   bd list [--label X] [--status Y] [--type T] --json
 //   bd ready [--label phase-X] --json
 //   bd update <id> --claim
 //   bd update <id> --close [--reason …]
+//   bd close <id> [--reason …]                                        (#2)
 //   bd update <id> --add-label <label> [--remove-label <label>]   (tt5)
 //   bd dep add <child> <parent>
 //   bd epic close <id>
@@ -70,8 +73,10 @@ function main() {
   if (first === "--selftest") return cmdSelftest();
   if (first === "--help" || first === "-h") return cmdHelp();
 
-  // Top-level: show | list | ready | update | dep | epic
+  // Top-level: create | show | list | ready | update | dep | close | epic
   switch (first) {
+    case "create":
+      return cmdCreate(argv.slice(1));
     case "show":
       return cmdShow(argv.slice(1));
     case "list":
@@ -82,6 +87,11 @@ function main() {
       return cmdUpdate(argv.slice(1));
     case "dep":
       return cmdDep(argv.slice(1));
+    case "close":
+      // #2: bare `bd close <id>` previously fell through to the real local
+      // bd (a SEPARATE Dolt store → split-brain). Route it to the same
+      // close-by-id path as `bd update <id> --close`.
+      return cmdClose(argv.slice(1));
     case "epic":
       return cmdEpic(argv.slice(1));
     default:
@@ -118,11 +128,13 @@ function cmdHelp() {
 Pointing at: ${BARKPARK_URL}
 
 Translated commands:
+  bd create "<title>" [--type epic|task] [--label X]* [--description D] [--priority N] [--parent <id>]
   bd show <id> --json
   bd list [--label X] [--status Y] [--type T] --json
   bd ready [--label phase-X] --json
   bd update <id> --claim
   bd update <id> --close [--reason ...]
+  bd close <id> [--reason ...]
   bd update <id> --add-label <label> [--remove-label <label>]
   bd dep add <child> <parent>
   bd epic close <id>
@@ -135,6 +147,132 @@ Environment:
   BARKPARK_URL    override the Barkpark base URL (default http://localhost:4000)
   BARKPARK_TOKEN  override the auth token (default barkpark-dev-token)`);
   process.exit(0);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// create (#2 — the split-brain fix)
+// ────────────────────────────────────────────────────────────────────────
+
+// `bd create "<title>" [--type epic|task] [--label X]* [--description D]
+//  [--priority N] [--parent <id>]` → a Barkpark create mutation. WITHOUT this
+// wrap, `bd create` fell through to the real local `bd` binary, which writes
+// to a SEPARATE Dolt store — tasks created that way never reached Barkpark
+// (the #2 split-brain). We translate to the same POST the e2e confirmed:
+//
+//   POST /v1/data/mutate/production
+//   { "mutations": [ { "create": {
+//       "_type": "goal|phase|task",
+//       "doc_id": "<generated-or-derived>",       // NB: doc_id, NOT _id —
+//       "title":  "<title>",                       // create_document reads
+//       "content": { "kind": <type>, ... }         // doc_id; _id is ignored.
+//   } } ] }
+//
+// Type/kind mapping (verified against tasks.ex validate_kind_content):
+//   --type epic               → _type goal,  content.kind "goal"
+//   --label kind:phase        → _type phase, content.kind "phase"
+//   else                      → _type task,  content.kind "task"
+//
+// Per-kind REQUIRED content (validate_kind_content rejects the create otherwise):
+//   goal:  goal_slug (non-empty string)         — derived from the title slug
+//   phase: phase_name (non-empty string)        — derived from the title
+//   task:  lifecycle_status ∈ open|in_progress|blocked|done|cancelled — "open"
+//
+// `--parent <id>` is stored as content.parent for goal/phase children and
+// content.parent_id for work-tasks (the W7 hierarchy contract). We resolve the
+// parent to its persisted doc_id (the "drafts." form) so the stored pointer
+// matches what `bd ready --phase_id` / edges look up — bare parents would not
+// match (verified live: phase_id filter is an exact match on the stored
+// "drafts.<id>" parent_id).
+async function cmdCreate(argv) {
+  const { positional, flags } = parseArgs(argv);
+  const title = positional[0];
+  if (!title) return die('bd create: missing "<title>"');
+
+  const labels = collectFlag(flags, "label");
+  const hasPhaseKindLabel = labels.some((l) => String(l) === "kind:phase");
+
+  // Resolve the bd `--type` + kind:phase label into the barkpark _type/kind.
+  const bdType = typeof flags.type === "string" ? flags.type : null;
+  let docType; // barkpark _type
+  if (bdType === "epic") docType = "goal";
+  else if (hasPhaseKindLabel) docType = "phase";
+  else docType = "task"; // bd's task/story/bug all ride the task lifecycle
+
+  // Derive a stable doc_id from the title slug + a short random suffix so the
+  // created id is human-recognisable AND collision-resistant. The caller's
+  // create confirmation prints this id; `bd show <id>` then resolves it.
+  const slug = slugify(title);
+  const docId = `${slug || docType}-${randomSuffix()}`;
+
+  // Assemble content per the kind contract. `labels` is free-form (the
+  // validator ignores unknown keys); we always carry it so `bd list --label`
+  // and `bd show .labels[]` find the row.
+  const content = { kind: docType, labels };
+  const priority = parsePriority(flags.priority);
+  if (priority !== null) content.priority = priority;
+  const description = typeof flags.description === "string" ? flags.description : null;
+  if (description) content.description = description;
+
+  // Resolve --parent to its persisted doc_id (the "drafts." form). Goal/phase
+  // children pin content.parent; work-tasks pin content.parent_id.
+  let parentResolved = null;
+  if (typeof flags.parent === "string") {
+    parentResolved = await resolveDocId(flags.parent);
+  }
+
+  if (docType === "goal") {
+    content.goal_slug = slug || docId; // required, non-empty
+  } else if (docType === "phase") {
+    content.phase_name = title; // required, non-empty
+    if (parentResolved) content.parent = parentResolved;
+  } else {
+    content.lifecycle_status = "open"; // required
+    if (parentResolved) content.parent_id = parentResolved;
+  }
+
+  const mutation = {
+    create: { _type: docType, doc_id: docId, title, content },
+  };
+
+  try {
+    const res = await httpJson("POST", "/v1/data/mutate/production", {
+      mutations: [mutation],
+    });
+    const result = (res && res.results && res.results[0]) || null;
+    if (!result || !result.id) {
+      return die(`bd create: unexpected mutate response ${JSON.stringify(res)}`);
+    }
+    // result.id is the persisted "drafts.<id>" form; strip the prefix so the
+    // confirmation + the id consumers re-use is the bare paperflow-* id (what
+    // `bd show <id>` / `bd dep add` then resolve). Real bd prints
+    // `✓ Created issue: <id>`.
+    const bareId = stripDraftsPrefix(result.id);
+    console.log(`✓ Created issue: ${bareId} — ${title}`);
+    process.exit(0);
+  } catch (err) {
+    return die(`bd create: ${err.message}`);
+  }
+}
+
+// Lowercase, hyphen-separated, alnum-only slug (mirrors bd's id-from-title).
+function slugify(s) {
+  return String(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
+function randomSuffix() {
+  return require("crypto").randomBytes(3).toString("hex");
+}
+
+// bd priorities are integers (0 = highest). Accept a numeric string; return
+// null for absent/non-numeric so we don't stamp a bogus content.priority.
+function parsePriority(v) {
+  if (typeof v !== "string") return null;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -283,25 +421,35 @@ async function cmdList(argv) {
 async function cmdReady(argv) {
   const { flags } = parseArgs(argv);
   try {
+    // #5: route to GET /v1/tasks/ready (Barkpark's Tasks.ready/1 — the
+    // DEP-AWARE queue). The previous path hit GET /v1/tasks?lifecycle_status=open
+    // (the plain index), which is NOT dep-aware: it surfaced blocked tasks as
+    // ready. Tasks.ready/1 excludes any task with an unsatisfied `blocks` edge
+    // (target not `done`), which is the whole point of the W7a ready queue —
+    // the shim must expose it. Verified live: a task B blocked on A is absent
+    // from /v1/tasks/ready until A closes, then appears.
     const qs = new URLSearchParams();
-    // w7-08c: real `bd ready` returns rows of any kind (tasks AND phases)
-    // whose lifecycle_status is open. Barkpark's `Tasks.ready/1` filters
-    // to type=task only — narrower than real bd. Use the new
-    // GET /v1/tasks?lifecycle_status=open endpoint so phases surface too
-    // (matches the captured ready-all fixture whose element[0] is a phase).
-    qs.set("lifecycle_status", "open");
 
-    // --label filtering is intentionally NOT translated to an upstream
-    // phase_id query: real bd's `phase-<name>` labels are arbitrary
-    // string tags (e.g. "phase-build") that DON'T correspond to a
-    // barkpark phase_id (which is a UUID-derived doc_id like
-    // "drafts.paperflow-xmb"). Returning the full open set keeps the
-    // SHAPE contract intact (element[0] is the most-recently-updated
-    // open row → consistent with real bd's output) without inventing a
-    // bogus filter. labels remain in result rows for downstream consumers
-    // that want to filter client-side.
+    // --label phase-<id> → the ready endpoint's `phase_id` query param. The
+    // stored parent_id is the persisted "drafts.<id>" form, and Tasks.ready's
+    // phase_id filter is an EXACT match, so resolve the slug to that form.
+    // (Non-phase labels — e.g. goal-<slug> — have no upstream ready filter;
+    // they stay in the result rows for client-side filtering, matching the
+    // prior contract. real bd's `phase-<name>` short slugs that aren't a doc
+    // simply resolve to themselves and match nothing → empty, same as bd.)
+    const labels = collectFlag(flags, "label");
+    let phaseId = null;
+    for (const label of labels) {
+      const p = labelToPhaseId(label);
+      if (p) {
+        phaseId = await resolveDocId(p);
+        break;
+      }
+    }
+    if (phaseId) qs.set("phase_id", phaseId);
     if (flags.limit) qs.set("limit", flags.limit);
-    const path = `/v1/tasks?${qs.toString()}`;
+
+    const path = `/v1/tasks/ready${qs.toString() ? `?${qs.toString()}` : ""}`;
     const result = await httpJson("GET", path);
     if (!result || !result.ok) return die("bd ready: barkpark refused");
     const out = (result.docs || []).map((d) => renderListShape(d));
@@ -326,10 +474,13 @@ async function cmdUpdate(argv) {
       // w7-08: targeted POST /v1/tasks/:doc_id/claim — same semantics as
       // bd's `update <id> --claim` (caller names the row). No listAll() walk;
       // the controller's Tasks.claim_by_id/3 carries the advisory lock + CAS
-      // + epoch bump on that specific doc.
+      // + epoch bump on that specific doc. Resolve the "drafts." prefix first:
+      // claim_by_id's fetch is an EXACT doc_id match, so a bare id 404s (same
+      // root cause as #4's dep-add). Mirror cmdShow/cmdDep's resolution.
+      const resolvedId = await resolveDocId(id);
       const result = await httpJson(
         "POST",
-        `/v1/tasks/${encodeURIComponent(id)}/claim`,
+        `/v1/tasks/${encodeURIComponent(resolvedId)}/claim`,
         { worker_id: WORKER_ID }
       );
       if (!result || result.ok !== true) {
@@ -343,27 +494,7 @@ async function cmdUpdate(argv) {
   }
 
   if (flags.close !== undefined) {
-    try {
-      // Need observed_epoch to close; fetch the row first to discover it.
-      const docs = await listAll();
-      const target = docs.find((d) => d.doc_id === id || d.id === id);
-      if (!target) return die(`bd update --close: not found (${id})`);
-      const epoch = (target.claim && target.claim.epoch) || 1;
-      const body = { worker_id: WORKER_ID, observed_epoch: epoch };
-      if (flags.reason) body.lifecycle_status = "done"; // reason is metadata in bd
-      const result = await httpJson(
-        "POST",
-        `/v1/tasks/${encodeURIComponent(target.doc_id)}/close`,
-        body
-      );
-      if (!result || result.ok !== true) {
-        return die(`bd update --close: ${result && result.reason}`);
-      }
-      printConfirm("Updated issue", result.doc);
-      process.exit(0);
-    } catch (err) {
-      return die(`bd update --close: ${err.message}`);
-    }
+    return closeById(id, "bd update --close");
   }
 
   // tt5: --add-label / --remove-label → POST /v1/tasks/<id>/labels.
@@ -405,6 +536,20 @@ async function cmdUpdate(argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// close (bare `bd close <id>` — #2 split-brain + #3 claimed-task close)
+// ────────────────────────────────────────────────────────────────────────
+
+// Bare `bd close <id>` was NOT wrapped, so it fell through to the real local
+// bd binary (a SEPARATE Dolt store → never reached Barkpark). Route it to the
+// same close-by-id path as `bd update <id> --close`.
+function cmdClose(argv) {
+  const { positional } = parseArgs(argv);
+  const id = positional[0];
+  if (!id) return die("bd close: missing <id>");
+  return closeById(id, "bd close");
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // dep add
 // ────────────────────────────────────────────────────────────────────────
 
@@ -415,15 +560,27 @@ async function cmdDep(argv) {
   const parent = argv[2];
   if (!child || !parent) return die("bd dep add: missing <child> <parent>");
   try {
+    // #4: the edge endpoint resolves from_id/to_id via find_task_by_doc_id,
+    // which is an EXACT doc_id match — barkpark stores ids prefixed with
+    // "drafts.", so bare ids 404 (verified live). cmdShow/cmdUpdate already
+    // resolve the prefix; cmdDep did NOT. Resolve both ends to their persisted
+    // doc_id (try bare, then drafts.) before POSTing. Mirrors resolveDocId.
+    const [fromId, toId] = await Promise.all([
+      resolveDocId(child),
+      resolveDocId(parent),
+    ]);
     const result = await httpJson("POST", "/v1/tasks/edges", {
-      from_id: child,
-      to_id: parent,
+      from_id: fromId,
+      to_id: toId,
       kind: "blocks",
     });
     if (!result || result.ok !== true) {
       return die(`bd dep add: ${result && result.reason}`);
     }
-    console.log(`✓ Added dependency: ${child} → ${parent} (blocks)`);
+    // Print the bare ids the caller passed (consumers reason in bare ids).
+    console.log(
+      `✓ Added dependency: ${stripDraftsPrefix(child)} → ${stripDraftsPrefix(parent)} (blocks)`
+    );
     process.exit(0);
   } catch (err) {
     return die(`bd dep add: ${err.message}`);
@@ -439,24 +596,13 @@ async function cmdEpic(argv) {
   if (sub === "close") {
     const id = argv[1];
     if (!id) return die("bd epic close: missing <id>");
-    try {
-      const docs = await listAll();
-      const target = docs.find((d) => d.doc_id === id || d.id === id);
-      if (!target) return die(`bd epic close: not found (${id})`);
-      const epoch = (target.claim && target.claim.epoch) || 1;
-      const result = await httpJson(
-        "POST",
-        `/v1/tasks/${encodeURIComponent(target.doc_id)}/close`,
-        { worker_id: WORKER_ID, observed_epoch: epoch }
-      );
-      if (!result || result.ok !== true) {
-        return die(`bd epic close: ${result && result.reason}`);
-      }
-      printConfirm("Updated issue", result.doc);
-      process.exit(0);
-    } catch (err) {
-      return die(`bd epic close: ${err.message}`);
-    }
+    // #8: the old path used listAll() (GET /v1/tasks/ready) which only sees
+    // open/blocked WORK-TASKS — it never surfaced the goal row, so `bd epic
+    // close <goal>` 404'd. closeById resolves via GET /v1/tasks/:doc_id, which
+    // the controller widened to all four W7 types (goal included), so the goal
+    // is found regardless of its lifecycle. The barkpark close side is being
+    // fixed in parallel to accept goal/phase close.
+    return closeById(id, "bd epic close");
   }
   if (sub === "close-eligible") {
     // w7-08: server-side aggregator. Returns [doc_id, …] of every goal whose
@@ -582,6 +728,57 @@ async function listAll() {
   const result = await httpJson("GET", "/v1/tasks/ready?limit=1000");
   if (!result || !result.ok) return [];
   return result.docs;
+}
+
+// #3: close a task BY ID. The previous close path looked the row up via
+// listAll() = GET /v1/tasks/ready?limit=1000, which EXCLUDES in_progress docs
+// (the ready queue is open/blocked only) — so a CLAIMED task 404'd on close.
+// Fix: resolve the row via GET /v1/tasks/:doc_id (finds in_progress docs, all
+// four W7 types — w7-08a / widened in the controller), read its
+// content.claim.epoch, then POST /v1/tasks/:doc_id/close with the observed
+// epoch. Handles the "drafts." prefix the same way cmdShow does (try bare,
+// then drafts.). Shared by `bd close <id>`, `bd update <id> --close`, and
+// `bd epic close <id>`.
+async function closeById(id, label) {
+  try {
+    const candidates = id.startsWith("drafts.") ? [id] : [id, `drafts.${id}`];
+    let doc = null;
+    let resolvedId = null;
+    for (const candidate of candidates) {
+      try {
+        const res = await httpJson("GET", `/v1/tasks/${encodeURIComponent(candidate)}`);
+        if (res && res.ok && res.doc) {
+          doc = res.doc;
+          resolvedId = doc.doc_id || candidate;
+          break;
+        }
+      } catch (_) {
+        /* try next candidate */
+      }
+    }
+    if (!doc) return die(`${label}: not found (${id})`);
+
+    // Epoch lives at content.claim.epoch; render_doc also surfaces it at the
+    // top level as `claim`. A never-claimed row has no epoch — close still
+    // needs an integer, so default to 1 (matches the close endpoint's
+    // observed_epoch contract; a never-claimed row's CAS uses rev anyway).
+    const claim =
+      doc.claim || (doc.content && doc.content.claim) || null;
+    const epoch = (claim && claim.epoch) || 1;
+
+    const result = await httpJson(
+      "POST",
+      `/v1/tasks/${encodeURIComponent(resolvedId)}/close`,
+      { worker_id: WORKER_ID, observed_epoch: epoch }
+    );
+    if (!result || result.ok !== true) {
+      return die(`${label}: ${result && result.reason}`);
+    }
+    printConfirm("Updated issue", result.doc);
+    process.exit(0);
+  } catch (err) {
+    return die(`${label}: ${err.message}`);
+  }
 }
 
 // w7-08c (paperflow-y1c): shape-per-context renderers, replacing the
