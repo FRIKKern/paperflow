@@ -430,34 +430,88 @@ async function cmdReady(argv) {
     // from /v1/tasks/ready until A closes, then appears.
     const qs = new URLSearchParams();
 
-    // --label phase-<id> → the ready endpoint's `phase_id` query param. The
-    // stored parent_id is the persisted "drafts.<id>" form, and Tasks.ready's
-    // phase_id filter is an EXACT match, so resolve the slug to that form.
-    // (Non-phase labels — e.g. goal-<slug> — have no upstream ready filter;
-    // they stay in the result rows for client-side filtering, matching the
-    // prior contract. real bd's `phase-<name>` short slugs that aren't a doc
-    // simply resolve to themselves and match nothing → empty, same as bd.)
+    // --label scoping (R1). The ready controller (tasks_controller.ready/2)
+    // accepts EXACTLY three query params — dataset, limit, phase_id — and
+    // NOTHING else. There is no generic server-side label filter on the ready
+    // queue. So labels split two ways:
+    //
+    //   * `phase-<id>`  → the `phase_id` query param. NOTE: the ready path uses
+    //     Tasks.ready/1 → ready_query → maybe_filter_phase (tasks.ex), which is
+    //     an EXACT match `content->>'parent_id' == ^phase_id` — it does NOT
+    //     strip "drafts." (the prefix-agnostic c9e8315 fix is on the controller
+    //     `index`/maybe_filter_parent path, a DIFFERENT endpoint the ready
+    //     queue never touches). Work-tasks store parent_id in the persisted
+    //     "drafts.<id>" form (cmdCreate resolves --parent through resolveDocId),
+    //     so we must resolve the phase slug to that same persisted form here or
+    //     the exact match finds nothing. Server-side filter, so dep-awareness
+    //     is preserved.
+    //
+    //   * any OTHER label (e.g. a project tag `myproj`, `goal-<slug>`) → there
+    //     is NO upstream ready filter for it, so we filter the returned ready
+    //     rows CLIENT-SIDE by each task's `labels` array. The filter runs AFTER
+    //     the dep-aware endpoint returns, so blocked tasks are still excluded —
+    //     dep-awareness is preserved; we only narrow the already-ready set.
+    //
+    // PRIOR BUG (e2e residual R1): a non-phase `--label X` hit neither path —
+    // labelToPhaseId returned null so phase_id was never set, and there was no
+    // client-side fallback, so `bd ready --label X` returned the GLOBAL queue
+    // unchanged (the identical-15-row symptom). The clientLabel branch is the
+    // fix.
     const labels = collectFlag(flags, "label");
-    let phaseId = null;
+    let clientLabel = null;
     for (const label of labels) {
       const p = labelToPhaseId(label);
       if (p) {
-        phaseId = await resolveDocId(p);
-        break;
+        // Resolve the phase slug to its persisted doc_id (try bare, then
+        // "drafts.") so the EXACT-match phase_id filter lands on the stored
+        // parent_id. Same resolution cmdCreate used to stamp parent_id.
+        const phaseId = await resolveDocId(p);
+        qs.set("phase_id", phaseId);
+      } else if (clientLabel === null) {
+        // First non-phase label becomes the client-side filter. (No current
+        // caller passes more than one non-phase label to `bd ready`; if one
+        // ever does, real bd ANDs them — match that by ANDing client-side.)
+        clientLabel = label;
+      } else {
+        clientLabel = [].concat(clientLabel, label);
       }
     }
-    if (phaseId) qs.set("phase_id", phaseId);
-    if (flags.limit) qs.set("limit", flags.limit);
+
+    // `--limit` is safe server-side EXCEPT when a client-side label filter is
+    // active: the server would truncate to `limit` BEFORE our filter runs and
+    // silently drop matches past the cut. Defer the limit to the client side
+    // in that case so the cap counts post-filter rows.
+    const clientLabels = clientLabel === null ? [] : [].concat(clientLabel);
+    if (flags.limit && clientLabels.length === 0) qs.set("limit", flags.limit);
 
     const path = `/v1/tasks/ready${qs.toString() ? `?${qs.toString()}` : ""}`;
     const result = await httpJson("GET", path);
     if (!result || !result.ok) return die("bd ready: barkpark refused");
-    const out = (result.docs || []).map((d) => renderListShape(d));
+    let docs = result.docs || [];
+    if (clientLabels.length) {
+      docs = docs.filter((d) => clientLabels.every((l) => docHasLabel(d, l)));
+      if (flags.limit) {
+        const n = parseInt(flags.limit, 10);
+        if (!Number.isNaN(n)) docs = docs.slice(0, n);
+      }
+    }
+    const out = docs.map((d) => renderListShape(d));
     console.log(JSON.stringify(out, null, 2));
     process.exit(0);
   } catch (err) {
     return die(`bd ready: ${err.message}`);
   }
+}
+
+// Does ready-doc `d` carry label `label`? Labels live on the top-level
+// `labels` array (render_ready_doc surfaces content.labels there); fall back
+// to content.labels for older serializations. False when neither is an array.
+function docHasLabel(d, label) {
+  if (!d) return false;
+  const labels = Array.isArray(d.labels)
+    ? d.labels
+    : (d.content && Array.isArray(d.content.labels) ? d.content.labels : null);
+  return Array.isArray(labels) && labels.indexOf(label) !== -1;
 }
 
 // ────────────────────────────────────────────────────────────────────────
