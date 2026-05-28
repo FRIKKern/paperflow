@@ -214,7 +214,7 @@ The orchestrator does the bookkeeping itself; no subagent dispatch is needed for
    paperflow-active-scope --write phase "$PHASE_PREFLIGHT"
    ```
 
-   On goal close (`bd update $GOAL_ID --close`) clear BOTH the per-repo pointer and the scoped global pointers:
+   On goal close (`bd epic close $GOAL_ID`) clear BOTH the per-repo pointer and the scoped global pointers:
 
    ```bash
    : > <repo>/.paperflow/active-goal
@@ -257,7 +257,7 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
   4. Invoke `~/.local/bin/paperflow-continue <slug>`. The launcher reads the sidecar's `resume_prompt`, detects the current terminal (tmux / iTerm / Apple Terminal / fallback), opens a new tab/window running `cd ~ && claude --dangerously-skip-permissions <resume_prompt>`.
   5. Reply with one short sentence — which terminal path was used + slug.
 
-- **Archive** — `bd update $GOAL_ID --close`. Closes every still-open phase-task as a side effect (only legal when no work-tasks remain open). Updates the Goal HTML status to `closed`.
+- **Archive** — `bd epic close $GOAL_ID`. Closes every still-open phase-task as a side effect (only legal when no work-tasks remain open). Updates the Goal HTML status to `closed`.
 
 - **Merge** — fold one open Goal into another as a new phase. Triggered by "merge goal X into Y", "fold this goal into another", or surfaced from the led-to consent step's "merge instead" pick. Both Goals stay in Beads — the source is closed with a `merged-into-<target>` label, the target gains a new "Merged from <source>" phase-task that the source's existing phase-tasks now also depend on. Reversible at the bd level (re-open source, close merged phase). Implemented in `~/.local/bin/paperflow-goal-merge`:
 
@@ -318,6 +318,8 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 
 ## Beads commands
 
+Close uses `bd close <id>` (work-tasks) / `bd epic close <id>` (goals); the `--close` update-flag was removed in bd 1.x.
+
 | Verb | Purpose |
 |---|---|
 | `paperflow-doctor --ensure-bd` | Bootstrap Beads in the repo (first goal only — wraps `bd init`). |
@@ -328,7 +330,7 @@ When the Goal lacks shape — broad scope, multiple axes of variation, or expens
 | `bd show <goal-task-id> --json` | Read goal metadata for HTML render. |
 | `bd list --label goal-<slug> --json` | Read full subtree for HTML render. |
 | `bd update <goal-task-id> --description "…"` | Edit vision. |
-| `bd update <goal-task-id> --close` | Archive. |
+| `bd epic close <goal-task-id>` | Archive (cascade-closes child phases). |
 | `bd compact` | Run when goal-label exceeds ~50 tasks. |
 
 ## Don't

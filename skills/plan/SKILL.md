@@ -203,7 +203,7 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 
 1. **Read the grill answers** and decide what to change in the plan and what to change in the work-tasks.
 2. **Re-write the plan HTML** with the answers integrated.
-3. **Update Beads.** New steps → new work-tasks via `bd create` + `bd dep add`. Reordered steps → re-add dependency edges. Deleted steps → `bd update <id> --close` (or `--delete` if the step never started).
+3. **Update Beads.** New steps → new work-tasks via `bd create` + `bd dep add`. Reordered steps → re-add dependency edges. Deleted steps → `bd close <id>` (or `bd update <id> --delete` if the step never started).
 4. **Offer the user three exits:** re-grill the revised plan; hand off to `/paperflow:build` to start executing; or stop and let it sit.
 
 ## Artifact
@@ -214,6 +214,8 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 
 ## Beads commands
 
+Close uses `bd close <id>` (work-tasks) / `bd epic close <id>` (goals); the `--close` update-flag was removed in bd 1.x.
+
 | Verb | Purpose |
 |---|---|
 | `bd show <goal-task-id> --json` | Read goal metadata + slug. |
@@ -221,7 +223,7 @@ To skip the grill (rare; only for trivial revise-only changes), the user must ex
 | `bd create "<step>" --label goal-<slug>` | Create a work-task. |
 | `bd dep add <work-task> <phase-task>` | Attach work-task beneath active phase. |
 | `bd dep add <child> <parent>` | Encode intra-phase order. |
-| `bd update <id> --close` / `--delete` | Drop steps removed during revise. |
+| `bd close <id>` / `bd update <id> --delete` | Drop steps removed during revise. |
 
 ## Simplify (sub-action)
 

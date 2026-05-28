@@ -108,7 +108,7 @@ Before dispatching any subagent that will Write or Edit files, the orchestrator 
    ~/.local/bin/paperflow-claim-files release "$TASK_ID"
    ```
 
-6. **Close the task as usual** via `bd update $TASK_ID --close`.
+6. **Close the task as usual** via `bd close $TASK_ID`.
 
 In sequential mode (the paperflow default) the check will almost always pass — the discipline pays off the day someone runs two `/paperflow:build` instances in parallel against the same repo.
 
@@ -177,7 +177,7 @@ Verification is symmetric to writing: when the build subagent returns more than 
 
 Inputs to the brief: the Task ID + description, the build subagent's returned artefact paths, and the verification gate the task declared at dispatch.
 
-The orchestrator only sees the one-line verdict. `bd update <id> --close` fires only on `PASS`. `FAIL` routes to **Failure / debug** below; the build-task stays claimed.
+The orchestrator only sees the one-line verdict. `bd close <id>` fires only on `PASS`. `FAIL` routes to **Failure / debug** below; the build-task stays claimed.
 
 ```mermaid
 flowchart LR
@@ -185,7 +185,7 @@ flowchart LR
     G{"evidence<br/>&gt; 500 tok?"}
     O["orchestrator<br/>reads inline"]
     V["verification-subagent<br/>reads artefacts<br/>returns PASS/FAIL"]
-    Close["orchestrator<br/>bd update --close"]
+    Close["orchestrator<br/>bd close"]
     Reopen["orchestrator<br/>route to debug<br/>(task stays claimed)"]
     Sub --> G
     G -->|no| O
@@ -205,7 +205,7 @@ When the just-completed task wrote a paperflow HTML doc (anything under `~/docs/
 6. **Close on verified completion:**
 
    ```bash
-   bd update "$TASK_ID" --close
+   bd close "$TASK_ID"
    ```
 
 7. **Update statusline cache.** Re-render `~/.paperflow/statusline.txt` so the next prompt cycle reflects the new state. (Each Beads-mutating skill is responsible for the cache.)
@@ -217,7 +217,7 @@ When the just-completed task wrote a paperflow HTML doc (anything under `~/docs/
 When `bd ready --label $SLUG --label $PHASE_NAME` returns empty:
 
 1. Confirm no claimed-but-not-closed tasks remain in the phase.
-2. **Close the phase-task:** `bd update "$PHASE" --close`.
+2. **Close the phase-task:** `bd close "$PHASE"`.
 3. **Find the next phase** in canonical order (pre-flight → build → review, plus any user-defined extras): `bd list --label kind:phase --label "$SLUG" --json | jq '.[] | select(.status != "closed")' | head -1`.
 4. **Update the active-phase pointers** — both the per-repo file and the per-instance scoped global:
 
@@ -260,14 +260,16 @@ Verification-before-completion is **always on**, not opt-in. Subagent-driven dev
 
 ## Beads commands
 
+Close uses `bd close <id>` (work-tasks) / `bd epic close <id>` (goals); the `--close` update-flag was removed in bd 1.x.
+
 | Verb | Purpose |
 |---|---|
 | `bd ready --label goal-<slug> --label phase-<active> --json` | Phase-scoped ready feed. |
 | `bd update <id> --claim` | Atomic claim before dispatch. |
-| `bd update <id> --close` | Close on verified completion. |
+| `bd close <id>` | Close on verified completion. |
 | `bd update <id> --reopen` | Re-open a task review rejected. |
 | `bd show <id>` | Read full task context for the subagent prompt. |
-| `bd update <phase-task-id> --close` | Mark phase done. |
+| `bd close <phase-task-id>` | Mark phase done. |
 | `bd list --label kind:phase --label goal-<slug> --json` | Find next phase. |
 
 ## Don't

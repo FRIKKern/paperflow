@@ -55,7 +55,7 @@ Read `<repo>/.paperflow/active-goal` and `<repo>/.paperflow/active-phase` for co
 - Compose a sensible commit subject if you commit (typically the orchestrator commits, not you — but if asked: include `Subagent-Run: <task-id>` trailer for changes >30 LOC).
 - Cross-reference the active task description (`bd show $TASK_ID --json`) when the brief references "the active task".
 
-You don't write Beads state — leave `bd update --claim` / `--close` to the orchestrator. You only READ Beads.
+You don't write Beads state — leave `bd update --claim` / `bd close` to the orchestrator. You only READ Beads.
 
 ## What you return
 

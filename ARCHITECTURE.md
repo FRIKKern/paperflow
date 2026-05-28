@@ -80,7 +80,7 @@ paperflow uses Beads (`bd`) as the single source of truth for goals, phases, tas
 
 ### Per-repo init
 
-`paperflow-doctor --ensure-bd` runs `bd init` once on the first Goal in a repo (folded in from the legacy `paperflow-bd-init` binary). `/paperflow:build` claims with `bd update <id> --claim` and closes with `bd update <id> --close`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase.
+`paperflow-doctor --ensure-bd` runs `bd init` once on the first Goal in a repo (folded in from the legacy `paperflow-bd-init` binary). `/paperflow:build` claims with `bd update <id> --claim` and closes with `bd close <id>`. `bd ready --label goal-<slug> --label phase-<active>` returns the next ready work-task within the active phase. Close uses `bd close <id>` (work-tasks) / `bd epic close <id>` (goals); the `--close` update-flag was removed in bd 1.x.
 
 ### Goal-tasks: epics
 

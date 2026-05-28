@@ -138,7 +138,7 @@ The orchestrator wraps every review activity in a Beads review-task so the audit
 ### Closing on approval
 
 ```bash
-bd update <review-task> --close
+bd close <review-task>
 ```
 
 If the user wants the branch merged + cleaned up, follow with:
@@ -153,7 +153,7 @@ git branch -d <branch>
 
 ```bash
 bd update <build-task> --reopen
-bd update <review-task> --close   # the review itself is done; the work isn't
+bd close <review-task>   # the review itself is done; the work isn't
 ```
 
 `/paperflow:build` will pick the re-opened build-task up via `bd ready` on the next iteration.
@@ -196,12 +196,14 @@ When a review approves a build that ships UI work, the changelog HTML lands at `
 
 ## Beads commands
 
+Close uses `bd close <id>` (work-tasks) / `bd epic close <id>` (goals); the `--close` update-flag was removed in bd 1.x.
+
 | Verb | Purpose |
 |---|---|
 | `bd create "Review: <branch>" --label goal-<slug>` | Open the review-task. |
 | `bd dep add <review> <build>` | Link to the build-task being reviewed. |
 | `bd dep add <review> <review-phase-task>` | Attach to the review phase. |
-| `bd update <review> --close` | Close on approval (or after rejection-with-reopen). |
+| `bd close <review>` | Close on approval (or after rejection-with-reopen). |
 | `bd update <build> --reopen` | Re-open the parent build-task on rejection. |
 
 ## Don't
