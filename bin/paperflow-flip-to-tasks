@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# paperflow-flip-to-tasks — W7d step 4 (w7-16): the atomic bd → barkpark
+# cutover. Six phases, each idempotent + logged + reversible:
+#
+#   Phase 0  pre-flight gate   paperflow-doctor --ensure-tasks --gate-for-flip
+#   Phase 1  freeze bd writes  write <repo>/.beads/FROZEN per active store
+#   Phase 2  import for real   paperflow-import-bd --apply (both stores)
+#   Phase 3  PATH swap         symlink ~/.local/bin/bd → repo bin/bd-shim
+#   Phase 4  pointer repoint   paperflow-active-scope --migrate-bd-to-doc
+#   Phase 5  restore stock     git config --unset core.hooksPath per store
+#   Phase 6  verify + flag     re-run doctor, touch flipped-<ts>.flag
+#
+# MODES
+#   --dry-run   (DEFAULT) print every phase's plan + commands, execute NOTHING.
+#   --apply     perform the real flip. Phase failures auto-rollback prior phases.
+#   --rollback  undo a prior flip via ~/.paperflow/flip-rollback.env. Idempotent.
+#
+# ROLLBACK CONTRACT
+#   Phase 3 + Phase 5 record their prior state to ~/.paperflow/flip-rollback.env
+#   BEFORE mutating. --rollback (and the companion bin/paperflow-flip-rollback)
+#   read that env and: remove the bd symlink (restoring the original bd path on
+#   PATH), restore each store's core.hooksPath to its recorded value, and remove
+#   FROZEN markers. Import is NOT auto-reversed by rollback — re-importing is
+#   idempotent (barkpark_doc_exists skips already-present docs), so the safe
+#   undo is "leave the docs, flip the substrate back".
+#
+# SAFETY
+#   The default mode is --dry-run. --apply must be explicit. No flag = no side
+#   effect. Every mutating step prints its command first; under --dry-run the
+#   command is printed but never run.
+#
+# Exit: 0 on success / dry-run completion · 2 on gate fail or bad args ·
+#       3 on a phase failure that triggered auto-rollback.
+
+set -euo pipefail
+
+# ── Resolve repo, helpers, paths ───────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+PF_DIR="${PAPERFLOW_DIR:-$HOME/.paperflow}"
+ROLLBACK_ENV="$PF_DIR/flip-rollback.env"
+LOCAL_BIN="${PAPERFLOW_LOCAL_BIN:-$HOME/.local/bin}"
+
+# Active stores' repos (the two whose .beads holds a Dolt-backed store). These
+# are the repos whose core.hooksPath the flip restores to stock + whose .beads
+# gets a FROZEN marker. Overridable for tests via PAPERFLOW_FLIP_REPOS (newline
+# or space separated absolute repo roots).
+DEFAULT_REPOS="$HOME/Documents/github/paperflow
+/Volumes/SATECHI/github/barkpark"
+FLIP_REPOS="${PAPERFLOW_FLIP_REPOS:-$DEFAULT_REPOS}"
+
+# Helper binary resolution: PATH first (lets tests shim), then repo/bin, then
+# ~/.local/bin (installed). Mirrors doctor's own resolution order.
+_resolve_bin() {
+    name="$1"
+    if command -v "$name" >/dev/null 2>&1; then command -v "$name"; return 0; fi
+    if [ -x "$REPO/bin/$name" ]; then printf '%s\n' "$REPO/bin/$name"; return 0; fi
+    if [ -x "$LOCAL_BIN/$name" ]; then printf '%s\n' "$LOCAL_BIN/$name"; return 0; fi
+    return 1
+}
+
+DOCTOR_BIN="$(_resolve_bin paperflow-doctor || true)"
+IMPORTER_BIN="$(_resolve_bin paperflow-import-bd || true)"
+ASCOPE_BIN="$(_resolve_bin paperflow-active-scope || true)"
+SHIM_SRC="$REPO/bin/bd-shim"
+
+# ── Mode parse ─────────────────────────────────────────────────────────
+MODE="dry-run"
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)  MODE="dry-run" ;;
+        --apply)    MODE="apply" ;;
+        --rollback) MODE="rollback" ;;
+        -h|--help)
+            sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) printf 'unknown flag: %s\n' "$arg" >&2
+           printf 'usage: paperflow-flip-to-tasks [--dry-run | --apply | --rollback]\n' >&2
+           exit 2 ;;
+    esac
+done
+
+# ── Logging ────────────────────────────────────────────────────────────
+mkdir -p "$PF_DIR"
+LOG="$PF_DIR/flip-$(date +%s).log"
+: > "$LOG"
+_log()  { printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z 2>/dev/null)" "$*" >> "$LOG"; }
+say()   { printf '%s\n' "$*"; _log "$*"; }
+phase() { printf '\n=== %s ===\n' "$*"; _log "PHASE $*"; }
+
+# In dry-run, `run` prints the command with a DRY-RUN prefix and does NOT
+# execute it. In apply/rollback, it echoes then runs. This is the single
+# choke point that guarantees --dry-run touches nothing.
+DID_MUTATE=0
+run() {
+    if [ "$MODE" = "dry-run" ]; then
+        printf '  DRY-RUN would run: %s\n' "$*"
+        _log "DRY would-run: $*"
+        return 0
+    fi
+    printf '  RUN: %s\n' "$*"
+    _log "RUN: $*"
+    DID_MUTATE=1
+    "$@"
+}
+
+# rollback-env writer: append a KEY=value line, but only in apply mode and only
+# once per key (idempotent — re-running apply after a partial flip won't clobber
+# the original recorded value). In dry-run it just narrates.
+record_rollback() {
+    key="$1"; val="$2"
+    if [ "$MODE" = "dry-run" ]; then
+        printf '  DRY-RUN would record %s=%s → %s\n' "$key" "$val" "$ROLLBACK_ENV"
+        return 0
+    fi
+    mkdir -p "$PF_DIR"
+    [ -f "$ROLLBACK_ENV" ] || : > "$ROLLBACK_ENV"
+    if grep -q "^${key}=" "$ROLLBACK_ENV" 2>/dev/null; then
+        _log "rollback-env: $key already recorded — preserving original"
+        return 0
+    fi
+    printf '%s=%s\n' "$key" "$val" >> "$ROLLBACK_ENV"
+    _log "rollback-env: recorded $key=$val"
+}
+
+# Iterate FLIP_REPOS portably (bash 3.2 — no mapfile / no arrays from heredoc).
+for_each_repo() {
+    printf '%s\n' "$FLIP_REPOS" | tr ' ' '\n' | while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        printf '%s\n' "$r"
+    done
+}
+
+# A safe per-store identifier for rollback-env keys (slashes → underscores).
+repo_key() { printf '%s' "$1" | tr '/.' '__'; }
+
+# ─────────────────────────────────────────────────────────────────────
+#  --rollback delegates to the companion (single source of truth).
+# ─────────────────────────────────────────────────────────────────────
+if [ "$MODE" = "rollback" ]; then
+    RB_BIN="$(_resolve_bin paperflow-flip-rollback || true)"
+    [ -n "$RB_BIN" ] || RB_BIN="$SCRIPT_DIR/paperflow-flip-rollback"
+    if [ ! -x "$RB_BIN" ] && [ ! -f "$RB_BIN" ]; then
+        say "ERROR: companion paperflow-flip-rollback not found"
+        exit 2
+    fi
+    exec bash "$RB_BIN"
+fi
+
+# ─────────────────────────────────────────────────────────────────────
+#  Auto-rollback helper for --apply phase failures. Calls the companion,
+#  which is idempotent, then exits 3.
+# ─────────────────────────────────────────────────────────────────────
+abort_with_rollback() {
+    reason="$1"
+    say "ABORT: $reason"
+    say "Auto-rolling back prior phases…"
+    RB_BIN="$(_resolve_bin paperflow-flip-rollback || true)"
+    [ -n "$RB_BIN" ] || RB_BIN="$SCRIPT_DIR/paperflow-flip-rollback"
+    if [ -f "$RB_BIN" ]; then
+        bash "$RB_BIN" || say "WARN: rollback returned non-zero — inspect $ROLLBACK_ENV manually"
+    else
+        say "WARN: companion rollback missing — unfreeze + symlink cleanup must be manual"
+    fi
+    exit 3
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+say "paperflow-flip-to-tasks — MODE=$MODE"
+say "repo=$REPO  log=$LOG"
+say "stores/repos:"
+for_each_repo | while IFS= read -r r; do say "  - $r"; done
+
+# ── Phase 0 — pre-flight gate ──────────────────────────────────────────
+phase "Phase 0 — pre-flight gate"
+if [ -z "$DOCTOR_BIN" ]; then
+    say "ERROR: paperflow-doctor not found — cannot gate. ABORT."
+    exit 2
+fi
+say "gate: $DOCTOR_BIN --ensure-tasks --gate-for-flip"
+if [ "$MODE" = "dry-run" ]; then
+    say "  DRY-RUN: would run the gate; flip proceeds only if it exits 0."
+else
+    if GATE_OUT="$("$DOCTOR_BIN" --ensure-tasks --gate-for-flip 2>&1)"; then
+        say "  gate PASSED (exit 0)"
+        _log "gate-output: $GATE_OUT"
+    else
+        say "  gate FAILED — failing checks below. No flip on a red gate."
+        printf '%s\n' "$GATE_OUT" \
+            | (jq -r '.ensure_tasks | to_entries[]
+                       | select(.value.status != "pass")
+                       | "    \(.key): \(.value.status) — \(.value.message)"' 2>/dev/null \
+               || printf '%s\n' "$GATE_OUT")
+        exit 2
+    fi
+fi
+
+# ── Phase 1 — freeze bd writes ─────────────────────────────────────────
+phase "Phase 1 — freeze bd writes"
+say "Writing a FROZEN marker into each store's .beads/ — the signal that new"
+say "task mutations must now route through bd-shim. (Enforcement is a hook"
+say "point, out of scope here; the marker is the flag.)"
+for_each_repo | while IFS= read -r r; do
+    marker="$r/.beads/FROZEN"
+    if [ "$MODE" = "dry-run" ]; then
+        printf '  DRY-RUN would touch: %s\n' "$marker"
+    else
+        if [ -d "$r/.beads" ]; then
+            printf 'frozen by paperflow-flip-to-tasks at %s\n' "$(date 2>/dev/null)" > "$marker"
+            printf '  froze: %s\n' "$marker"
+            _log "froze: $marker"
+        else
+            printf '  SKIP (no .beads dir): %s\n' "$r"
+            _log "freeze-skip (no .beads): $r"
+        fi
+    fi
+done
+say "bd writes frozen — new task mutations must go through bd-shim"
+
+# ── Phase 2 — import for real ──────────────────────────────────────────
+phase "Phase 2 — import for real"
+if [ -z "$IMPORTER_BIN" ]; then
+    [ "$MODE" = "apply" ] && abort_with_rollback "paperflow-import-bd not found"
+    say "ERROR: paperflow-import-bd not found"
+fi
+say "import: PAPERFLOW_MIRROR_GOALS=1 $IMPORTER_BIN --apply"
+say "(per-store imported/failed counts parsed from the 'imported: N / failed: N'"
+say " lines; ANY failure → ABORT + auto-rollback of Phase 1.)"
+if [ "$MODE" = "dry-run" ]; then
+    say "  DRY-RUN: would run the importer with --apply against both stores."
+    say "  DRY-RUN: NOT running --apply (no barkpark traffic, no writes)."
+else
+    if IMP_OUT="$(PAPERFLOW_MIRROR_GOALS=1 "$IMPORTER_BIN" --apply 2>&1)"; then
+        printf '%s\n' "$IMP_OUT" | grep -E 'STORE:|imported:|failed' || true
+        _log "import-output: $IMP_OUT"
+        # Defense-in-depth: the importer exits 1 on any failure (already caught
+        # by the `if` above), but we also scan the per-store lines so a future
+        # importer that softens its exit code can't sneak failures past us.
+        TOTAL_FAILED="$(printf '%s\n' "$IMP_OUT" \
+            | awk -F'failed:' '/imported:.*failed:/ { gsub(/[^0-9]/,"",$2); s+=$2 } END { print s+0 }')"
+        if [ "${TOTAL_FAILED:-0}" -gt 0 ]; then
+            abort_with_rollback "importer reported $TOTAL_FAILED failed row(s)"
+        fi
+        say "  import OK — 0 failed rows"
+    else
+        abort_with_rollback "importer exited non-zero (--apply failure)"
+    fi
+fi
+
+# ── Phase 3 — PATH swap ────────────────────────────────────────────────
+phase "Phase 3 — PATH swap (bd-shim ahead of real bd)"
+if [ ! -f "$SHIM_SRC" ]; then
+    [ "$MODE" = "apply" ] && abort_with_rollback "bd-shim source missing at $SHIM_SRC"
+    say "ERROR: bd-shim source missing at $SHIM_SRC"
+fi
+# Record the ORIGINAL bd resolution before we shadow it — this is what rollback
+# restores to (by removing our symlink, the original reappears on PATH).
+ORIG_BD="$(command -v bd 2>/dev/null || echo '<none>')"
+say "original bd on PATH: $ORIG_BD"
+record_rollback "ORIG_BD_PATH" "$ORIG_BD"
+record_rollback "BD_SYMLINK" "$LOCAL_BIN/bd"
+say "Symlinking $LOCAL_BIN/bd → $SHIM_SRC (the shim falls through to the real"
+say "bd via PATH for unknown subcommands, so homebrew bd stays reachable)."
+if [ "$MODE" = "dry-run" ]; then
+    printf '  DRY-RUN would run: mkdir -p %s\n' "$LOCAL_BIN"
+    printf '  DRY-RUN would run: ln -snf %s %s/bd\n' "$SHIM_SRC" "$LOCAL_BIN"
+    say "  DRY-RUN: would then verify 'bd --version' reports the shim line."
+else
+    run mkdir -p "$LOCAL_BIN"
+    run ln -snf "$SHIM_SRC" "$LOCAL_BIN/bd"
+    # Verify the shim now answers (use the symlink directly — PATH ordering on
+    # the live shell is the user's concern; we verify our link is functional).
+    if VER_OUT="$("$LOCAL_BIN/bd" --version 2>&1)"; then
+        say "  bd --version → $VER_OUT"
+        case "$VER_OUT" in
+            bd-shim*) say "  shim verified on PATH" ;;
+            *) abort_with_rollback "bd --version did not report the shim (got: $VER_OUT)" ;;
+        esac
+    else
+        abort_with_rollback "bd --version failed after symlink"
+    fi
+fi
+
+# ── Phase 4 — pointer repoint ──────────────────────────────────────────
+phase "Phase 4 — pointer repoint (goal + phase)"
+if [ -z "$ASCOPE_BIN" ]; then
+    say "WARN: paperflow-active-scope not found — pointer repoint skipped (noop today anyway)"
+else
+    say "repoint: $ASCOPE_BIN --migrate-bd-to-doc  (noop in the W7c substrate:"
+    say " doc_id == bd-id, so this future-proofs without changing anything today)"
+    if [ "$MODE" = "dry-run" ]; then
+        say "  DRY-RUN: would run --migrate-bd-to-doc (a documented noop)."
+    else
+        run "$ASCOPE_BIN" --migrate-bd-to-doc || say "  WARN: migrate-bd-to-doc returned non-zero (noop expected)"
+    fi
+fi
+
+# ── Phase 5 — restore stock hooks ──────────────────────────────────────
+phase "Phase 5 — restore stock git hooks"
+say "Per store: record the current core.hooksPath to flip-rollback.env, then"
+say "'git config --unset core.hooksPath' so hooks fall back to .git/hooks."
+for_each_repo | while IFS= read -r r; do
+    rk="$(repo_key "$r")"
+    cur="$(git -C "$r" config --get core.hooksPath 2>/dev/null || echo '')"
+    printf '  %s : core.hooksPath=%s\n' "$r" "${cur:-<unset>}"
+    if [ "$MODE" = "dry-run" ]; then
+        printf '    DRY-RUN would record HOOKS_%s=%s\n' "$rk" "${cur:-<unset>}"
+        printf '    DRY-RUN would run: git -C %s config --unset core.hooksPath\n' "$r"
+    else
+        # record_rollback runs in the parent shell's PF_DIR; we append directly
+        # here because this loop is a subshell (pipe) and can't mutate parent
+        # state — write the env line atomically with the same idempotency guard.
+        if [ -n "$cur" ]; then
+            if ! grep -q "^HOOKS_${rk}=" "$ROLLBACK_ENV" 2>/dev/null; then
+                printf 'HOOKS_%s=%s\n' "$rk" "$cur" >> "$ROLLBACK_ENV"
+                _log "rollback-env: recorded HOOKS_${rk}=$cur"
+            fi
+            git -C "$r" config --unset core.hooksPath 2>/dev/null \
+                && printf '    unset core.hooksPath (was %s)\n' "$cur" \
+                || printf '    WARN: could not unset core.hooksPath for %s\n' "$r"
+            _log "unset hooksPath: $r (was $cur)"
+        else
+            printf '    already stock (no core.hooksPath set)\n'
+            _log "hooksPath already stock: $r"
+        fi
+    fi
+done
+
+# ── Phase 6 — verify + flag ────────────────────────────────────────────
+phase "Phase 6 — verify + flag"
+say "Re-run doctor --ensure-tasks; expect dual_write + shim_on_path now PASS."
+if [ "$MODE" = "dry-run" ]; then
+    say "  DRY-RUN: would re-run $DOCTOR_BIN --ensure-tasks and inspect checks."
+    say "  DRY-RUN: would touch $PF_DIR/flipped-<ts>.flag"
+else
+    if [ -n "$DOCTOR_BIN" ]; then
+        if VERIFY_OUT="$("$DOCTOR_BIN" --ensure-tasks 2>&1)"; then
+            say "  doctor re-run: ok"
+        else
+            say "  doctor re-run: non-zero (warns acceptable post-flip; inspect below)"
+        fi
+        printf '%s\n' "$VERIFY_OUT" \
+            | (jq -r '.ensure_tasks | to_entries[]
+                       | "    \(.key): \(.value.status)"' 2>/dev/null \
+               || printf '%s\n' "$VERIFY_OUT")
+    fi
+    FLAG="$PF_DIR/flipped-$(date +%s).flag"
+    printf 'flipped at %s by paperflow-flip-to-tasks\n' "$(date 2>/dev/null)" > "$FLAG"
+    say "  touched flag: $FLAG"
+    _log "flag: $FLAG"
+fi
+
+phase "DONE — MODE=$MODE"
+if [ "$MODE" = "dry-run" ]; then
+    say "Dry-run complete. NOTHING was executed. To perform the real flip:"
+    say "  paperflow-flip-to-tasks --apply"
+    say "To undo a real flip:"
+    say "  paperflow-flip-to-tasks --rollback   (or: paperflow-flip-rollback)"
+else
+    say "Flip applied. Rollback env: $ROLLBACK_ENV"
+    say "One-move undo: paperflow-flip-to-tasks --rollback"
+fi
+exit 0
