@@ -129,7 +129,11 @@ Translated commands:
   bd epic close-eligible --json
 
 Unknown subcommands fall through to the real \`bd\` on PATH.
-Built-ins:  --version   --selftest   --help`);
+Built-ins:  --version   --selftest   --help
+
+Environment:
+  BARKPARK_URL    override the Barkpark base URL (default http://localhost:4000)
+  BARKPARK_TOKEN  override the auth token (default barkpark-dev-token)`);
   process.exit(0);
 }
 

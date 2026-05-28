@@ -139,7 +139,7 @@ Every plan, spec, and grill HTML carries a **Simplify** button. One click runs a
 
 The gate is the never-worse guarantee — Mermaid figures, H2 hierarchy, bound decisions, and outbound URLs must all survive. Failures don't create rail noise; they append one line to `~/.paperflow/simplify-failures.log`.
 
-Implementation lives in `/paperflow:plan` (Simplify sub-action). No new skill — the 7/7 cap holds.
+Implementation lives in `/paperflow:plan` (Simplify sub-action). No new skill — the 8/8 cap holds.
 
 ## Questionnaires (upfront discovery)
 
@@ -206,7 +206,7 @@ See the BEGIN/END paperflow-thresholds block in any skill body for the current t
 
 # Subagents
 
-paperflow ships a tight roster of four named agents in the plugin's `agents/` directory. Each one has a tool palette declared in YAML frontmatter — the runtime physically refuses calls outside its lane. Skills dispatch by named agent instead of `general-purpose` so the wrong tool is unreachable instead of merely discouraged.
+paperflow ships a tight roster of five named agents in the plugin's `agents/` directory. Each one has a tool palette declared in YAML frontmatter — the runtime physically refuses calls outside its lane. Skills dispatch by named agent instead of `general-purpose` so the wrong tool is unreachable instead of merely discouraged.
 
 | Agent | Tools | Use for |
 |---|---|---|
@@ -214,6 +214,7 @@ paperflow ships a tight roster of four named agents in the plugin's `agents/` di
 | `paperflow-code-editor` | `Read · Write · Edit · MultiEdit · Glob · Grep · Bash` | Source-code edits, helper scripts, tests, install.sh changes. Has `Bash` for verification (`bash -n`, `jq empty`, test suites). |
 | `paperflow-researcher` | `Read · Glob · Grep · WebFetch · WebSearch` | Read-only investigation — codebase exploration, web research, code review. No `Write` → cannot accidentally fix while reviewing. |
 | `paperflow-bd-keeper` | `Bash · Read` | Beads-only ceremony — `bd create / claim / close / dep add / list / show`, `file-claim:<path>` label work. No `Write/Edit` → cannot touch source. |
+| `paperflow-cmux-verifier` | `Bash · Read` | Post-write doc-render check — drives `paperflow-doc-verify` once, returns one-line PASS/WARN/FAIL/SKIP. No `Write/Edit`. |
 
 Skills (`/paperflow:plan`, `/paperflow:build`, `/paperflow:review`, `/paperflow:goal`) name the default agent in their dispatch step. Fall back to `general-purpose` only when a single task crosses categories (rare; e.g. a meta-skill that needs both research and source edits in one shot).
 

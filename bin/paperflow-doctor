@@ -11,6 +11,9 @@
 
 set -u
 
+# __REPO__ and __NODE_BIN__ are install-time placeholders substituted by
+# install.sh — in the installed copy they hold real paths. The $REPO-based
+# repair_commands below are correct at runtime even though they look unset here.
 REPO="__REPO__"
 NODE_BIN="__NODE_BIN__"
 

@@ -4,6 +4,26 @@
 # Columns: path,target_shape,cmux_surface,last_modified,would_break
 # Used by per-instance-bridge migration to know which docs need re-rendering.
 set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: paperflow-migration-audit [--help]
+
+  Produce a migration-audit CSV of existing paperflow doc HTMLs.
+  Writes ~/.paperflow/migration-audit-<YYYY-MM-DD>.csv and prints a JSON
+  summary ({ok, csv, total, would_break}) on stdout.
+
+  Columns: path,target_shape,cmux_surface,last_modified,would_break
+
+  Used by the per-instance-bridge migration to know which docs need
+  re-rendering. Takes no arguments; --help prints this text.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 DOCS="${HOME}/docs/paperflow"
 OUT="${HOME}/.paperflow/migration-audit-$(date +%Y-%m-%d).csv"
 mkdir -p "$(dirname "$OUT")"
