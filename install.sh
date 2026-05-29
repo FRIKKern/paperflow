@@ -31,10 +31,13 @@
 #   --with-unlighthouse   Append the Unlighthouse fragment. Offers to
 #                         `npm i -g @unlighthouse/cli puppeteer` if
 #                         not already on PATH (asks first).
-#   --with-barkpark       Append the Barkpark fragment + write the
-#                         ~/.paperflow/barkpark.env template (ingest
-#                         URL + dev token). No binary check — Barkpark
-#                         is a local HTTP service.
+#   --with-barkpark       Append the Barkpark fragment + PAIR paperflow
+#                         with a local Barkpark: write/refresh
+#                         ~/.paperflow/barkpark.env (localhost ingest
+#                         URL + a bearer token, minted once and reused,
+#                         0600). Notes how to start the service
+#                         (`barkpark up`) if the launcher is found, but
+#                         never hard-fails when Barkpark isn't installed.
 #   --reset               Tarball ~/.claude/{CLAUDE.md, hooks, skills}
 #                         and ~/.paperflow/ to
 #                         ~/.paperflow/backups/<YYYY-MM-DD-HHMMSS>.tar.gz,
@@ -74,7 +77,7 @@ for arg in "$@"; do
         --merge|--merge-claude-md) MERGE_CLAUDEMD=1 ;;
         --yes)               YES=1 ;;
         --help|-h)
-            sed -n '2,53p' "$0"
+            sed -n '2,56p' "$0"
             exit 0
             ;;
         *)
@@ -89,6 +92,90 @@ log()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
 skip() { printf '  \033[1;33m•\033[0m %s\n' "$*"; }
 err()  { printf '  \033[1;31m✗\033[0m %s\n' "$*" >&2; }
+
+# ── Barkpark pairing (--with-barkpark) ─────────────────────────────────
+# PAIR paperflow with a local Barkpark: write/refresh ~/.paperflow/barkpark.env
+# with the local ingest URL + a bearer token, idempotently. The save seam
+# (hooks/event-on-save.sh) sources this file. Generating the token here, once,
+# means the user's first `--with-barkpark` mints a secret that survives every
+# later re-run (re-template never clobbers it). 0600 — it's a secret.
+#
+# Idempotency contract:
+#   • token absent  → generate one, write it
+#   • token present → reuse it verbatim (URL is always refreshed to the canon)
+# So running twice yields the SAME token.
+#
+# Localhost ingest needs NO token when Barkpark sets INGEST_ALLOW_LOCALHOST=true
+# (see claude-md-fragments/barkpark.md); the token is still written so a remote
+# Barkpark, or a default-config local one, authenticates.
+#
+# Never hard-fails on a missing Barkpark install — pairing config is written
+# regardless, with a friendly note on how to start the service.
+#
+# Override $BARKPARK_ENV (and optionally $REPO) to dry-run against a temp path.
+barkpark_ingest_token() {
+    # Pull an existing token (reuse) — first BARKPARK_INGEST_TOKEN= line, value
+    # only, no surrounding whitespace.
+    if [ -f "$1" ]; then
+        awk -F= '/^BARKPARK_INGEST_TOKEN=/{sub(/^BARKPARK_INGEST_TOKEN=/,""); print; exit}' "$1" \
+            | tr -d '[:space:]'
+    fi
+}
+
+mint_ingest_token() {
+    # Prefer openssl; fall back to uuidgen; last resort /dev/urandom hex.
+    if command -v openssl >/dev/null 2>&1; then
+        printf 'bk_%s' "$(openssl rand -hex 24)"
+    elif command -v uuidgen >/dev/null 2>&1; then
+        printf 'bk_%s' "$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')"
+    else
+        printf 'bk_%s' "$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 48)"
+    fi
+}
+
+pair_barkpark() {
+    local env_file="${BARKPARK_ENV:-$HOME/.paperflow/barkpark.env}"
+    local url="http://localhost:4000/v1/paperflow/papers"
+    mkdir -p "$(dirname "$env_file")"
+
+    local token reused=0
+    token="$(barkpark_ingest_token "$env_file")"
+    if [ -n "$token" ]; then
+        reused=1
+    else
+        token="$(mint_ingest_token)"
+    fi
+
+    umask 077
+    cat > "$env_file" <<EOF
+# paperflow → Barkpark pairing (written by install.sh --with-barkpark).
+# Sourced by the save seam (hooks/event-on-save.sh) to mirror a finished doc
+# into your local Barkpark. Edit to point at a different host or token; the
+# token below is reused across re-runs (never regenerated once set).
+BARKPARK_INGEST_URL=$url
+BARKPARK_INGEST_TOKEN=$token
+EOF
+    chmod 0600 "$env_file"
+
+    if [ "$reused" -eq 1 ]; then
+        ok "barkpark: paired — reused existing token in $env_file (0600)"
+    else
+        ok "barkpark: paired — minted ingest token, wrote $env_file (0600)"
+    fi
+
+    # Detect the barkpark launcher; note how to start it, but never hard-fail.
+    local launcher=""
+    if [ -x "$REPO/bin/barkpark" ]; then
+        launcher="$REPO/bin/barkpark"
+    elif command -v barkpark >/dev/null 2>&1; then
+        launcher="$(command -v barkpark)"
+    fi
+    if [ -n "$launcher" ]; then
+        ok "barkpark: launcher found ($launcher) — start it with: barkpark up  (serves http://localhost:4000)"
+    else
+        skip "barkpark: launcher not found — pairing config is written anyway. Install Barkpark, then 'barkpark up' to serve http://localhost:4000"
+    fi
+}
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 USER_NAME="$(id -un)"
@@ -245,22 +332,10 @@ if [ "$WITH_UNLIGHTHOUSE" -eq 1 ]; then
     fi
 fi
 if [ "$WITH_BARKPARK" -eq 1 ]; then
-    # Barkpark is a local HTTP service — no binary check. Lay down the
-    # env template (skip-if-exists so a user's edited token survives a re-run).
-    mkdir -p "$HOME/.paperflow"
-    BARKPARK_ENV="$HOME/.paperflow/barkpark.env"
-    if [ -f "$BARKPARK_ENV" ]; then
-        skip "barkpark: $BARKPARK_ENV exists — leaving user values intact (delete to re-template)"
-    else
-        cat > "$BARKPARK_ENV" <<'EOF'
-# paperflow → Barkpark ingest contract. Sourced by the paper-streaming
-# integration when --with-barkpark is enabled. Edit the values to match
-# your local Barkpark instance.
-BARKPARK_INGEST_URL=http://127.0.0.1:4000/api/papers/ingest
-BARKPARK_INGEST_TOKEN=barkpark-dev-token
-EOF
-        ok "barkpark: wrote $BARKPARK_ENV template (local service — fragment will ship in CLAUDE.md)"
-    fi
+    # PAIR paperflow with a local Barkpark — write/refresh the ingest contract
+    # at ~/.paperflow/barkpark.env (URL + token, idempotent, 0600). No binary
+    # check: pairing config is written whether or not Barkpark is installed.
+    pair_barkpark
 fi
 
 ok "ready"

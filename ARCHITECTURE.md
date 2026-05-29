@@ -102,12 +102,12 @@ Every paperflow doc loaded with an active Goal in scope renders a 240 px sticky 
 flowchart LR
     Article["Article body<br/>(centered, ~720 px)"]
     Rail["Goal-path rail<br/>(sticky, 240 px)"]
-    Bridge["claude-bridge<br/>:8766"]
+    Daemon["paperflow-daemon<br/>:8767"]
 
     Article -.->|"side-by-side"| Rail
-    Rail -->|"GET /goal-path?goal=<id>"| Bridge
-    Rail -->|"GET /event/<id>"| Bridge
-    Rail -->|"GET /diff?from&to"| Bridge
+    Rail -->|"GET /goal-path?goal=<id>"| Daemon
+    Rail -->|"GET /event/<id>"| Daemon
+    Rail -->|"GET /diff?from&to"| Daemon
 ```
 
 ### Goal resolution — two paths
@@ -259,34 +259,34 @@ For the full contract, see `~/docs/paperflow/specs/2026-05-14-paperflow-daemon-h
 
 ## Bridge HTTP endpoints
 
-`claude-bridge` is a tiny Node HTTP server on `localhost:8766`. Browser buttons POST `{target, message}` (or richer payloads) to one of the endpoints; the bridge dispatches into the originating terminal tab via tmux / iTerm2 / Apple Terminal / cmux.
+The bridge is folded into `paperflow-daemon` — a single host-scoped Node HTTP server on `localhost:8767`. (`bin/claude-bridge.js` survives only as a backwards-compat shim that exec's `paperflow-daemon`; slated for removal one release later.) Browser buttons POST `{target, message}` (or richer payloads) to one of the endpoints; the daemon dispatches into the originating terminal tab via tmux / iTerm2 / Apple Terminal / cmux.
 
 ```mermaid
 sequenceDiagram
     participant Browser as Doc HTML (browser)
-    participant Bridge as claude-bridge :8766
+    participant Daemon as paperflow-daemon :8767
     participant Beads
     participant Term as Terminal (tmux/iTerm/cmux)
-    Browser->>Bridge: POST /build {target, message}
-    Bridge->>Term: dispatch via AppleScript / tmux / cmux send
-    Browser->>Bridge: POST /event {goal, type, payload}
-    Bridge->>Beads: bd create kind:event
-    Bridge-->>Browser: {ok, event_id}
-    Browser->>Bridge: GET /goal-path?goal=<id>
-    Bridge->>Beads: bd list --label goal-<slug> --label kind:event
-    Bridge-->>Browser: events JSON
+    Browser->>Daemon: POST /build {target, message}
+    Daemon->>Term: dispatch via AppleScript / tmux / cmux send
+    Browser->>Daemon: POST /event {goal, type, payload}
+    Daemon->>Beads: bd create kind:event
+    Daemon-->>Browser: {ok, event_id}
+    Browser->>Daemon: GET /goal-path?goal=<id>
+    Daemon->>Beads: bd list --label goal-<slug> --label kind:event
+    Daemon-->>Browser: events JSON
 ```
 
 | Endpoint | Method | Purpose | Request | Response |
 |---|---|---|---|---|
-| `/` | GET | Liveness ping | — | `claude-bridge ok` |
+| `/` | GET | Liveness ping | — | `paperflow-daemon ok` |
 | `/build` | POST | Dispatch a message into the originating terminal | `{target, message}` | `{ok}` |
 | `/marker` | POST | Questionnaire-answered sidecar; fires `event:questionnaire-answered` when active goal is known | `{target, message, goal_id?}` | `{ok}` |
 | `/goal-path` | GET | Goal-path event subtree for the rail | `?goal=<id>` or `?source=<rel>` | `{events: [...]}` |
 | `/event/<task-id>` | GET | Sidecar payload for one event-task | path param | HTML payload |
 | `/event` | POST | Create a `kind:event` Beads task + sidecar | `{goal, type, branch?, payload}` | `{ok, event_id}` |
 | `/event/active` | POST | Write `<repo>/.paperflow/active-event-base` (walk-back pointer) | `{event_id}` | `{ok}` |
-| `/diff` | GET | Bridge-side line-level diff between two events | `?from=<id>&to=<id>` | `{diff: [...]}` |
+| `/diff` | GET | Daemon-side line-level diff between two events | `?from=<id>&to=<id>` | `{diff: [...]}` |
 | `/simplify` | POST | Kick off a leaning-pass + verification job | `{doc_path, goal_id}` | `{ok, job_id}` |
 | `/simplify/status` | GET | Poll a Simplify job | `?job=<id>` | `{state, ...}` |
 | `/simplify/accept` | POST | Promote a `simplified-<n>` event to `branch:main`, overwrite source HTML | `{event_id}` | `{ok}` |
@@ -295,7 +295,7 @@ sequenceDiagram
 
 Targeting JSON is captured at write-time by `~/.local/bin/paperflow-target` and embedded in the doc as `window.CLAUDE_TARGET`.
 
-When the bridge is launched outside a cmux pane, it loses cmux's socket trust — re-spawn via `cmux new-workspace --command "node ~/.local/lib/paperflow/claude-bridge.js"` if button clicks return broken-pipe.
+When the daemon is launched outside a cmux pane, it loses cmux's socket trust — re-spawn via `cmux new-workspace --command "node ~/.local/lib/paperflow/paperflow-daemon"` if button clicks return broken-pipe.
 
 ---
 
@@ -412,7 +412,7 @@ paperflow/
 │   ├── openclaw.md
 │   └── unlighthouse.md
 ├── bin/
-│   ├── claude-bridge.js            # the bridge service
+│   ├── claude-bridge.js            # backwards-compat shim → exec's paperflow-daemon
 │   ├── get-terminal-target.sh      # captures CLAUDE_TARGET JSON
 │   ├── paperflow-active-scope      # resolves goal/phase from cwd up
 │   ├── paperflow-validate          # static Mermaid check (~80 LOC Node)
@@ -433,6 +433,8 @@ paperflow/
 │   ├── diff-modal.js               # shift-click diff overlay
 │   ├── text-diff.js                # vendored line-level diff (no jsdiff, no CDN)
 │   ├── shared-thresholds.md        # source of truth for subagent thresholds
+│   ├── shared-step-0.md            # Step 0 preflight + doctor block (spliced into skills)
+│   ├── shared-step-0.5.md          # Step 0.5 doc-metadata block (spliced into skills)
 │   ├── simplify-{leaning-pass,verification}-brief.md
 │   ├── statusline.sh               # one-line bottom bar
 │   ├── statusline-limits.json      # editable model context-window limits
@@ -445,7 +447,6 @@ paperflow/
 ├── skills/
 │   └── {goal,plan,build,review,install,resume,setup,autopilot}/SKILL.md
 ├── launchagents/
-│   ├── claude-bridge.plist.tmpl
 │   └── paperflow-daemon.plist.tmpl
 ├── scripts/
 │   ├── quickstart.sh               # the curl one-liner

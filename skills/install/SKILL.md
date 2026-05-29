@@ -116,7 +116,7 @@ If a future cmux release prompts on first dock load (per-repo `.cmux/dock.json` 
 
 ## Refreshing the threshold block
 
-`lib/shared-thresholds.md` in the paperflow repo is the single source of truth for the block above. On every `bash install.sh` run, the **Refresh threshold blocks** step regenerates the content between `<!-- BEGIN paperflow-thresholds -->` and `<!-- END paperflow-thresholds -->` in each non-exempt skill body — `/paperflow:{goal,plan,build,review,install}`. `/paperflow:resume` is exempt (read-only on Beads, never authors prose against the threshold).
+`lib/shared-thresholds.md` in the paperflow repo is the single source of truth for the block above. On every `bash install.sh` run, the **Refresh threshold blocks** step regenerates the content between `<!-- BEGIN paperflow-thresholds -->` and `<!-- END paperflow-thresholds -->` in each non-exempt skill body — `/paperflow:{goal,plan,build,review,install,autopilot}`. `/paperflow:resume` is exempt (read-only on Beads, never authors prose against the threshold).
 
 Skills carry the prose locally so Claude Code's skill loader can read it directly (no transitive include); the file is the source of truth; the install reconciles them. Editing the block in any one skill body is fine for a quick local trial, but the next install will overwrite from `lib/shared-thresholds.md`. Edits that should stick go into `lib/shared-thresholds.md` first.
 
@@ -154,7 +154,7 @@ The skill has four sub-flows. Pick by trigger.
 3. **Compose the install command** from the answers, then run it:
 
    ```bash
-   bash ~/Documents/GitHub/paperflow/install.sh \
+   bash install.sh \
      [--with-openclaw] [--with-browserbase] [--with-unlighthouse]
    ```
 
@@ -167,7 +167,7 @@ The skill has four sub-flows. Pick by trigger.
 **Reset path (destructive).** When the user says "reset paperflow", "start over", or "wipe and reinstall":
 
 ```bash
-bash ~/Documents/GitHub/paperflow/install.sh --reset \
+bash install.sh --reset \
   [--with-openclaw] [--with-browserbase] [--with-unlighthouse]
 ```
 
@@ -212,8 +212,7 @@ This skill issues no other Beads writes — it's the meta layer.
 ## Verify
 
 ```bash
-curl -s http://127.0.0.1:8767/                 # paperflow-daemon
-curl -s http://127.0.0.1:8766/                 # claude-bridge
+curl -s http://127.0.0.1:8767/                 # paperflow-daemon (also routes button clicks)
 find skills -name '*.md' -type f | wc -l       # must return 8
 bash scripts/check-skill-count.sh              # CI gate, must return ✓
 ```

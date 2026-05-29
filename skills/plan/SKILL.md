@@ -173,7 +173,7 @@ _Section structure adapted from `obra/superpowers/skills/writing-plans` and `bra
 
    Then encode intra-phase order via `bd dep add <child> <parent>` for any step that depends on another step.
 
-   **File-claim labels at creation time.** When the plan step names predicted files (per the file-scope-decomposition discipline below), attach them as `file-claim:<path>` labels on the work-task right away — the build orchestrator's pre-dispatch check will then see them without an extra round trip:
+   **File-claim labels at creation time.** When the plan step names predicted files, attach them as `file-claim:<path>` labels on the work-task right away — the build orchestrator's pre-dispatch check will then see them without an extra round trip:
 
    ```bash
    ~/.local/bin/paperflow-claim-files claim <work-task-id> <path1> <path2> ...
@@ -229,8 +229,8 @@ A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-actio
 
 | Step | What happens |
 |---|---|
-| 1. Click | Browser POSTs to `localhost:8766/simplify` with `{doc_path, goal_id}` |
-| 2. Bridge | Spawns leaning-pass subagent (`claude --print` + `lib/simplify-leaning-pass-brief.md`) |
+| 1. Click | Browser POSTs to `localhost:8767/paperflow/simplify` with `{doc_path, goal_id}` |
+| 2. Aux daemon | Spawns leaning-pass subagent (`claude --print` + `lib/simplify-leaning-pass-brief.md`) |
 | 3. Structural gate | `bin/paperflow-simplify-verify` checks Mermaid count, H2 hierarchy, bound decisions, no fabricated URLs |
 | 4. Verification gate | Second subagent (`lib/simplify-verification-brief.md`) returns `PASS:` / `FAIL:` |
 | 5. Land | Both PASS → `kind:event` task on `branch:simplified-<n>` parented to the source doc's last event; sidecar HTML at `~/.paperflow/events/<id>.html` |
@@ -240,7 +240,7 @@ A "Simplify" button surfaces on every plan, spec, and grill HTML — a sub-actio
 
 **Idempotence.** Re-running Simplify on an already-simplified doc may yield further reduction or none — the gate fails the no-meaningful-change case as a structural-fail or a verification `FAIL: no reduction`.
 
-**Accept / Reject.** When a `branch:simplified-*` node is selected on the rail, the rail surfaces Accept / Reject controls. Accept calls `POST /simplify/accept` — bridge writes the simplified payload back to the source doc on disk and relabels the event from `branch:simplified-<n>` to `branch:main`. Reject calls `POST /simplify/reject` with an optional reason — bridge runs `bd close <event-id> --reason …`.
+**Accept / Reject.** When a `branch:simplified-*` node is selected on the rail, the rail surfaces Accept / Reject controls. Accept calls `POST /paperflow/simplify/accept` — the aux daemon writes the simplified payload back to the source doc on disk and relabels the event from `branch:simplified-<n>` to `branch:main`. Reject calls `POST /paperflow/simplify/reject` with an optional reason — the aux daemon runs `bd close <event-id> --reason …`.
 
 **Recoverability.** The parent event is always click-jump-recoverable from the rail; the source HTML on disk is unchanged until the user explicitly accepts.
 

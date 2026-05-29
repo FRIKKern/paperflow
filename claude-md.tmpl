@@ -200,13 +200,13 @@ When a plan touches the UI — HTML, CSS, JSX, TSX, Vue, Svelte, Tailwind, styli
 
 paperflow's orchestrator follows a hard subagent-dispatch rule with concrete numeric thresholds, a pre-write checkpoint, and a structured commit-message marker. The rule is the architecture — the main session is for orchestration, decisions, and synthesis; subagents do the work.
 
-The single source of truth lives at `lib/shared-thresholds.md` in the paperflow repo. Each non-exempt skill body (`/paperflow:{goal,plan,build,review,install}`) carries an inlined copy refreshed on every `bash install.sh` run between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels.
+The single source of truth lives at `lib/shared-thresholds.md` in the paperflow repo. Each non-exempt skill body (`/paperflow:{goal,plan,build,review,install,autopilot}`) carries an inlined copy refreshed on every `bash install.sh` run between `<!-- BEGIN paperflow-thresholds -->` / `<!-- END paperflow-thresholds -->` sentinels.
 
 See the BEGIN/END paperflow-thresholds block in any skill body for the current thresholds, exempt list, and the `Subagent-Run: <task-id>` commit-message convention. `bin/paperflow-audit-orchestrator-budget` flags commits over the 30-LOC gate that lack the trailer.
 
 # Subagents
 
-paperflow ships a tight roster of four named agents in the plugin's `agents/` directory. Each one has a tool palette declared in YAML frontmatter — the runtime physically refuses calls outside its lane. Skills dispatch by named agent instead of `general-purpose` so the wrong tool is unreachable instead of merely discouraged.
+paperflow ships a tight roster of five named agents in the plugin's `agents/` directory. Each one has a tool palette declared in YAML frontmatter — the runtime physically refuses calls outside its lane. Skills dispatch by named agent instead of `general-purpose` so the wrong tool is unreachable instead of merely discouraged.
 
 | Agent | Tools | Use for |
 |---|---|---|
@@ -214,6 +214,7 @@ paperflow ships a tight roster of four named agents in the plugin's `agents/` di
 | `paperflow-code-editor` | `Read · Write · Edit · MultiEdit · Glob · Grep · Bash` | Source-code edits, helper scripts, tests, install.sh changes. Has `Bash` for verification (`bash -n`, `jq empty`, test suites). |
 | `paperflow-researcher` | `Read · Glob · Grep · WebFetch · WebSearch` | Read-only investigation — codebase exploration, web research, code review. No `Write` → cannot accidentally fix while reviewing. |
 | `paperflow-bd-keeper` | `Bash · Read` | Beads-only ceremony — `bd create / claim / close / dep add / list / show`, `file-claim:<path>` label work. No `Write/Edit` → cannot touch source. |
+| `paperflow-cmux-verifier` | `Bash · Read` | Runs `paperflow-doc-verify <url>` once against a freshly-written doc and returns a one-line PASS/WARN/FAIL/SKIP verdict. Read-only — cannot edit docs or mutate Beads. |
 
 Skills (`/paperflow:plan`, `/paperflow:build`, `/paperflow:review`, `/paperflow:goal`) name the default agent in their dispatch step. Fall back to `general-purpose` only when a single task crosses categories (rare; e.g. a meta-skill that needs both research and source edits in one shot).
 

@@ -191,7 +191,7 @@ When a review approves a build that ships UI work, the changelog HTML lands at `
 ## Artifact
 
 - A review-task in Beads linked to the build-task and to the review phase-task. Closed on approval; closed (with build-task re-opened) on rejection.
-- A PR thread / merged branch / audit HTML at `~/docs/paperflow/audits/<slug>/index.html`, depending on flow.
+- A PR thread / merged branch / audit HTML at `~/docs/paperflow/audits/<date>-<slug>/index.html`, depending on flow.
 - `~/.paperflow/statusline.txt` refreshed.
 
 ## Beads commands
