@@ -50,15 +50,35 @@ case "$FILE_PATH" in
     URL="http://localhost:8767/$REL"
 
     # --- Barkpark takeover (convergence MVP, masterplan Figure 6) -----------
-    # When --with-barkpark is enabled, papers open INSIDE Barkpark via a
-    # Phoenix LiveView (no reload, by construction) — driven by the
-    # event-on-save.sh seam. In that mode the cmux goto-reload below is the
-    # very "avid refresh" bug Figure 6 calls out, so it must NOT run: the
-    # LiveView is the surface. Detect the same U5 signal event-on-save uses
-    # (env var present, or the install-written env file exists) and bow out.
-    # When Barkpark is NOT enabled this is a no-op and the path below is
-    # entirely unchanged — no regression.
+    # When --with-barkpark is enabled, the paper is owned by Barkpark's
+    # PaperLive — event-on-save.sh (sibling hook) POSTs the body and any
+    # tab already on /papers/<slug> updates via PubSub with no reload (the
+    # "avid refresh" bug Figure 6 calls out). For FIRST-time open of a paper,
+    # spawn a tab pointing at the Barkpark URL. macOS `open` is idempotent —
+    # if Chrome already has a tab at that exact URL it reuses it (no extra
+    # tab) and triggers no reload; otherwise a tab opens. Either way the
+    # cmux goto-reload below is bypassed: the LiveView is the surface.
+    # When Barkpark is NOT enabled this whole block is skipped and the
+    # original daemon-URL path runs unchanged.
     if [ -n "${BARKPARK_INGEST_URL:-}" ] || [ -f "$HOME/.paperflow/barkpark.env" ]; then
+      SLUG="$(/usr/bin/basename "$FILE_PATH" .html)"
+      BARKPARK_PAPER_URL="http://localhost:4000/papers/$SLUG"
+      OPEN_RC=0
+      OPEN_OUT="$(/usr/bin/open "$BARKPARK_PAPER_URL" 2>&1)" || OPEN_RC=$?
+      # Best-effort log; same shape as the dispatch-paths below so dock/auto-
+      # open-log readers stay happy. NEVER fails the hook (|| true everywhere)
+      # because event-on-save already did the load-bearing work.
+      if [ -d "$HOME/.paperflow" ]; then
+        /usr/bin/env jq -nc \
+          --arg ts       "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --arg url      "$BARKPARK_PAPER_URL" \
+          --arg dispatch "barkpark-open" \
+          --arg slug     "$SLUG" \
+          --arg response "$OPEN_OUT" \
+          --argjson exit "$OPEN_RC" \
+          '{ts:$ts, url:$url, dispatch:$dispatch, slug:$slug, response:$response, exit:$exit}' \
+          >> "$HOME/.paperflow/auto-open.log" 2>/dev/null || true
+      fi
       exit 0
     fi
 
