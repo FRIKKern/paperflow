@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# paperflow-intents-drain — V1 bash poller for the Barkpark → paperflow intent
+# queue. Reads pending intents via `paperflow-intents --json`, acts on each by
+# event_type, then marks the intent processed via `paperflow-intents --mark`.
+#
+# Modes:
+#   --once    Run one sweep and exit (used by ad-hoc invocation, smoke tests).
+#   --loop    Run sweeps forever, sleeping 10s between them.
+#
+# This is bash 3.2 compatible — no associative arrays, no parameter-case
+# modifiers, no mapfile. Designed to be safe to invoke when the Barkpark store
+# is unreachable: the sweep just no-ops with a logged warning.
+#
+# V1 SCOPE: no LaunchAgent here. Wiring the daemon under launchd is a separate
+# user-decision step. This binary is the thing that decision will run.
+
+LOG_FILE="$HOME/.paperflow/intents-drain.log"
+BARKPARK_ENV_FILE="$HOME/.paperflow/barkpark.env"
+DAEMON_URL="${PAPERFLOW_DAEMON_URL:-http://localhost:8767}"
+LOOP_SLEEP="${PAPERFLOW_INTENTS_DRAIN_SLEEP:-10}"
+
+# Where simplify-* event candidate HTML files are staged on disk. The
+# leaning-pass writer drops `<branch>.html` here; this drainer reads it on
+# `simplify-accept` (to copy into the source doc) and on `simplify-reject`
+# (to move into the rejected/ side-channel for audit).
+SIMPLIFY_CANDIDATE_DIR="$HOME/.paperflow/simplify-candidates"
+SIMPLIFY_REJECTED_DIR="$HOME/.paperflow/simplify-rejected"
+DOCS_ROOT="$HOME/docs/paperflow"
+
+# Locate the paperflow-intents helper next to this script.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTENTS_BIN="$SCRIPT_DIR/paperflow-intents"
+
+mkdir -p "$(dirname "$LOG_FILE")"
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$LOG_FILE"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: paperflow-intents-drain [--once | --loop | --help]
+
+  --once     Run a single drain sweep and exit.
+  --loop     Loop forever, sleeping between sweeps (default 10s; override via
+             PAPERFLOW_INTENTS_DRAIN_SLEEP).
+  --help     Show this help.
+
+Env / config:
+  ~/.paperflow/barkpark.env is sourced if present (BARKPARK_INGEST_URL,
+  BARKPARK_INTENTS_URL, BARKPARK_API_URL, BARKPARK_INGEST_TOKEN).
+  PAPERFLOW_DAEMON_URL overrides the doc.js button-route base
+  (default http://localhost:8767).
+
+All activity is appended to ~/.paperflow/intents-drain.log.
+EOF
+}
+
+# Source barkpark.env if present so paperflow-intents inherits the same
+# token/URL config when invoked by us.
+if [ -f "$BARKPARK_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$BARKPARK_ENV_FILE" 2>/dev/null || true
+fi
+
+have_jq() { command -v jq >/dev/null 2>&1; }
+
+# Forward an action:* intent to the daemon's button-route endpoint (the same
+# /build endpoint doc.js POSTs to from rendered articles). We synthesize a
+# minimal target — the daemon resolves it against its session registry.
+forward_action_intent() {
+  intent_json="$1"
+  if ! have_jq; then
+    log "forward_action_intent: jq missing — cannot extract fields"
+    return 1
+  fi
+  event_type="$(printf '%s' "$intent_json" | jq -r '.event_type // ""')"
+  paper_slug="$(printf '%s' "$intent_json" | jq -r '.paper_slug // ""')"
+  goal_id="$(printf '%s' "$intent_json" | jq -r '.goal_id // ""')"
+  branch="$(printf '%s' "$intent_json" | jq -r '.branch // ""')"
+  payload_html="$(printf '%s' "$intent_json" | jq -r '.payload_html // ""')"
+
+  message="paperflow intent ${event_type}"
+  [ -n "$paper_slug" ] && message="$message · paper=${paper_slug}"
+  [ -n "$branch" ]     && message="$message · branch=${branch}"
+  [ -n "$goal_id" ]    && message="$message · goal=${goal_id}"
+  if [ -n "$payload_html" ]; then
+    snip="$(printf '%s' "$payload_html" | tr '\n' ' ' | cut -c1-200)"
+    message="$message · payload=${snip}"
+  fi
+
+  body="$(printf '%s' "$message" | jq -Rs --arg et "$event_type" --arg slug "$paper_slug" --arg goal "$goal_id" --arg branch "$branch" '{
+    target: {},
+    message: .,
+    intent: { event_type: $et, paper_slug: $slug, goal_id: $goal, branch: $branch }
+  }')"
+
+  if ! curl --max-time 10 -fsS -X POST \
+        -H "Content-Type: application/json" \
+        --data "$body" \
+        "${DAEMON_URL%/}/build" >>"$LOG_FILE" 2>&1; then
+    log "forward_action_intent: POST ${DAEMON_URL%/}/build failed for ${event_type}"
+    return 1
+  fi
+  return 0
+}
+
+# Resolve a paper_slug to its source HTML file under ~/docs/paperflow/**.
+# First match wins. Echoes the path on stdout; empty string when not found.
+resolve_doc_path() {
+  slug="$1"
+  [ -z "$slug" ] && { printf ''; return 0; }
+  # Strip a trailing .html if the slug already includes the extension.
+  case "$slug" in
+    *.html) base="${slug%.html}" ;;
+    *) base="$slug" ;;
+  esac
+  if [ -d "$DOCS_ROOT" ]; then
+    found="$(find "$DOCS_ROOT" -type f -name "${base}.html" 2>/dev/null | head -n 1)"
+    printf '%s' "$found"
+  else
+    printf ''
+  fi
+}
+
+# Mark one intent as processed via the read-side helper.
+mark_processed() {
+  id="$1"
+  if "$INTENTS_BIN" --mark "$id" >>"$LOG_FILE" 2>&1; then
+    log "marked ${id}"
+    return 0
+  fi
+  log "mark ${id} FAILED"
+  return 1
+}
+
+handle_intent() {
+  intent_json="$1"
+  if ! have_jq; then
+    log "handle_intent: jq missing — skipping"
+    return 1
+  fi
+  id="$(printf '%s' "$intent_json" | jq -r '.id // ""')"
+  event_type="$(printf '%s' "$intent_json" | jq -r '.event_type // ""')"
+  paper_slug="$(printf '%s' "$intent_json" | jq -r '.paper_slug // ""')"
+  branch="$(printf '%s' "$intent_json" | jq -r '.branch // ""')"
+
+  if [ -z "$id" ]; then
+    log "handle_intent: empty id, skipping"
+    return 1
+  fi
+
+  log "handling id=${id} type=${event_type} slug=${paper_slug} branch=${branch}"
+
+  case "$event_type" in
+    action:*)
+      if forward_action_intent "$intent_json"; then
+        log "forwarded action ${event_type} for ${id}"
+      else
+        log "forward FAILED for ${id} — marking processed anyway to avoid loop"
+      fi
+      mark_processed "$id" || true
+      ;;
+    simplify-request)
+      log "simplify-request ${id}: leaning-pass not yet wired"
+      mark_processed "$id" || true
+      ;;
+    simplify-accept)
+      if [ -z "$branch" ]; then
+        log "simplify-accept ${id}: no branch on intent, marking processed without merge"
+        mark_processed "$id" || true
+        return 0
+      fi
+      candidate="$SIMPLIFY_CANDIDATE_DIR/${branch}.html"
+      if [ ! -f "$candidate" ]; then
+        log "simplify-accept ${id}: no candidate on disk at ${candidate}, marking processed without merge"
+        mark_processed "$id" || true
+        return 0
+      fi
+      source_doc="$(resolve_doc_path "$paper_slug")"
+      if [ -z "$source_doc" ] || [ ! -f "$source_doc" ]; then
+        log "simplify-accept ${id}: could not resolve paper_slug=${paper_slug} under ${DOCS_ROOT}, marking processed without merge"
+        mark_processed "$id" || true
+        return 0
+      fi
+      verify_json="$("$SCRIPT_DIR/paperflow-simplify-verify" "$source_doc" "$candidate" 2>>"$LOG_FILE" || true)"
+      ok="$(printf '%s' "$verify_json" | jq -r '.ok // false' 2>/dev/null || echo false)"
+      if [ "$ok" = "true" ]; then
+        if cp "$candidate" "$source_doc" 2>>"$LOG_FILE"; then
+          log "simplify-accept ${id}: merged ${candidate} → ${source_doc}"
+        else
+          log "simplify-accept ${id}: cp FAILED ${candidate} → ${source_doc}"
+        fi
+      else
+        log "simplify-accept ${id}: verify FAIL, NOT merging — ${verify_json}"
+      fi
+      mark_processed "$id" || true
+      ;;
+    simplify-reject)
+      mkdir -p "$SIMPLIFY_REJECTED_DIR"
+      if [ -z "$branch" ]; then
+        log "simplify-reject ${id}: no branch on intent, marking processed"
+        mark_processed "$id" || true
+        return 0
+      fi
+      candidate="$SIMPLIFY_CANDIDATE_DIR/${branch}.html"
+      if [ -f "$candidate" ]; then
+        if mv "$candidate" "$SIMPLIFY_REJECTED_DIR/${branch}.html" 2>>"$LOG_FILE"; then
+          log "simplify-reject ${id}: moved ${candidate} → ${SIMPLIFY_REJECTED_DIR}/${branch}.html"
+        else
+          log "simplify-reject ${id}: mv FAILED for ${candidate}"
+        fi
+      else
+        log "simplify-reject ${id}: no candidate at ${candidate}, nothing to move"
+      fi
+      mark_processed "$id" || true
+      ;;
+    *)
+      log "unknown event_type '${event_type}' for ${id} — marking processed"
+      mark_processed "$id" || true
+      ;;
+  esac
+}
+
+sweep_once() {
+  if ! have_jq; then
+    log "sweep_once: jq is required but missing on PATH"
+    return 1
+  fi
+  if ! body="$("$INTENTS_BIN" --json 2>>"$LOG_FILE")"; then
+    log "sweep_once: paperflow-intents --json failed (Barkpark unreachable?)"
+    return 0
+  fi
+  count="$(printf '%s' "$body" | jq -r '.intents | length' 2>/dev/null || echo 0)"
+  if [ "${count:-0}" = "0" ]; then
+    log "sweep_once: no pending intents"
+    return 0
+  fi
+  log "sweep_once: ${count} pending intent(s)"
+  # bash 3.2: use while-read over jq -c output rather than mapfile.
+  printf '%s' "$body" | jq -c '.intents[]' | while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    handle_intent "$line" || log "handle_intent returned non-zero (continuing)"
+  done
+}
+
+main() {
+  mode="${1:-}"
+  case "$mode" in
+    -h|--help|"")
+      usage
+      ;;
+    --once)
+      log "----- drain start (once) -----"
+      sweep_once
+      log "----- drain end -----"
+      ;;
+    --loop)
+      log "----- drain start (loop, sleep=${LOOP_SLEEP}s) -----"
+      while :; do
+        sweep_once || log "sweep returned non-zero"
+        sleep "$LOOP_SLEEP"
+      done
+      ;;
+    *)
+      echo "paperflow-intents-drain: unknown argument '$mode'" >&2
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

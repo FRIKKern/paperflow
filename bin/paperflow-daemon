@@ -639,11 +639,12 @@ function handleSpawnContinuation(req, res) {
 }
 
 // ── 410-Gone shape for the deferred-followup endpoints ─────────────
+// Rail endpoints (goal-path, diff, event/:id) no longer 410 — they reverse-
+// proxy to barkpark /v1/rail/* (see proxyToBarkparkRail below). The
+// remaining entries are still genuinely deferred (intents-drain owns
+// simplify/accept|reject; navigate is unmoved).
 const DEFERRED_410 = {
-  '/paperflow/goal-path':         'goal-path-rail-followup',
-  '/paperflow/event':             'event-log-followup',
   '/paperflow/event/active':      'event-log-followup',
-  '/paperflow/diff':              'diff-modal-followup',
   '/paperflow/simplify':          'simplify-followup',
   '/paperflow/simplify/status':   'simplify-followup',
   '/paperflow/simplify/accept':   'simplify-followup',
@@ -653,8 +654,70 @@ const DEFERRED_410 = {
 
 function isDeferred(pathname) {
   if (DEFERRED_410[pathname] !== undefined) return DEFERRED_410[pathname];
-  if (pathname.startsWith('/paperflow/event/')) return 'event-log-followup';
   return null;
+}
+
+// ── reverse-proxy: paperflow rail → barkpark /v1/rail/* ────────────
+// goal-path, diff, and event/:id (NOT event/active — that stays daemon-
+// local) are served by barkpark on :4000. We rewrite the path prefix
+// /paperflow/ → /v1/rail/ and forward verbatim, injecting the bearer.
+const BARKPARK_HOST  = '127.0.0.1';
+const BARKPARK_PORT  = 4000;
+const BARKPARK_TOKEN = process.env.BARKPARK_TOKEN || 'barkpark-dev-token';
+
+// Decide whether a request should be reverse-proxied to barkpark rail.
+// Returns the rewritten /v1/rail/* path or null when it should NOT proxy.
+function railProxyPath(pathname) {
+  if (pathname === '/paperflow/goal-path') return '/v1/rail/goal-path';
+  if (pathname === '/paperflow/diff')      return '/v1/rail/diff';
+  // /paperflow/event/:id → /v1/rail/event/:id, but explicitly exclude
+  // /paperflow/event/active (daemon-local pointer write).
+  if (pathname.startsWith('/paperflow/event/')) {
+    const rest = pathname.slice('/paperflow/event/'.length);
+    if (!rest || rest === 'active') return null;
+    return '/v1/rail/event/' + rest;
+  }
+  return null;
+}
+
+function proxyToBarkparkRail(req, res, forwardPath, urlSearch) {
+  const targetPath = forwardPath + (urlSearch || '');
+  const headers = {
+    'Authorization': 'Bearer ' + BARKPARK_TOKEN
+  };
+  // Forward useful inbound headers (Content-Type, Accept) but drop hop-
+  // by-hop entries and the Host header.
+  if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type'];
+  if (req.headers['accept'])       headers['Accept']       = req.headers['accept'];
+
+  const upstream = http.request({
+    host:    BARKPARK_HOST,
+    port:    BARKPARK_PORT,
+    method:  req.method,
+    path:    targetPath,
+    headers
+  }, upRes => {
+    const outHeaders = {};
+    if (upRes.headers['content-type'])   outHeaders['Content-Type']   = upRes.headers['content-type'];
+    if (upRes.headers['content-length']) outHeaders['Content-Length'] = upRes.headers['content-length'];
+    res.writeHead(upRes.statusCode || 502, outHeaders);
+    upRes.pipe(res);
+  });
+
+  upstream.on('error', err => {
+    if (err && err.code === 'ECONNREFUSED') {
+      return jsonRes(res, 503, {
+        ok:    false,
+        error: 'barkpark-down',
+        hint:  'launchctl kickstart -k gui/$(id -u)/dev.pelle.barkpark'
+      });
+    }
+    logLine(`rail-proxy: upstream error ${err && err.code || ''} ${err && err.message || ''}`);
+    jsonRes(res, 502, errEnv('rail-proxy-error', err && err.message || 'upstream failed'));
+  });
+
+  // Pipe inbound body verbatim (works for GET/POST/etc).
+  req.pipe(upstream);
 }
 
 // ── livereload (WebSocket + fs.watch + /livereload.js) ─────────────
@@ -952,6 +1015,14 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && pathname === '/paperflow/spawn-continuation') {
     return handleSpawnContinuation(req, res);
+  }
+
+  // ── rail reverse-proxy: paperflow → barkpark /v1/rail/* ──────────
+  // goal-path, diff, and event/:id are served by barkpark on :4000.
+  // event/active is intentionally excluded (daemon-local pointer).
+  const railTarget = railProxyPath(pathname);
+  if (railTarget) {
+    return proxyToBarkparkRail(req, res, railTarget, url.search);
   }
 
   // ── deferred-followup 410-Gone rows ──────────────────────────────

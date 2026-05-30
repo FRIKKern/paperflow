@@ -132,7 +132,27 @@ case "$FILE_PATH" in
       WORKSPACE="$(printf '%s' "$DETECT_JSON" | /usr/bin/env jq -r '.workspace // empty' 2>/dev/null || true)"
       CMUX_VER="$(printf '%s' "$DETECT_JSON" | /usr/bin/env jq -r '.version // empty' 2>/dev/null || true)"
       SIDECAR="$HOME/.paperflow/cmux-docs-surface.${WORKSPACE}.handle"
+      DEAD_SIDECAR="$HOME/.paperflow/cmux-docs-surface.${WORKSPACE}.dead"
       HANDLE=""
+
+      # Negative-cache check: if a recent dead-marker exists (<600s), skip
+      # the cmux branch entirely and fall straight through to OS open.
+      # Prevents the slow TabManager-not-available retry on every save.
+      if [ -n "$WORKSPACE" ] && [ -f "$DEAD_SIDECAR" ]; then
+        DEAD_TS="$(/usr/bin/env jq -r '.ts // 0' "$DEAD_SIDECAR" 2>/dev/null || echo 0)"
+        NOW_TS="$(/bin/date +%s 2>/dev/null || echo 0)"
+        DEAD_AGE=$(( NOW_TS - DEAD_TS ))
+        if [ "$DEAD_AGE" -ge 0 ] && [ "$DEAD_AGE" -lt 600 ]; then
+          DISPATCH="cmux-fallback"
+          RESPONSE="cmux skipped: negative-cache fresh ($DEAD_AGE s old)"
+          CMUX_ON=false
+        else
+          trash "$DEAD_SIDECAR" 2>/dev/null || rm -f "$DEAD_SIDECAR"
+        fi
+      fi
+    fi
+
+    if [ "$CMUX_ON" = "true" ]; then
 
       if [ -n "$WORKSPACE" ] && [ -f "$SIDECAR" ]; then
         HANDLE="$(/usr/bin/env jq -r '.handle // empty' "$SIDECAR" 2>/dev/null || true)"
@@ -177,6 +197,19 @@ case "$FILE_PATH" in
           # Spawn failed or no surface= token — fall through to OS browser.
           RESPONSE="cmux browser open failed (rc=$SPAWN_RC): $SPAWN_OUT"
           DISPATCH="cmux-fallback"
+          # Negative-cache: if the failure was 'TabManager not available',
+          # write a dead-marker sidecar so subsequent saves skip the cmux
+          # branch entirely for 600s. Avoids paying the slow retry cost
+          # on every doc save when cmux has no browser-capable tab manager.
+          if [ -n "$WORKSPACE" ] && printf '%s' "$SPAWN_OUT" | /usr/bin/grep -q 'TabManager not available'; then
+            mkdir -p "$HOME/.paperflow" 2>/dev/null || true
+            DEAD_NOW="$(/bin/date +%s 2>/dev/null || echo 0)"
+            /usr/bin/env jq -nc \
+              --argjson ts "$DEAD_NOW" \
+              --arg reason "tab-manager-unavailable" \
+              '{ts:$ts, reason:$reason}' \
+              > "$DEAD_SIDECAR" 2>/dev/null || true
+          fi
         fi
       fi
     fi
@@ -228,7 +261,7 @@ case "$FILE_PATH" in
     VERIFY_LOG="$LOG_DIR/doc-verify.log"
     VERIFY_FAIL_LOG="$LOG_DIR/doc-verify-failures.log"
     VERIFY_URL="$URL"
-    if [ "$DISPATCH" = "open" ]; then
+    if [ "$DISPATCH" = "open" ] || [ "$DISPATCH" = "cmux-fallback" ]; then
       # Non-cmux fallback — skip the verifier, log one SKIP line.
       /usr/bin/env jq -nc \
         --arg state "SKIP" \

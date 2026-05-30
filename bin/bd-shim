@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/Users/pelle/.nvm/versions/node/v22.22.0/bin/node
 // bd-shim — paperflow's bd-CLI-compatible wrapper that translates a subset
 // of `bd` invocations into HTTP calls against Barkpark's /v1/tasks surface
 // (the W7b step 1 controller, paperflow-rx0). Unknown subcommands fall

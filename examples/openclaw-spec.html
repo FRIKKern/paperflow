@@ -1,4 +1,10 @@
 <!doctype html>
+<!--
+  TEMPLATE NOTE: this example is served under /examples/; in production specs live at
+  ~/docs/paperflow/specs/. Action buttons (Create plan, Grill the spec) are injected by
+  doc.js when the path contains "/specs/". When you copy this template, place the new
+  file under specs/ — the path is load-bearing.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -208,6 +214,7 @@ clearly cannot help with.</pre>
 <p>Next: the implementation plan — file write, fresh-session check, two smoke tests (auto-execute fires; suggest-only prints without running).</p>
 
 <script>
+  // example values — generated per-doc by ~/.local/bin/paperflow-target
   // Embedded at write-time by the spec generator (see
   // ~/.local/bin/paperflow-target).
   window.CLAUDE_TARGET = {

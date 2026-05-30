@@ -3,7 +3,13 @@
 <head>
 <meta charset="utf-8">
 <title>Questionnaire: Add dark mode to the docs viewer</title>
+<link rel="stylesheet" href="/paperflow/_lib/doc.css">
 <link rel="stylesheet" href="/paperflow/_lib/grill.css">
+<script>
+  // Example values — generated per-doc by ~/.local/bin/paperflow-target
+  window.CLAUDE_TARGET = /* paste output of ~/.local/bin/paperflow-target */ {};
+  window.DOC_PATH = "example-questionnaire.html";
+</script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>
   mermaid.initialize({
@@ -52,17 +58,19 @@ omit <code>recommendation</code> — discovery questions don't always have a pic
 window.GRILL = {
   plan: "2026-05-05-dark-mode-docs-viewer.html",
   kind: "questionnaire",
-  goalId: "paperflow-XXXX",
-  target: {
-    term_program: "cmux",
-    cmux_cli: "/Applications/cmux.app/Contents/Resources/bin/cmux",
-    cmux_workspace: "641A75F0-9BA3-42EB-B71F-8660D6257787",
-    cmux_surface: "surface:2",
-    tty: null,
-    term_session_id: "",
-    tmux_pane: "",
-    pid: null
-  },
+  goalId: /* REPLACE_WITH_GOAL_BD_ID — e.g. "paperflow-a1b2" */ "",
+  // target shape moved to window.CLAUDE_TARGET above; this `target:` was
+  // pre-bridge-migration leftover and is no longer read by grill.js.
+  // target: {
+  //   term_program: "cmux",
+  //   cmux_cli: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+  //   cmux_workspace: "641A75F0-9BA3-42EB-B71F-8660D6257787",
+  //   cmux_surface: "surface:2",
+  //   tty: null,
+  //   term_session_id: "",
+  //   tmux_pane: "",
+  //   pid: null
+  // },
   questions: [
     {
       id: "q1",
@@ -195,6 +203,7 @@ window.GRILL = {
 };
 </script>
 <script src="/paperflow/_lib/grill.js"></script>
+<script src="/paperflow/_lib/doc.js"></script>
 
 </body>
 </html>

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # PostToolUse hook for Write|Edit:
 # When the touched file is a paperflow doc HTML AND a Goal is active in the
-# repo containing the file, POST to claude-bridge:8766/event with
-# {goal_id, event_type, source_doc, parent_event?, payload_html}. The bridge
-# creates a kind:event Beads task under the goal-task and writes the
-# sidecar HTML to ~/.paperflow/events/<event-id>.html.
+# repo containing the file, POST to barkpark's /v1/paperflow/papers ingest
+# (default http://localhost:4000, overridable via BARKPARK_INGEST_URL in
+# ~/.paperflow/barkpark.env) with {slug, event_type, source_doc, body_html,
+# goal_id?, parent_event?}. Barkpark upserts the paper and, because
+# event_type is non-empty, appends a paper_events row as a side-effect
+# (Barkpark.Content.maybe_append_paper_event/3) — that row is what the
+# goal-path rail reads back. The legacy claude-bridge:8766/event route was
+# retired with the convergence MVP and the standalone aux-daemon is a
+# deprecated shim past its grace period.
 #
 # Quiet on success. Quiet on "no active goal" (the rail just won't render
 # until the user opens a Goal). Errors print to stderr but never block the
@@ -108,27 +113,47 @@ case "$SRC_REL" in /*|*/*) ;; *) SRC_REL="${FILE_PATH#*/docs/superpowers/}" ;; e
 # escape newlines/quotes correctly. Cap at ~512 KB to avoid bloating bd.
 PAYLOAD_HTML="$(/usr/bin/head -c 524288 "$FILE_PATH" 2>/dev/null || true)"
 
+# Source the Barkpark pairing file early so this event POST lands at the
+# same endpoint as the mirror block below. The legacy aux-daemon on :8766
+# was retired with the convergence MVP; barkpark's POST /v1/paperflow/papers
+# upserts the paper AND appends a paper_events row as a side-effect whenever
+# `event_type` is non-empty (see Barkpark.Content.maybe_append_paper_event/3).
+# A second event-only route is not provided — this is the documented contract.
+BARKPARK_ENV_FILE="$HOME/.paperflow/barkpark.env"
+if [ -z "${BARKPARK_INGEST_URL:-}" ] && [ -f "$BARKPARK_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$BARKPARK_ENV_FILE" 2>/dev/null || true
+fi
+EVENT_INGEST_URL="${BARKPARK_INGEST_URL:-http://localhost:4000/v1/paperflow/papers}"
+EVENT_SLUG="$(/usr/bin/basename "$FILE_PATH" .html)"
+
 # Build JSON body via jq so quoting/newlines survive. When GOAL_ID is empty
-# the save is "attributed-while-detached" — the bridge handles the no-parent
-# case by labelling the event accordingly.
+# the save is "attributed-while-detached" — barkpark treats a missing goal_id
+# as an unattributed event row (no FK enforcement, just stored as NULL).
+# `slug` + `body_html` are the required keys for /v1/paperflow/papers; the
+# `event_type` side-effect appends the paper_events row.
 BODY="$(/usr/bin/env jq -nc \
+  --arg slug       "$EVENT_SLUG" \
   --arg goal_id    "$GOAL_ID" \
   --arg event_type "$EVT" \
   --arg source_doc "$SRC_REL" \
   --arg parent     "$PARENT_EVENT" \
   --arg payload    "$PAYLOAD_HTML" \
-  '{event_type: $event_type, source_doc: $source_doc}
+  '{slug: $slug, event_type: $event_type, source_doc: $source_doc, body_html: $payload}
    + (if $goal_id != "" then {goal_id: $goal_id} else {detached: true} end)
-   + (if $parent  != "" then {parent_event: $parent} else {} end)
-   + (if $payload != "" then {payload_html: $payload} else {} end)' 2>/dev/null || true)"
+   + (if $parent  != "" then {parent_event: $parent} else {} end)' 2>/dev/null || true)"
 
 [ -n "$BODY" ] || exit 0
 
-# ── POST to bridge. 2s timeout — never block the write hook.
-RESP="$(/usr/bin/curl -s --max-time 2 \
-  -H 'Content-Type: application/json' \
-  --data-binary "$BODY" \
-  http://127.0.0.1:8766/event 2>/dev/null || true)"
+# ── POST to barkpark. 2s timeout — never block the write hook. Bearer token
+# optional (matches the mirror block contract: when unset, barkpark's
+# RequireIngestToken plug rejects 401 and the hook silently moves on).
+set -- /usr/bin/curl -s --max-time 2 \
+  -H 'Content-Type: application/json'
+if [ -n "${BARKPARK_INGEST_TOKEN:-}" ]; then
+  set -- "$@" -H "Authorization: Bearer ${BARKPARK_INGEST_TOKEN}"
+fi
+RESP="$("$@" --data-binary "$BODY" "$EVENT_INGEST_URL" 2>/dev/null || true)"
 
 # ── Optional: if the active-event-base was set AND the request succeeded,
 # ── log to ~/.paperflow/event-log.jsonl (separate from auto-open.log).

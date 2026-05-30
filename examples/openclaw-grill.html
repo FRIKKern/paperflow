@@ -3,7 +3,13 @@
 <head>
 <meta charset="utf-8">
 <title>Grill: OpenClaw Handoff</title>
+<link rel="stylesheet" href="/paperflow/_lib/doc.css">
 <link rel="stylesheet" href="/paperflow/_lib/grill.css">
+<script>
+  // Example values — generated per-doc by ~/.local/bin/paperflow-target
+  window.CLAUDE_TARGET = {};
+  window.DOC_PATH = "openclaw-grill.html";
+</script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>
   mermaid.initialize({
@@ -41,6 +47,7 @@ The plan picks "auto-execute vs suggest-only" as the load-bearing distinction, b
 <script>
 window.GRILL = {
   plan: "2026-05-02-openclaw-handoff-design.html",
+  kind: "grill",
   target: {
     term_program: "Apple_Terminal",
     tty: "/dev/ttys007",
@@ -291,6 +298,7 @@ window.GRILL = {
 };
 </script>
 <script src="/paperflow/_lib/grill.js"></script>
+<script src="/paperflow/_lib/doc.js"></script>
 
 </body>
 </html>

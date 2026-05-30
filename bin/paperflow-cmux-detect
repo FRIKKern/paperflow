@@ -53,12 +53,34 @@ if ! "$CMUX_BIN" browser --help >/dev/null 2>&1; then
     exit 1
 fi
 
-# 5. Current surface — cmux injects CMUX_SURFACE_ID (UUID) in real
+# 5. TabManager availability — `cmux browser list` will fail (or stderr
+# 'TabManager not available') when the workspace has no browser-capable
+# tab manager attached. Without this gate, every doc save retries the
+# slow spawn path and stalls the PostToolUse hook by ~12s. Wrapped with
+# a 2s hard cap via perl-alarm to avoid hangs.
+TM_OUT="$(/usr/bin/perl -e '
+    my $secs = shift @ARGV;
+    my $pid = fork() // die "fork: $!";
+    if ($pid == 0) { exec @ARGV; die "exec: $!" }
+    $SIG{ALRM} = sub { kill "TERM", $pid; sleep 1; kill "KILL", $pid; waitpid $pid, 0; exit 124 };
+    alarm $secs;
+    waitpid $pid, 0;
+    alarm 0;
+    my $rc = $?;
+    exit($rc & 0x7f ? 128 + ($rc & 0x7f) : ($rc >> 8));
+' -- 2 "$CMUX_BIN" browser list --workspace "$CMUX_WORKSPACE_ID" 2>&1)" || TM_RC=$?
+TM_RC="${TM_RC:-0}"
+if [ "$TM_RC" != "0" ] || printf '%s' "$TM_OUT" | /usr/bin/grep -q 'TabManager not available'; then
+    emit_off "tab-manager-unavailable" "$VERSION"
+    exit 1
+fi
+
+# 6. Current surface — cmux injects CMUX_SURFACE_ID (UUID) in real
 # environments; CMUX_SURFACE_REF was the spec's wishful naming and
 # is never set in practice (B2 paperflow-crs finding 2026-05-17).
 CUR_SURFACE="${CMUX_SURFACE_REF:-${CMUX_SURFACE_ID:-${CMUX_SURFACE:-}}}"
 
-# 6. Workspace identifier — prefer the UUID from $CMUX_WORKSPACE_ID
+# 7. Workspace identifier — prefer the UUID from $CMUX_WORKSPACE_ID
 # (matches the daemon's /sessions/discover view and the session-register
 # hook). cmux current-workspace returns a short ref like "workspace:1"
 # which would drift from the daemon's UUID-keyed registry.

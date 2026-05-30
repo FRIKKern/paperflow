@@ -40,7 +40,9 @@ code reads and writes through the helper:
 
     paperflow-active-scope --read goal       # current scope's active goal
     paperflow-active-scope --write goal <id> # set it
+    paperflow-active-scope --clear           # drop both pointers for this scope
     paperflow-active-scope --list-all        # see every scope's state
+    paperflow-active-scope --migrate-legacy  # copy unscoped → current-scope pointers
     paperflow-active-scope --resolve         # debug: print current scope token
 
 Two cmux workspaces work on different Goals without colliding. Within one
@@ -78,7 +80,7 @@ Use the documented classes — `.eyebrow`, `.byline`, `.ingress`, `<figure>` + `
     open http://localhost:8767/paperflow/specs/<filename>.html
     open http://localhost:8767/paperflow/plans/<filename>.html
 
-`paperflow-daemon` LaunchAgent serves `~/docs/paperflow/` on port 8767 — single host-scoped daemon that owns sessions/docs/build/marker/discover endpoints plus the static-file fallback.
+`paperflow-daemon` LaunchAgent serves `~/docs/paperflow/` on port 8767 — single host-scoped daemon that owns sessions/docs/build/marker/discover endpoints plus the static-file fallback. The shared renderers under `/paperflow/_lib/*` (doc.css, doc.js, grill.{css,js}, live-render.{css,js}, mermaid-zoom.{css,js}, goal-path-rail.{css,js}, diff-modal.js, text-diff.js, simplify-button.js) are **copied** from `<repo>/lib/*` into `~/docs/paperflow/_lib/` at install time by `install.sh` and re-copied by `paperflow-doctor` (see `bin/paperflow-doctor:489-498`) — the daemon then serves them as plain static files. Edits to `lib/*` do not take effect until `paperflow-doctor` (or `bash install.sh`) re-runs the copy.
 
 <!-- paperflow:cmux-only:begin -->
 ## cmux doc surface (default viewer + verifier)
@@ -109,6 +111,8 @@ Get the target via:
 
     ~/.local/bin/paperflow-target
 
+CLI launcher: `bin/pf` wraps the common skill invocations — `pf goal`, `pf autopilot`, `pf_spawn_and_send` — so you don't have to type the `/paperflow:` prefix from a terminal.
+
 ## Live-render
 
 Live-render is **mandatory and on by default** for every paperflow HTML — `doc.js` injects `live-render.{css,js}` on every load. The script itself short-circuits when `location.hostname` isn't in the allowlist (`localhost`, `127.0.0.1`, `::1`), so printed PDFs, emailed copies, and USB exports never try to open a WebSocket they can't reach. To opt out from a specific page (e.g. a fixed-snapshot demo), set:
@@ -119,7 +123,7 @@ Live-render is **mandatory and on by default** for every paperflow HTML — `doc
 
 ## Goal path (right-rail)
 
-Every paperflow doc loaded with an active Goal in scope renders a 240px sticky right-rail showing the Goal's lifecycle as a Mermaid `gitGraph`. The rail tracks **events**, not doc revisions — `goal-opened`, `questionnaire-written`, `questionnaire-answered`, `plan-written`, `plan-grilled`, `phase-advanced`, `goal-snapshot`, `goal-closed`. Events live as `kind:event` Beads tasks parented to the goal-task, with HTML payloads at `~/.paperflow/events/<event-task-id>.html`. The bridge's `GET /goal-path?goal=<id>` wraps the `bd list` query; `GET /event/<id>` serves a sidecar; `GET /diff?from=&to=` computes line-level diffs via the vendored `lib/text-diff.js` (no CDN, no jsdiff).
+Every paperflow doc loaded with an active Goal in scope renders a 240px sticky right-rail showing the Goal's lifecycle as a Mermaid `gitGraph`. The rail tracks **events**, not doc revisions — `goal-opened`, `questionnaire-written`, `questionnaire-answered`, `plan-written`, `plan-grilled`, `phase-advanced`, `goal-snapshot`, `goal-closed`. Events live as `kind:event` Beads tasks parented to the goal-task, with HTML payloads at `~/.paperflow/events/<event-task-id>.html`. The bridge's `GET /paperflow/goal-path?goal=<id>`, `GET /paperflow/event/<id>`, and `GET /paperflow/diff?from=&to=` endpoints are currently **deferred / 410-Gone** (see `bin/paperflow-daemon` `DEFERRED_410` table — followup labels `goal-path-rail-followup`, `event-log-followup`, `diff-modal-followup`); the Barkpark-side replacement lives behind `bin/paperflow-intents`. Vendored line-level diffs use `lib/text-diff.js` (no CDN, no jsdiff).
 
 Walk-back: clicking an older event in the rail writes its id to `<repo>/.paperflow/active-event-base` (a tiny pointer file alongside `active-goal` / `active-phase`). The next save reads the pointer, parents the new event there, and lands it on a fresh `branch:alt-<n>`. The hook clears the pointer after the branched event is created. Shift-click two distinct nodes to open the diff modal.
 
@@ -139,7 +143,7 @@ Every plan, spec, and grill HTML carries a **Simplify** button. One click runs a
 
 The gate is the never-worse guarantee — Mermaid figures, H2 hierarchy, bound decisions, and outbound URLs must all survive. Failures don't create rail noise; they append one line to `~/.paperflow/simplify-failures.log`.
 
-Implementation lives in `/paperflow:plan` (Simplify sub-action). No new skill — the 7/7 cap holds.
+Implementation lives in `/paperflow:plan` (Simplify sub-action). No new skill — the 8/8 cap holds.
 
 ## Questionnaires (upfront discovery)
 
@@ -152,7 +156,7 @@ Artifact: `~/docs/paperflow/questionnaires/<date>-<slug>-questionnaire.html`. Re
 <!-- paperflow:cmux-only:begin -->
 # paperflow Dock
 
-paperflow surfaces its working memory in cmux's right-side Dock via four feeds rendered by a single long-running daemon. The daemon (`~/.local/bin/paperflow-dock-daemon`, Node.js, no deps) polls Beads on a 2-second internal cadence and serves cached output on a UNIX socket at `~/.paperflow/dock.sock`. Each Dock pane runs `watch -n 5 paperflow-dock-feed <name>` — the client is ~15 LOC of bash that `nc -U`s the socket and prints. The four feeds:
+paperflow surfaces its working memory in cmux's right-side Dock via five feeds rendered by a single long-running daemon. The daemon (`~/.local/bin/paperflow-dock-daemon`, Node.js, no deps) polls Beads on a 2-second internal cadence and serves cached output on a UNIX socket at `~/.paperflow/dock.sock`. Each Dock pane runs `watch -n 5 paperflow-dock-feed <name>` — the client is ~15 LOC of bash that `nc -U`s the socket and prints. The five feeds (four daemon-served; `doctor-status` is file-backed and bypasses the socket):
 
 | Feed | What it shows |
 |---|---|
@@ -160,6 +164,7 @@ paperflow surfaces its working memory in cmux's right-side Dock via four feeds r
 | `bd-ready` | top of `bd ready --label phase-<active>` |
 | `goal-path` | recent `kind:event` rows for goal+phase, sorted desc |
 | `auto-open-log` | tail of `~/.paperflow/auto-open.log` |
+| `doctor-status` | file-backed liveness probe at `~/.paperflow/dock-feeds/doctor-status` (bypasses the daemon socket) |
 
 Config lives at `${XDG_CONFIG_HOME:-$HOME/.config}/cmux/dock.json` — installed skip-on-existing; pass `bash install.sh --reset-dock` to overwrite (backup at `dock.json.bak.<ts>`). Daemon liveness is probed via the socket; install.sh respawns when unresponsive (via `cmux new-workspace --command` if cmux is available, else `nohup` background).
 
@@ -182,7 +187,7 @@ The statusline composes from a pre-rendered cache at `~/.paperflow/statusline.tx
 
 # Doc review (mandatory)
 
-Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/paperflow/{specs,plans,grills,notes,changelog,goals,audits}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Iterate up to 3 times to fix syntax errors before handing the URL to the user.
+Every paperflow doc write goes through `paperflow-validate` automatically — a PostToolUse hook fires on Write|Edit of any HTML under `~/docs/paperflow/{notes,specs,plans,grills,changelog,goals,missions,questionnaires}/`, parses every Mermaid block (both `<pre class="mermaid">` and grill-style JS-literal `diagram:` strings), and surfaces failures as a `<system-reminder>` so Claude sees them before reporting the URL. Iterate up to 3 times to fix syntax errors before handing the URL to the user.
 
 # Visual evidence
 
@@ -220,4 +225,4 @@ Skills (`/paperflow:plan`, `/paperflow:build`, `/paperflow:review`, `/paperflow:
 
 # File-claim coordination
 
-`bin/paperflow-claim-files` (installed at `~/.local/bin/paperflow-claim-files`) is the orchestrator's pre-dispatch check. Before sending a writing subagent at files X and Y, run `paperflow-claim-files check X Y` — exit 0 means no overlap with any in-progress task; exit 2 returns JSON listing the conflicting tasks. On clean check, `paperflow-claim-files claim <task-id> X Y` adds `file-claim:<path>` Beads labels to the active task. The discipline lives in `/paperflow:build` and `/paperflow:plan` SKILL bodies.
+`bin/paperflow-claim-files` (installed at `~/.local/bin/paperflow-claim-files`) is the orchestrator's pre-dispatch check. Before sending a writing subagent at files X and Y, run `paperflow-claim-files check X Y` — exit 0 means no overlap with any in-progress task; exit 2 returns JSON listing the conflicting tasks. On clean check, `paperflow-claim-files claim <task-id> X Y` adds `file-claim:<path>` Beads labels to the active task. When the task closes, `paperflow-claim-files release <task-id>` strips every `file-claim:*` label off it so the paths free up for the next claimer. The discipline lives in `/paperflow:build` and `/paperflow:plan` SKILL bodies.

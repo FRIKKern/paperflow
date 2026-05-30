@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 //
 // paperflow-dock-daemon — UNIX socket server that polls Beads on a 2 s
-// internal cadence and serves four cached feeds to thin bash clients.
+// internal cadence and serves five cached feeds to thin bash clients
+// (four served from cache; doctor-status is file-backed).
 //
-// Feeds: active-context · bd-ready · goal-path · auto-open-log.
+// Feeds: active-context · bd-ready · goal-path · auto-open-log · doctor-status.
 //
 // Lifecycle: writes ~/.paperflow/dock-daemon.pid; listens on
 // ~/.paperflow/dock.sock; SIGTERM/SIGINT close socket + remove PID + exit 0.
